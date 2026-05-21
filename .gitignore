@@ -1,0 +1,21 @@
+# 虚拟环境
+venv/
+.env
+
+# Python 编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS 系统文件
+.DS_Store
+
+# 数据文件（可选 - 如果不想上传大的数据文件）
+# data/*.csv
+
+# 日志文件
+*.log
+
+# 测试输出
+test_*.py
