@@ -52,15 +52,16 @@ class PortfolioManager:
         Args:
             name: 策略名称
             strategy: 策略实例
-            weight: 策略权重，为 None 时使用默认权重或动态计算
+            weight: 策略权重，为 None 时使用默认权重或等权分配
         """
         self.strategies[name] = strategy
         if weight is not None:
             self.weights[name] = weight
-        elif name not in self.DEFAULT_WEIGHTS:
-            temp_weight = 1.0 / (len(self.strategies) + 1)
-            self.weights[name] = temp_weight
-            self.set_weights(self.weights)
+        elif name in self.DEFAULT_WEIGHTS:
+            self.weights[name] = self.DEFAULT_WEIGHTS[name]
+        else:
+            self.weights[name] = 1.0
+        self.set_weights(self.weights)
 
     def remove_strategy(self, name: str):
         """

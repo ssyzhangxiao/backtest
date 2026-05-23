@@ -261,28 +261,41 @@ class RiskManager:
             if rm.check_stop_loss(ctx):
                 return
 
-            over_daily_loss = rm.check_daily_loss_limit(ctx)
-            over_total_position = rm.check_total_position_limit(ctx)
-
-            if over_daily_loss or over_total_position:
-                return
+            long_before = ctx.long_pos()
+            short_before = ctx.short_pos()
+            had_long = long_before is not None and long_before.shares > 0
+            had_short = short_before is not None and short_before.shares > 0
 
             strategy_fn(ctx)
 
-            long_pos = ctx.long_pos()
-            short_pos = ctx.short_pos()
+            long_after = ctx.long_pos()
+            short_after = ctx.short_pos()
 
             if ctx.buy_shares and ctx.buy_shares > 0:
-                if short_pos:
-                    ctx.buy_shares = min(ctx.buy_shares, int(short_pos.shares))
+                if had_short and short_after:
+                    ctx.buy_shares = min(ctx.buy_shares, int(short_after.shares))
+                elif had_short:
+                    ctx.buy_shares = min(ctx.buy_shares, int(short_before.shares))
                 else:
-                    ctx.buy_shares = rm.check_position_limit(ctx, ctx.buy_shares)
+                    over_daily = rm.check_daily_loss_limit(ctx)
+                    over_total = rm.check_total_position_limit(ctx)
+                    if over_daily or over_total:
+                        ctx.buy_shares = 0
+                    else:
+                        ctx.buy_shares = rm.check_position_limit(ctx, ctx.buy_shares)
 
             if ctx.sell_shares and ctx.sell_shares > 0:
-                if long_pos:
-                    ctx.sell_shares = min(ctx.sell_shares, int(long_pos.shares))
+                if had_long and long_after:
+                    ctx.sell_shares = min(ctx.sell_shares, int(long_after.shares))
+                elif had_long:
+                    ctx.sell_shares = min(ctx.sell_shares, int(long_before.shares))
                 else:
-                    ctx.sell_shares = rm.check_position_limit(ctx, ctx.sell_shares)
+                    over_daily = rm.check_daily_loss_limit(ctx)
+                    over_total = rm.check_total_position_limit(ctx)
+                    if over_daily or over_total:
+                        ctx.sell_shares = 0
+                    else:
+                        ctx.sell_shares = rm.check_position_limit(ctx, ctx.sell_shares)
 
         return wrapped_execute
 

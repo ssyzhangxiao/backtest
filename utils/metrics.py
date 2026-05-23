@@ -29,11 +29,39 @@ class MetricsCalculator:
             指标字典
         """
         metrics = {}
-        try:
-            metrics_df = result.metrics_df
-            metrics = dict(zip(metrics_df['name'], metrics_df['value']))
-        except Exception:
-            pass
+
+        # 方式1: 尝试直接访问属性
+        attr_names = [
+            'total_return_pct', 'annual_return_pct', 'max_drawdown_pct',
+            'sharpe_ratio', 'sharpe', 'sortino_ratio', 'sortino', 'calmar_ratio',
+            'win_rate', 'profit_factor', 'trade_count'
+        ]
+        for attr in attr_names:
+            if hasattr(result, attr):
+                val = getattr(result, attr)
+                metrics[attr] = val
+
+        # 方式2: 尝试 metrics_df (如果存在)
+        if hasattr(result, 'metrics_df') and result.metrics_df is not None:
+            df = result.metrics_df
+            try:
+                if 'name' in df.columns and 'value' in df.columns:
+                    # 格式: name / value 两列
+                    metrics.update(dict(zip(df['name'], df['value'])))
+                elif len(df.columns) > 0:
+                    # 格式: 指标名列，第一列是指标
+                    for col in df.columns:
+                        metrics[col] = df.iloc[0][col] if len(df) > 0 else 0
+            except Exception:
+                pass
+
+        # 方式3: 如果 result 有 __dict__，尝试从那里提取
+        if hasattr(result, '__dict__'):
+            for k, v in result.__dict__.items():
+                if not k.startswith('_') and k not in metrics:
+                    if isinstance(v, (int, float, np.integer, np.floating)):
+                        metrics[k] = v
+
         return metrics
 
     @staticmethod
@@ -52,8 +80,15 @@ class MetricsCalculator:
         metrics = {}
 
         if portfolio_df is not None and not portfolio_df.empty:
-            if 'market_value' in portfolio_df.columns:
-                equity = portfolio_df['market_value']
+            # 尝试多种可能的净值列名
+            equity_col = None
+            for col in ['equity', 'market_value', 'port_value', 'total_equity']:
+                if col in portfolio_df.columns:
+                    equity_col = col
+                    break
+            
+            if equity_col:
+                equity = portfolio_df[equity_col]
                 returns = equity.pct_change().dropna()
 
                 if len(returns) > 0:
@@ -135,9 +170,20 @@ class MetricsCalculator:
         return metrics
 
     @staticmethod
+    def _get_metric(metrics: Dict, *keys) -> float:
+        for k in keys:
+            if k in metrics:
+                return float(metrics[k])
+        return 0.0
+
+    @staticmethod
     def format_metrics_card(metrics: Dict) -> List[Dict]:
         """
         将指标格式化为前端卡片数据。
+
+        PyBroker 返回的指标键名可能为 'sharpe', 'total_return_pct' 等，
+        而 calculate_additional_metrics 使用 'sharpe_ratio', 'sortino_ratio' 等。
+        此方法同时检查多种键名变体。
 
         Args:
             metrics: 指标字典
@@ -145,17 +191,18 @@ class MetricsCalculator:
         Returns:
             卡片数据列表 [{label, value, format}]
         """
+        _g = MetricsCalculator._get_metric
         card_items = [
-            {"label": "总收益率", "value": metrics.get('total_return_pct', 0), "format": "pct"},
-            {"label": "年化收益率", "value": metrics.get('annual_return_pct', 0), "format": "pct"},
-            {"label": "最大回撤", "value": metrics.get('max_drawdown_pct', 0), "format": "pct"},
-            {"label": "Sharpe比率", "value": metrics.get('sharpe_ratio', 0), "format": "ratio"},
-            {"label": "Sortino比率", "value": metrics.get('sortino_ratio', 0), "format": "ratio"},
-            {"label": "Calmar比率", "value": metrics.get('calmar_ratio', 0), "format": "ratio"},
-            {"label": "胜率", "value": metrics.get('win_rate', 0), "format": "pct"},
-            {"label": "盈亏比", "value": metrics.get('profit_factor', 0), "format": "ratio"},
-            {"label": "交易次数", "value": metrics.get('trade_count', 0), "format": "int"},
-            {"label": "日均胜率", "value": metrics.get('daily_win_rate', 0), "format": "pct"},
+            {"label": "总收益率", "value": _g(metrics, 'total_return_pct'), "format": "pct"},
+            {"label": "年化收益率", "value": _g(metrics, 'annual_return_pct'), "format": "pct"},
+            {"label": "最大回撤", "value": _g(metrics, 'max_drawdown_pct'), "format": "pct"},
+            {"label": "Sharpe比率", "value": _g(metrics, 'sharpe_ratio', 'sharpe'), "format": "ratio"},
+            {"label": "Sortino比率", "value": _g(metrics, 'sortino_ratio', 'sortino'), "format": "ratio"},
+            {"label": "Calmar比率", "value": _g(metrics, 'calmar_ratio'), "format": "ratio"},
+            {"label": "胜率", "value": _g(metrics, 'win_rate'), "format": "pct"},
+            {"label": "盈亏比", "value": _g(metrics, 'profit_factor'), "format": "ratio"},
+            {"label": "交易次数", "value": _g(metrics, 'trade_count'), "format": "int"},
+            {"label": "日均胜率", "value": _g(metrics, 'daily_win_rate'), "format": "pct"},
         ]
         return card_items
 

@@ -19,3 +19,11 @@ __pycache__/
 
 # 测试输出
 test_*.py
+
+# 回测结果目录
+backtest_results_*/
+new_strategy_results_*/
+unified_backtest_results_*/
+
+# 配置示例文件
+backtest_config_example.json

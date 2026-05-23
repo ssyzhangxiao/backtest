@@ -284,6 +284,7 @@ class ParameterOptimizer:
                         **test_metrics,
                     }
                     rolling_results.append(result)
+                    self.results.append(result)
 
             except Exception as e:
                 logger.error(f"滚动优化测试失败: {e}")

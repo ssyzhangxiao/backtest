@@ -178,7 +178,8 @@ class DataLoader:
         if self.data_mode == "product":
             combined["product"] = combined["symbol"]
         else:
-            combined["product"] = combined["symbol"].str.extract(r"^([A-Za-z]+)")[0]
+            product_extracted = combined["symbol"].str.extract(r"^([A-Za-z]+)")[0]
+            combined["product"] = product_extracted.fillna(combined["symbol"])
 
         self._product_symbols = None
         self.all_contracts = combined
@@ -313,22 +314,29 @@ class DataLoader:
         if self.dominant_map is None:
             self.identify_dominant_contracts()
 
-        df = self.all_contracts.copy()
+        df = self.all_contracts.copy(deep=True)
 
         dominant_df = self.dominant_map.reset_index()
         dominant_df.columns = ["date", "dominant_symbol"]
         dominant_df["prev_dominant_symbol"] = dominant_df["dominant_symbol"].shift(1)
 
         df = df.merge(dominant_df, on="date", how="left")
-        df["is_dominant"] = df["symbol"] == df["dominant_symbol"]
+        
+        # 如果是品种模式，所有都是主力合约
+        if self.data_mode == "product":
+            df["is_dominant"] = True
+        else:
+            df["is_dominant"] = df["symbol"] == df["dominant_symbol"]
 
         df["rollover_flag"] = False
         if self.data_mode == "contract":
-            dominant_rows = df["is_dominant"]
-            df.loc[dominant_rows, "rollover_flag"] = (
-                df.loc[dominant_rows, "dominant_symbol"]
-                != df.loc[dominant_rows, "prev_dominant_symbol"]
-            ) & (df.loc[dominant_rows, "prev_dominant_symbol"].notna())
+            dominant_mask = df["is_dominant"]
+            rollover_condition = (
+                df.loc[dominant_mask, "dominant_symbol"]
+                != df.loc[dominant_mask, "prev_dominant_symbol"]
+            ) & df.loc[dominant_mask, "prev_dominant_symbol"].notna()
+            idx_to_set = df.index[dominant_mask][rollover_condition]
+            df.loc[idx_to_set, "rollover_flag"] = True
 
         self.full_df = df
         self.continuous_df = df[df["is_dominant"]].copy().reset_index(drop=True)

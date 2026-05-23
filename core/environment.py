@@ -23,6 +23,8 @@ class EnvironmentAdapter:
     多指标融合计算市场环境状态，输出连续趋势分数和动态权重。
     不依赖 PyBroker，纯 pandas 实现。
 
+    Note: When used in a backtest with many rows, consider caching the result.
+
     Attributes:
         adx_period: ADX 计算周期
         atr_period: ATR 计算周期
@@ -38,7 +40,7 @@ class EnvironmentAdapter:
         weight_config: 权重配置
     """
 
-    DEFAULT_WEIGHT_CONFIG = {
+    _DEFAULT_WEIGHT_CONFIG = {
         "trend_base": 0.2,
         "trend_range": 0.5,
         "reversal_base": 0.2,
@@ -56,7 +58,7 @@ class EnvironmentAdapter:
         self,
         adx_period: int = 14,
         atr_period: int = 14,
-        trend_threshold: float = 25.0,
+        trend_threshold: float = 30.0,
         trend_fast: int = 10,
         trend_slow: int = 30,
         compression_short: int = 5,
@@ -78,7 +80,7 @@ class EnvironmentAdapter:
         self.exhaustion_lookback = exhaustion_lookback
         self.regime_confirm_days = regime_confirm_days
         self.normalize_window = normalize_window
-        self.weight_config = weight_config or self.DEFAULT_WEIGHT_CONFIG.copy()
+        self.weight_config = weight_config or type(self)._DEFAULT_WEIGHT_CONFIG.copy()
 
     @staticmethod
     def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
@@ -87,6 +89,8 @@ class EnvironmentAdapter:
         tr2 = (high - prev_close).abs()
         tr3 = (low - prev_close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        if len(tr) > 0:
+            tr.iloc[0] = tr1.iloc[0]
         return tr
 
     def compute_atr(
@@ -98,18 +102,12 @@ class EnvironmentAdapter:
     ) -> pd.Series:
         tr = self._true_range(high, low, close)
         p = period or self.atr_period
-        atr = tr.rolling(window=p, min_periods=1).mean()
+        atr = tr.rolling(window=p, min_periods=p).mean()
         return atr
 
     def _compute_adx_components(
         self, high: pd.Series, low: pd.Series, close: pd.Series
     ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """
-        计算 ADX 及 ±DI，复用中间结果避免重复计算。
-
-        Returns:
-            (adx, plus_di, minus_di) 元组
-        """
         period = self.adx_period
 
         plus_dm = high.diff()
@@ -119,21 +117,21 @@ class EnvironmentAdapter:
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
 
         tr = self._true_range(high, low, close)
-        atr = tr.rolling(window=period, min_periods=1).mean()
+        atr = tr.rolling(window=period, min_periods=period).mean()
 
         atr_safe = atr.replace(0, np.nan)
         plus_di = 100 * (
-            plus_dm.rolling(window=period, min_periods=1).mean() / atr_safe
+            plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
         )
         minus_di = 100 * (
-            minus_dm.rolling(window=period, min_periods=1).mean() / atr_safe
+            minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
         )
 
         dx_denom = (plus_di + minus_di).abs()
         dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
         dx = pd.Series(dx, index=high.index)
 
-        adx = dx.rolling(window=period, min_periods=1).mean()
+        adx = dx.rolling(window=period, min_periods=period).mean()
         return adx, plus_di, minus_di
 
     def compute_adx(
@@ -148,8 +146,8 @@ class EnvironmentAdapter:
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
 
-        avg_gain = gain.rolling(window=p, min_periods=1).mean()
-        avg_loss = loss.rolling(window=p, min_periods=1).mean()
+        avg_gain = gain.rolling(window=p, min_periods=p).mean()
+        avg_loss = loss.rolling(window=p, min_periods=p).mean()
 
         rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
         rsi = 100 - 100 / (1 + rs)
@@ -157,34 +155,24 @@ class EnvironmentAdapter:
 
     @staticmethod
     def _normalize(series: pd.Series, window: int) -> pd.Series:
-        rolling_min = series.rolling(window=window, min_periods=1).min()
-        rolling_max = series.rolling(window=window, min_periods=1).max()
+        rolling_min = series.shift(1).rolling(window=window, min_periods=1).min()
+        rolling_max = series.shift(1).rolling(window=window, min_periods=1).max()
         denom = rolling_max - rolling_min
         normalized = np.where(denom > 0, (series - rolling_min) / denom, 0.5)
-        return pd.Series(normalized, index=series.index)
+        normalized = pd.Series(normalized, index=series.index)
+        return normalized.fillna(0.5)
 
     def compute_trend_strength(self, df: pd.DataFrame) -> pd.Series:
-        """
-        趋势强度比率：快慢 EMA 差 / ATR。
-
-        自适应跨品种，不依赖固定 ADX 阈值。
-        与滚动中位数比较判断是否为趋势市。
-        """
-        ema_fast = df["close"].ewm(span=self.trend_fast, min_periods=1).mean()
-        ema_slow = df["close"].ewm(span=self.trend_slow, min_periods=1).mean()
+        ema_fast = df["close"].ewm(span=self.trend_fast, min_periods=self.trend_fast).mean()
+        ema_slow = df["close"].ewm(span=self.trend_slow, min_periods=self.trend_slow).mean()
         atr = self.compute_atr(df["high"], df["low"], df["close"])
 
         trend_raw = np.where(atr > 0, (ema_fast - ema_slow).abs() / atr, 0.0)
         trend_raw = pd.Series(trend_raw, index=df.index)
+        trend_raw = trend_raw.fillna(0.0)
         return self._normalize(trend_raw, self.normalize_window)
 
     def compute_compression(self, df: pd.DataFrame) -> pd.Series:
-        """
-        波动率压缩：长周期 ATR / 短周期 ATR。
-
-        比值越大表示波动率越压缩（即将突破），
-        归一化后 compression_score 越大表示越压缩。
-        """
         atr_short = self.compute_atr(
             df["high"], df["low"], df["close"], period=self.compression_short
         )
@@ -198,75 +186,30 @@ class EnvironmentAdapter:
         return self._normalize(compression_raw, self.normalize_window)
 
     def compute_momentum_score(self, df: pd.DataFrame) -> pd.Series:
-        """
-        动量压力：RSI 偏离 50 的程度，归一化到 [0, 1]。
-        """
         rsi = self._compute_rsi(df["close"])
         momentum_raw = (rsi - 50).abs() / 50
         return self._normalize(momentum_raw, self.normalize_window)
 
     def compute_liquidity_score(self, df: pd.DataFrame) -> pd.Series:
-        """
-        流动性/扫荡反转指标：日内振幅 / ATR。
-
-        大振幅表示扫荡行为（流动性真空后反转）。
-        """
         atr = self.compute_atr(df["high"], df["low"], df["close"])
         intraday_range = df["high"] - df["low"]
         liquidity_raw = np.where(atr > 0, intraday_range / atr, 0.0)
         liquidity_raw = pd.Series(liquidity_raw, index=df.index)
+        liquidity_raw = liquidity_raw.clip(upper=10.0)
         return self._normalize(liquidity_raw, self.normalize_window)
 
     def detect_exhaustion(self, df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-        """
-        衰竭检测：价格创新高但 RSI 未创新高（看跌背离），
-        价格创新低但 RSI 未创新低（看涨背离）。
-
-        Returns:
-            (bearish_exhaustion, bullish_exhaustion) 元组
-        """
         lookback = self.exhaustion_lookback
         rsi = self._compute_rsi(df["close"])
-
-        rolling_max_close = df["close"].rolling(window=lookback, min_periods=1).max()
-        rolling_min_close = df["close"].rolling(window=lookback, min_periods=1).min()
-        rolling_max_rsi = rsi.rolling(window=lookback, min_periods=1).max()
-        rolling_min_rsi = rsi.rolling(window=lookback, min_periods=1).min()
-
-        prev_max_close = rolling_max_close.shift(lookback)
-        prev_min_close = rolling_min_close.shift(lookback)
-        prev_max_rsi = rolling_max_rsi.shift(lookback)
-        prev_min_rsi = rolling_min_rsi.shift(lookback)
-
-        bearish = (
-            (df["close"] >= prev_max_close)
-            & (rsi < prev_max_rsi)
-            & prev_max_close.notna()
-            & prev_max_rsi.notna()
-        )
-
-        bullish = (
-            (df["close"] <= prev_min_close)
-            & (rsi > prev_min_rsi)
-            & prev_min_close.notna()
-            & prev_min_rsi.notna()
-        )
-
+        rolling_max_close = df["close"].rolling(window=lookback, min_periods=lookback).max()
+        rolling_max_rsi = rsi.rolling(window=lookback, min_periods=lookback).max()
+        rolling_min_close = df["close"].rolling(window=lookback, min_periods=lookback).min()
+        rolling_min_rsi = rsi.rolling(window=lookback, min_periods=lookback).min()
+        bearish = (df["close"] == rolling_max_close) & (rsi != rolling_max_rsi) & rolling_max_close.notna()
+        bullish = (df["close"] == rolling_min_close) & (rsi != rolling_min_rsi) & rolling_min_close.notna()
         return bearish.fillna(False), bullish.fillna(False)
 
     def compute_dynamic_weights(self, trend_score: pd.Series) -> pd.DataFrame:
-        """
-        根据连续趋势分数计算动态策略权重。
-
-        趋势市时 trend 权重高，震荡市时 reversal 权重高，
-        权重随趋势分数连续变化，避免离散跳变。
-
-        Args:
-            trend_score: 趋势分数序列 (0~1)
-
-        Returns:
-            DataFrame 包含 weight_trend, weight_reversal, weight_spread 列
-        """
         cfg = self.weight_config
 
         w_trend = cfg["trend_base"] + cfg["trend_range"] * trend_score
@@ -274,6 +217,7 @@ class EnvironmentAdapter:
         w_spread = pd.Series(cfg["spread_base"], index=trend_score.index)
 
         total = w_trend + w_reversal + w_spread
+        total = total.clip(lower=1e-8)
         w_trend = w_trend / total
         w_reversal = w_reversal / total
         w_spread = w_spread / total
@@ -286,26 +230,7 @@ class EnvironmentAdapter:
             }
         )
 
-    def compute_environment(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算完整的市场环境指标并附加到 DataFrame。
-
-        新增列：
-        - atr: 平均真实波幅
-        - adx: 平均趋向指数
-        - plus_di: +DI
-        - minus_di: -DI
-        - trend_score: 趋势分数 (0~1，连续)
-        - compression_score: 波动率压缩分数 (0~1)
-        - momentum_score: 动量压力分数 (0~1)
-        - liquidity_score: 流动性分数 (0~1)
-        - bearish_exhaustion: 看跌衰竭标志
-        - bullish_exhaustion: 看涨衰竭标志
-        - market_regime: 市场状态 ('trend' / 'range'，带确认周期)
-        - weight_trend: 趋势策略动态权重
-        - weight_reversal: 反转策略动态权重
-        - weight_spread: 套利策略动态权重
-        """
+    def _compute_single_symbol(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
 
         result["atr"] = self.compute_atr(result["high"], result["low"], result["close"])
@@ -341,18 +266,23 @@ class EnvironmentAdapter:
 
         return result
 
+    def compute_environment(self, df: pd.DataFrame) -> pd.DataFrame:
+        required_cols = ['high', 'low', 'close']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"缺少必要列: {required_cols}")
+        if df.empty:
+            return df
+
+        if "symbol" in df.columns and df["symbol"].nunique() > 1:
+            results = []
+            for sym, group in df.groupby("symbol"):
+                group = group.sort_values("date")
+                results.append(self._compute_single_symbol(group))
+            return pd.concat(results, ignore_index=True)
+        else:
+            return self._compute_single_symbol(df)
+
     def get_regime_weights(self, regime: str) -> Dict[str, float]:
-        """
-        根据市场状态返回策略权重建议（兼容旧接口）。
-
-        新代码建议使用 compute_dynamic_weights 获取连续权重。
-
-        Args:
-            regime: 市场状态，'trend' 或 'range'
-
-        Returns:
-            策略权重字典 {'trend': float, 'reversal': float, 'spread': float}
-        """
         cfg = self.weight_config
         if regime == "trend":
             w_t = cfg["trend_base"] + cfg["trend_range"]
@@ -368,17 +298,6 @@ class EnvironmentAdapter:
         return {"trend": w_t / total, "reversal": w_r / total, "spread": w_s / total}
 
     def compute_for_pybroker(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算环境指标，输出格式兼容 PyBroker 注册自定义列。
-
-        列名加 env_ 前缀避免与 PyBroker 内置列冲突。
-
-        Args:
-            df: 包含 high, low, close 列的 DataFrame
-
-        Returns:
-            带有 env_ 前缀环境指标列的 DataFrame
-        """
         result = self.compute_environment(df)
         rename_map = {
             "atr": "env_atr",
@@ -397,4 +316,5 @@ class EnvironmentAdapter:
             "weight_spread": "env_weight_spread",
         }
         result = result.rename(columns=rename_map)
+        result = result.loc[:, ~result.columns.duplicated()]
         return result
