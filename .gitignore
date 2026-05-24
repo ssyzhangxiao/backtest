@@ -24,6 +24,14 @@ test_*.py
 backtest_results_*/
 new_strategy_results_*/
 unified_backtest_results_*/
+output_*/
+term_structure_backtest_results/
+
+# 临时脚本
+analyze_loss_years.py
+backtest_visualization.py
+simple_analyze.py
+md_to_html.py
 
 # 配置示例文件
 backtest_config_example.json

@@ -13,9 +13,43 @@
 | **组合管理** | 多策略组合，基于市场状态的动态权重调整 |
 | **风控系统** | 单笔止损、仓位控制、日亏损限制、展期成本容忍度 |
 | **参数优化** | 网格搜索 + 滚动窗口优化，支持 6 种优化指标 |
-| **市场状态** | 自适应多指标融合引擎（趋势强度、波动率压缩、ADX、动量、衰竭检测） |
+| **市场状态** | 市场环境分类引擎（v3，无前视偏差）：8种市场环境、9个量化指标、滚动IC权重、滚动百分位阈值 |
 | **统一回测** | 命令行驱动的一键批量回测，多策略并行对比，样本内/外分割，自动生成 HTML 报告 |
 | **可视化** | 37 种 Plotly 图表，覆盖数据概览、策略绩效、风险归因、交易执行、参数优化、市场状态六大模块 |
+
+## 数据源说明
+
+系统支持两种数据源，可互相配合使用：
+
+| 数据源 | 模块 | 类型 | 历史长度 | 加载速度 | 网络依赖 | 展期支持 |
+|--------|------|------|----------|----------|----------|----------|
+| **本地CSV** | `data_loader.py` | 品种连续/合约模式 | 最长21年（2005年起） | 0.2秒 | 无 | 品种模式无，合约模式有 |
+| **TqSdk实时** | `data_loader_tqsdk.py` | 独立合约 + 展期 | 最长10.4年（2016年起） | 2~8秒 | 需要登录 | 真实展期支持 |
+
+### 数据源对比（2016-2026 对齐窗口回测，3品种: 螺纹钢+豆粕+PTA）
+
+| 策略 | 指标 | 本地CSV | TqSdk独立+展期 |
+|------|------|---------|----------------|
+| dual_ma | 总收益率 | +6.45% | -2.25% |
+| dual_ma | 最大回撤 | -18.77% | -10.14% |
+| dual_ma | 交易笔数 | 385 | **87** |
+| rsi | 总收益率 | -10.16% | **+0.52%** |
+| rsi | 最大回撤 | -14.46% | **-5.83%** |
+| rsi | 交易笔数 | 603 | **128** |
+
+> PyBroker 的 `_pct` 指标值直接是百分比（如 6.45 即 6.45%），无需额外乘 100。
+
+**关键结论：**
+
+1. **本地CSV 与 TqSdk 回测结果可互相印证**，趋势方向一致
+2. **TqSdk 独立合约 + 展期** 大幅减少交易噪音（交易量降低 78%），回撤改善显著（~8-9pp），是更真实的回测方式
+3. **本地CSV 优势**：数据更长（21年 vs 10.4年）、零延迟、无网络依赖，适合长期回测
+4. **TqSdk 优势**：实时更新、真实合约展期，适合实时策略验证
+
+### 使用建议
+
+- **长期历史回测、参数优化** → 使用本地CSV（数据范围 2005-2026）
+- **展期策略验证、真实交易模拟** → 使用 TqSdk 独立合约模式
 
 ## 项目结构
 
@@ -29,8 +63,10 @@ backtest/
 ├── .streamlit/
 │   └── config.toml         # Streamlit 配置
 ├── core/
-│   ├── data_loader.py      # 数据加载器（合约/品种双模式）
-│   ├── environment.py      # 自适应市场状态引擎
+│   ├── data_loader.py         # 数据加载器（本地CSV，合约/品种双模式）
+│   ├── data_loader_tqsdk.py   # TqSdk 数据源（独立合约 + 展期）
+│   ├── environment.py         # 自适应市场状态引擎（旧版）
+│   ├── market_regime/        # 市场环境分类引擎（v3，无前视偏差）
 │   ├── strategies/         # 策略模块目录
 │   │   ├── __init__.py
 │   │   ├── base.py         # 策略基类
@@ -413,7 +449,7 @@ filtered_df = apply_date_filter(
 )
 ```
 
-### DataLoader — 数据加载器
+### DataLoader — 本地CSV数据加载器
 
 自动检测 CSV 格式（合约模式 vs 品种模式），识别主力合约，构建展期法连续序列。
 
@@ -429,7 +465,82 @@ pybroker_df = loader.get_pybroker_df()   # PyBroker 兼容格式
 rollover_dates = loader.get_rollover_dates()  # 展期日期表
 ```
 
-### EnvironmentAdapter — 市场状态引擎
+### TqSdkDataSource — TqSdk 实时数据源
+
+独立合约 + 展期模式，从 TqSdk 下载真实合约数据，识别每日主力合约，构建连续序列。
+
+```python
+from core.data_loader_tqsdk import TqSdkDataSource
+
+loader = TqSdkDataSource(
+    phone="手机号", password="密码",
+    symbols=["SHFE.RB", "DCE.M", "CZCE.TA"],
+    data_length=2000,           # 每个合约 K 线数，2000 ≈ 6年
+)
+loader.load_csv_files()
+loader.identify_dominant_contracts()
+loader.build_continuous_series()
+df = loader.get_pybroker_df()   # 含 is_dominant, rollover_flag, dominant_symbol 等列
+
+# 查看数据统计
+print(loader.get_data_summary())
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `phone` | str | — | TqSdk 手机号 |
+| `password` | str | — | TqSdk 密码 |
+| `symbols` | list | 核心品种 | 品种列表，如 `["SHFE.RB", "DCE.M"]` |
+| `data_length` | int | 2000 | 每个合约下载的 K 线数量（日线），2000 ≈ 6年 |
+
+### MarketRegimeDetector — 市场环境分类引擎（v3）
+
+基于多维度量化指标的市场环境分类系统，**无前视偏差**，支持8种典型市场环境类型，输出连续环境分数和动态权重。
+
+```python
+from core.market_regime import MarketRegimeDetector, RegimeConfig
+
+# 检测市场环境（兼容旧接口）
+detector = MarketRegimeDetector()
+result_df = detector.detect(df)
+
+# fit/transform模式（推荐）
+detector.fit(df_train)  # 训练参数
+result_df = detector.transform(df_test)  # 样本外预测
+
+# 样本外验证
+validation = detector.validate(df)
+print(f"KL散度: {validation.distribution_stability:.4f}")
+```
+
+#### 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **8种市场环境** | 趋势上涨/下跌、区间震荡、高/低波动、突破、牛市/熊市衰竭 |
+| **9个量化指标** | ADX、趋势方向、波动率水平、波动率压缩、动量、成交量强度、持仓量变化、布林带位置、背离强度 |
+| **滚动IC动态权重** | 基于信息系数自动调整指标权重，支持定期重算 |
+| **滚动百分位阈值** | 动态阈值避免固定值的过拟合问题 |
+| **连续环境分数** | 输出0~1连续分数，比离散标签更灵活 |
+| **确认窗口防抖动** | 状态机实现，新状态连续出现N次才切换 |
+| **fit/transform分离** | 样本外验证时不使用未来数据 |
+| **无shift(-k)** | 源码验证：无任何前视偏差代码 |
+
+#### 核心改进（v3）
+
+| 改进项 | 说明 |
+|-------|------|
+| **消除前视偏差** | 删除`future_return`，改为滚动IC权重（仅用历史数据） |
+| **fit/transform模式** | 样本内训练参数，样本外固定使用，无未来数据泄露 |
+| **背离检测修正** | 价格创新高/新低且RSI未同步创新高/新低（加`close != close.shift(1)`） |
+| **确认窗口状态机** | 不再后视检查未来天数，维护当前状态+计数器 |
+| **波动率压缩简化** | 直接使用`atr_short / atr_long` |
+| **背离纳入IC** | 新增`divergence_strength`指标，计算与未来收益的IC |
+| **阈值裁剪** | `vol_high/vol_low`、`bb_upper/bb_lower`裁剪到[0,1] |
+| **缺失列处理** | 检查必需列，volume/open_interest缺失时警告并设默认值 |
+| **类型注解** | 所有关键方法添加类型注解和文档字符串 |
+
+### EnvironmentAdapter — 市场状态引擎（旧版）
 
 多指标融合计算市场环境状态，输出连续趋势分数（0~1）和动态策略权重。
 
@@ -653,6 +764,34 @@ date,symbol,open,high,low,close,volume,open_interest
 | 机器学习 | scikit-learn |
 
 ## 更新日志
+
+### 2026-05-24
+
+#### MarketRegimeDetector v3 重大升级
+
+**消除前视偏差**
+- 删除 `_detect_single` 中全局 `future_return`（`close.pct_change(5).shift(-5)`）
+- 实现 `compute_ic_weights_rolling`：每个时间点的权重基于 `[t-window, t-1]` 历史数据
+- `validate` 方法改用 `fit/transform` 模式：样本内训练参数，样本外固定使用，无未来数据泄露
+- 源码验证：无任何 `shift(-k)` 前视偏差代码
+
+**修复逻辑错误**
+- 背离检测：添加 `close != close.shift(1)` 条件，确保价格创新高/新低
+- 确认窗口：重写为状态机实现，维护当前状态+连续计数器，不再后视检查未来天数
+- 波动率压缩：简化为直接使用 `atr_short / atr_long`
+
+**高优先级改进**
+- 纳入 `divergence_strength` 到 IC 动态权重（顶背离-1，底背离+1）
+- 动态阈值裁剪：`vol_high/vol_low`、`bb_upper/bb_lower` 裁剪到 [0,1]
+- 缺失列处理：`compute_indicators` 开头检查必需列 `{close, high, low}`，volume/open_interest 缺失时警告并设默认值
+- `validate` 收益对齐：使用 `pd.merge` 按日期对齐
+
+**推荐改进**
+- `_normalize` 新增 `lag` 参数（默认 False）
+- `detect` 新增 `verbose` 参数
+- 所有关键方法添加类型注解和文档字符串
+- 新增 `fit_transform` 方法（回测场景用）
+- 新增 `fit`、`transform` 方法
 
 ### 2026-05-23
 

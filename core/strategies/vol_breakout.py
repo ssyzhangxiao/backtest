@@ -50,8 +50,8 @@ class VolatilityBreakoutStrategy(BaseStrategy):
 
     def __init__(
         self,
-        atr_period: int = 20,
-        band_period: int = 20,
+        atr_period: int = 26,
+        band_period: int = 30,
         atr_multiplier: float = 2.0,
         position_size: float = 0.2,
         trailing_stop_atr_mult: Optional[float] = 3.0,

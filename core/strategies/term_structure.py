@@ -46,9 +46,9 @@ class TermStructureStrategy(BaseStrategy):
 
     def __init__(
         self,
-        lookback: int = 60,
-        entry_threshold: float = 5.0,
-        exit_threshold: float = 1.0,
+        lookback: int = 20,
+        entry_threshold: float = 8.0,
+        exit_threshold: float = 0.5,
         position_size: float = 0.2,
         trailing_stop_pct: Optional[float] = 0.05,
         time_stop_days: Optional[int] = None,

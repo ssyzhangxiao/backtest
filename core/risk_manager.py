@@ -90,7 +90,13 @@ class RiskManager:
         计算空头持仓的盈亏百分比。
 
         pnl_pct = pnl / cost_basis * 100
-        cost_basis = margin + pnl（因为 margin = close * shares, pnl = (entry - close) * shares）
+        cost_basis = entry_price * shares
+
+        优先使用 pos.cost_basis（PyBroker 直接提供），
+        若不可用则用 margin + pnl 反推：
+          margin = close * shares（空头保证金）
+          pnl = (entry - close) * shares
+          => margin + pnl = entry * shares = cost_basis
 
         Args:
             pos: PyBroker Position 对象
@@ -99,7 +105,18 @@ class RiskManager:
             盈亏百分比（如 -2.0 表示亏损2%）
         """
         pnl = float(pos.pnl)
-        cost_basis = float(pos.margin) + pnl
+        # 优先使用 PyBroker 直接提供的 cost_basis
+        if hasattr(pos, 'cost_basis') and pos.cost_basis is not None:
+            try:
+                cost_basis = float(pos.cost_basis)
+            except (ValueError, TypeError):
+                cost_basis = 0.0
+        else:
+            # 回退：margin + pnl = entry_price * shares
+            try:
+                cost_basis = float(pos.margin) + pnl
+            except (ValueError, TypeError, AttributeError):
+                cost_basis = 0.0
         if cost_basis <= 0:
             return 0.0
         return pnl / cost_basis * 100
