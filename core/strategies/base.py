@@ -4,10 +4,17 @@
 包含 BaseStrategy 抽象基类，提供公共展期逻辑和各策略必须实现的接口。
 """
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, TYPE_CHECKING
 
 import numpy as np
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    from pybroker import ExecContext
+else:
+    try:
+        from pybroker import ExecContext
+    except ImportError:
+        ExecContext = None  # type: ignore
 
 
 class BaseStrategy(ABC):

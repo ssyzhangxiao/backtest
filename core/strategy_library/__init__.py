@@ -42,6 +42,10 @@ class StrategyProfile:
     trailing_stop_pct: float = 0.03
     time_stop_days: int = 15
 
+    # 新增：绩效指标用于综合评分（任务要求：支持Sharpe+drawdown+turnover）
+    max_drawdown: float = 0.2
+    avg_turnover: float = 0.5
+
     # 统计
     total_backtests: int = 0
     last_updated: str = ""

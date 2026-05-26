@@ -5,12 +5,21 @@
 作为期限结构的代理变量。当价格显著高于长期均值（升水/Contango），
 做空；当价格显著低于长期均值（贴水/Backwardation），做多。
 """
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import pybroker
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    import pybroker
+    from pybroker import ExecContext
+else:
+    try:
+        import pybroker
+        from pybroker import ExecContext
+    except ImportError:
+        pybroker = None  # type: ignore
+        ExecContext = None  # type: ignore
 
 from .base import BaseStrategy
 

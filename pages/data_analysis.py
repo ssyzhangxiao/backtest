@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from utils.plots import PlotManager
-from utils.pybroker_helpers import safe_col
+from utils import safe_col
 
 
 def render_data_analysis():

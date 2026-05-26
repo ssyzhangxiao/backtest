@@ -4,12 +4,21 @@
 当短期均线上穿长期均线且 ADX 表明趋势存在时做多；
 当短期均线下穿长期均线且 ADX 表明趋势存在时做空。
 """
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import pybroker
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    import pybroker
+    from pybroker import ExecContext
+else:
+    try:
+        import pybroker
+        from pybroker import ExecContext
+    except ImportError:
+        pybroker = None  # type: ignore
+        ExecContext = None  # type: ignore
 
 from .base import BaseStrategy
 

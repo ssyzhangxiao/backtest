@@ -27,10 +27,17 @@ from dataclasses import asdict
 import pandas as pd
 import numpy as np
 from itertools import product
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, TYPE_CHECKING
 import json
 
-from pybroker import Strategy, StrategyConfig
+if TYPE_CHECKING:
+    from pybroker import Strategy, StrategyConfig
+else:
+    try:
+        from pybroker import Strategy, StrategyConfig
+    except ImportError:
+        Strategy = None  # type: ignore
+        StrategyConfig = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 

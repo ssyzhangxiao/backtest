@@ -5,12 +5,21 @@ RSI 反转策略模块。
 当 RSI 高于超买阈值时做空（回落预期）。
 仅在震荡市（ADX < 阈值）中开仓。
 """
-from typing import List
+from typing import List, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import pybroker
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    import pybroker
+    from pybroker import ExecContext
+else:
+    try:
+        import pybroker
+        from pybroker import ExecContext
+    except ImportError:
+        pybroker = None  # type: ignore
+        ExecContext = None  # type: ignore
 
 from .base import BaseStrategy
 

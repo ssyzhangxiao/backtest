@@ -53,6 +53,7 @@ import pandas as pd
 
 class MarketRegime(Enum):
     """市场环境类型枚举。"""
+
     TREND_UP = "trend_up"
     TREND_DOWN = "trend_down"
     RANGE_BOUND = "range_bound"
@@ -66,6 +67,7 @@ class MarketRegime(Enum):
 @dataclass
 class RegimeConfig:
     """市场环境分类配置。"""
+
     # ADX参数
     adx_period: int = 14
     adx_trend_percentile: float = 60.0
@@ -116,6 +118,7 @@ class RegimeConfig:
 @dataclass
 class RegimeResult:
     """市场环境识别结果。"""
+
     regime: MarketRegime
     regime_name: str
     confidence: float
@@ -126,6 +129,7 @@ class RegimeResult:
 @dataclass
 class ValidationResult:
     """样本外验证结果。"""
+
     in_sample_regime_dist: Dict[str, float]
     out_sample_regime_dist: Dict[str, float]
     distribution_stability: float  # KL散度，越小越稳定
@@ -137,9 +141,15 @@ class ValidationResult:
 
 # 用于IC计算的指标列表（含背离强度）
 IC_INDICATORS = [
-    "adx", "vol_level_norm", "compression", "rsi",
-    "bb_position", "trend_consistency", "acceleration",
-    "volume_strength", "divergence_strength",
+    "adx",
+    "vol_level_norm",
+    "compression",
+    "rsi",
+    "bb_position",
+    "trend_consistency",
+    "acceleration",
+    "volume_strength",
+    "divergence_strength",
 ]
 
 # 等权默认值
@@ -175,7 +185,9 @@ class MarketRegimeDetector:
     # 指标计算（12个量化指标）
     # ----------------------------------------------------------------
 
-    def _true_range(self, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    def _true_range(
+        self, high: pd.Series, low: pd.Series, close: pd.Series
+    ) -> pd.Series:
         """计算真实波幅。"""
         prev_close = close.shift(1)
         tr1 = high - low
@@ -186,15 +198,21 @@ class MarketRegimeDetector:
             tr.iloc[0] = tr1.iloc[0]
         return tr
 
-    def compute_atr(self, high: pd.Series, low: pd.Series, close: pd.Series,
-                    period: Optional[int] = None) -> pd.Series:
+    def compute_atr(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+        period: Optional[int] = None,
+    ) -> pd.Series:
         """计算平均真实波幅。"""
         p = period or self.config.atr_period
         tr = self._true_range(high, low, close)
         return tr.rolling(window=p, min_periods=p).mean()
 
-    def compute_adx(self, high: pd.Series, low: pd.Series,
-                    close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    def compute_adx(
+        self, high: pd.Series, low: pd.Series, close: pd.Series
+    ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """计算ADX、+DI、-DI。"""
         period = self.config.adx_period
         plus_dm = high.diff()
@@ -204,8 +222,12 @@ class MarketRegimeDetector:
         tr = self._true_range(high, low, close)
         atr = tr.rolling(window=period, min_periods=period).mean()
         atr_safe = atr.replace(0, np.nan)
-        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
-        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
+        plus_di = 100 * (
+            plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+        )
+        minus_di = 100 * (
+            minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+        )
         dx_denom = (plus_di + minus_di).abs()
         dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
         dx = pd.Series(dx, index=high.index)
@@ -259,11 +281,17 @@ class MarketRegimeDetector:
 
     def compute_trend_direction(self, close: pd.Series) -> pd.Series:
         """趋势方向（EMA间距符号），+1=上涨，-1=下跌。"""
-        ema_fast = close.ewm(span=self.config.ema_fast, min_periods=self.config.ema_fast).mean()
-        ema_slow = close.ewm(span=self.config.ema_slow, min_periods=self.config.ema_slow).mean()
+        ema_fast = close.ewm(
+            span=self.config.ema_fast, min_periods=self.config.ema_fast
+        ).mean()
+        ema_slow = close.ewm(
+            span=self.config.ema_slow, min_periods=self.config.ema_slow
+        ).mean()
         return pd.Series(np.sign(ema_fast - ema_slow), index=close.index)
 
-    def compute_trend_consistency(self, plus_di: pd.Series, minus_di: pd.Series) -> pd.Series:
+    def compute_trend_consistency(
+        self, plus_di: pd.Series, minus_di: pd.Series
+    ) -> pd.Series:
         """趋势一致性（DI差值绝对值/DI和）。"""
         denom = (plus_di + minus_di).abs()
         return pd.Series(
@@ -276,7 +304,9 @@ class MarketRegimeDetector:
         momentum = close.pct_change()
         return momentum.diff()
 
-    def detect_divergence(self, close: pd.Series, rsi: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    def detect_divergence(
+        self, close: pd.Series, rsi: pd.Series
+    ) -> Tuple[pd.Series, pd.Series]:
         """
         检测顶背离和底背离。
 
@@ -290,29 +320,28 @@ class MarketRegimeDetector:
         rolling_min_rsi = rsi.rolling(window=lb, min_periods=lb).min()
 
         # 顶背离：价格创新高 + RSI未创新高
+        # 移除 close != close.shift(1) — 价格新高后次日持平且RSI下降仍是有效背离
         bearish = (
-            (close == rolling_max_close) &
-            (close != close.shift(1)) &
-            (rsi < rolling_max_rsi.shift(1)) &
-            rolling_max_close.notna()
+            (close == rolling_max_close)
+            & (rsi < rolling_max_rsi.shift(1))
+            & rolling_max_close.notna()
         )
         # 底背离：价格创新低 + RSI未创新低
         bullish = (
-            (close == rolling_min_close) &
-            (close != close.shift(1)) &
-            (rsi > rolling_min_rsi.shift(1)) &
-            rolling_min_close.notna()
+            (close == rolling_min_close)
+            & (rsi > rolling_min_rsi.shift(1))
+            & rolling_min_close.notna()
         )
         return bearish.fillna(False), bullish.fillna(False)
 
-    def _normalize(self, series: pd.Series, lag: bool = False) -> pd.Series:
+    def _normalize(self, series: pd.Series, lag: bool = True) -> pd.Series:
         """
         滚动归一化到[0,1]。
 
         Args:
             series: 输入序列
-            lag: 是否使用shift(1)避免使用当前值。默认False，
-                 因为归一化本身是单调变换，不含未来信息。
+            lag: 是否使用shift(1)避免使用当前值。默认True，
+                 严格避免当前点参与计算min/max导致的轻微泄露。
         """
         w = self.config.normalize_window
         src = series.shift(1) if lag else series
@@ -369,13 +398,17 @@ class MarketRegimeDetector:
         result["atr"] = atr
         vol_level = atr / close.replace(0, np.nan)
         result["vol_level"] = vol_level
-        result["vol_level_norm"] = self._normalize(vol_level)
+        result["vol_level_norm"] = self._normalize(vol_level, lag=True)
 
         # 4. 波动率压缩（直接使用 atr_short / atr_long）
-        atr_short = self.compute_atr(high, low, close, period=self.config.vol_short_period)
-        atr_long = self.compute_atr(high, low, close, period=self.config.vol_long_period)
+        atr_short = self.compute_atr(
+            high, low, close, period=self.config.vol_short_period
+        )
+        atr_long = self.compute_atr(
+            high, low, close, period=self.config.vol_long_period
+        )
         compression_raw = atr_short / atr_long.replace(0, np.nan)
-        result["compression"] = self._normalize(compression_raw)
+        result["compression"] = self._normalize(compression_raw, lag=True)
 
         # 5. RSI
         rsi = self.compute_rsi(close)
@@ -420,8 +453,9 @@ class MarketRegimeDetector:
     # 动态阈值（滚动百分位数，无前视偏差）
     # ----------------------------------------------------------------
 
-    def _compute_rolling_threshold(self, series: pd.Series,
-                                    percentile: float) -> pd.Series:
+    def _compute_rolling_threshold(
+        self, series: pd.Series, percentile: float
+    ) -> pd.Series:
         """
         计算滚动百分位数阈值。
 
@@ -435,11 +469,15 @@ class MarketRegimeDetector:
             滚动阈值序列
         """
         w = self.config.threshold_window
-        return series.shift(1).rolling(
-            window=w, min_periods=max(w // 2, 20)
-        ).quantile(percentile / 100.0)
+        return (
+            series.shift(1)
+            .rolling(window=w, min_periods=max(w // 2, 20))
+            .quantile(percentile / 100.0)
+        )
 
-    def compute_dynamic_thresholds(self, indicators: pd.DataFrame) -> Dict[str, pd.Series]:
+    def compute_dynamic_thresholds(
+        self, indicators: pd.DataFrame
+    ) -> Dict[str, pd.Series]:
         """
         计算所有动态阈值。
 
@@ -478,12 +516,12 @@ class MarketRegimeDetector:
 
         # 布林带位置阈值（裁剪到[0,1]）
         bb_pos = pd.Series(indicators["bb_position"].values, index=indicators.index)
-        thresholds["bb_upper"] = self._compute_rolling_threshold(
-            bb_pos, 90.0
-        ).clip(0, 1)
-        thresholds["bb_lower"] = self._compute_rolling_threshold(
-            bb_pos, 10.0
-        ).clip(0, 1)
+        thresholds["bb_upper"] = self._compute_rolling_threshold(bb_pos, 90.0).clip(
+            0, 1
+        )
+        thresholds["bb_lower"] = self._compute_rolling_threshold(bb_pos, 10.0).clip(
+            0, 1
+        )
 
         self._dynamic_thresholds = thresholds
         return thresholds
@@ -492,8 +530,9 @@ class MarketRegimeDetector:
     # 动态权重（滚动IC，无前视偏差）
     # ----------------------------------------------------------------
 
-    def compute_ic_weights_rolling(self, indicators: pd.DataFrame,
-                                   returns: pd.Series) -> pd.DataFrame:
+    def compute_ic_weights_rolling(
+        self, indicators: pd.DataFrame, returns: pd.Series
+    ) -> pd.DataFrame:
         """
         基于滚动IC计算各时间点的动态权重。
 
@@ -562,8 +601,9 @@ class MarketRegimeDetector:
         self._ic_weights_matrix = weights_df
         return weights_df
 
-    def compute_ic_weights(self, indicators: pd.DataFrame,
-                           returns: pd.Series) -> Dict[str, float]:
+    def compute_ic_weights(
+        self, indicators: pd.DataFrame, returns: pd.Series
+    ) -> Dict[str, float]:
         """
         计算全局IC权重（兼容旧接口）。
 
@@ -597,9 +637,12 @@ class MarketRegimeDetector:
     # 环境分类
     # ----------------------------------------------------------------
 
-    def classify_regime(self, indicators: pd.DataFrame,
-                        thresholds: Optional[Dict[str, pd.Series]] = None,
-                        weights_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    def classify_regime(
+        self,
+        indicators: pd.DataFrame,
+        thresholds: Optional[Dict[str, pd.Series]] = None,
+        weights_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
         """
         基于指标进行市场环境分类。
 
@@ -641,17 +684,17 @@ class MarketRegimeDetector:
         bb_upper_arr = self._get_threshold_arr(thresholds, "bb_upper", 0.9, n)
         bb_lower_arr = self._get_threshold_arr(thresholds, "bb_lower", 0.1, n)
 
-        # 转为numpy数组
-        adx_arr = np.nan_to_num(adx.values, nan=0.0)
-        dir_arr = np.nan_to_num(trend_dir.values, nan=0.0)
-        vol_arr = np.nan_to_num(vol_level.values, nan=0.5)
-        comp_arr = np.nan_to_num(compression.values, nan=0.5)
-        rsi_arr = np.nan_to_num(rsi.values, nan=50.0)
-        bb_arr = np.nan_to_num(bb_pos.values, nan=0.5)
-        cons_arr = np.nan_to_num(trend_consistency.values, nan=0.0)
-        bearish_arr = bearish_div.values.astype(float)
-        bullish_arr = bullish_div.values.astype(float)
-        acc_arr = np.nan_to_num(acceleration.values, nan=0.0)
+        # 转为numpy数组，NaN先前向填充再补中性值（避免 hard-coded fill 扭曲早期信号）
+        adx_arr = adx.ffill().fillna(0.0).values  # ADX NaN → 0（无趋势）
+        dir_arr = trend_dir.ffill().fillna(0.0).values
+        vol_arr = vol_level.ffill().fillna(0.5).values
+        comp_arr = compression.ffill().fillna(0.5).values
+        rsi_arr = rsi.ffill().fillna(50.0).values  # RSI NaN → 50（中性）
+        bb_arr = bb_pos.ffill().fillna(0.5).values
+        cons_arr = trend_consistency.ffill().fillna(0.0).values
+        bearish_arr = bearish_div.ffill().fillna(False).values.astype(float)
+        bullish_arr = bullish_div.ffill().fillna(False).values.astype(float)
+        acc_arr = acceleration.ffill().fillna(0.0).values
 
         # 提取权重为numpy数组（每个时间点可能不同）
         if weights_df is not None:
@@ -679,100 +722,112 @@ class MarketRegimeDetector:
 
         # 趋势上涨
         s_trend_up = (
-            w_adx * adx_norm * (dir_arr > 0).astype(float) +
-            w_cons * cons_arr * (dir_arr > 0).astype(float) +
-            w_div * (1 - bearish_arr) +
-            w_acc * np.clip(acc_arr, 0, None)
+            w_adx * adx_norm * (dir_arr > 0).astype(float)
+            + w_cons * cons_arr * (dir_arr > 0).astype(float)
+            + w_div * (1 - bearish_arr)
+            + w_acc * np.clip(acc_arr, 0, None)
         )
 
         # 趋势下跌
         s_trend_down = (
-            w_adx * adx_norm * (dir_arr < 0).astype(float) +
-            w_cons * cons_arr * (dir_arr < 0).astype(float) +
-            w_div * (1 - bullish_arr) +
-            w_acc * np.clip(-acc_arr, 0, None)
+            w_adx * adx_norm * (dir_arr < 0).astype(float)
+            + w_cons * cons_arr * (dir_arr < 0).astype(float)
+            + w_div * (1 - bullish_arr)
+            + w_acc * np.clip(-acc_arr, 0, None)
         )
 
         # 区间震荡
-        s_range = (
-            w_adx * (1 - adx_norm) +
-            w_cons * (1 - cons_arr)
-        )
+        s_range = w_adx * (1 - adx_norm) + w_cons * (1 - cons_arr)
 
         # 高波动
-        vol_above = np.clip((vol_arr - vol_high_arr) / np.maximum(1 - vol_high_arr, 0.01), 0, 1)
-        s_high_vol = (
-            w_vol * vol_above +
-            w_comp * (1 - comp_arr)
+        vol_above = np.clip(
+            (vol_arr - vol_high_arr) / np.maximum(1 - vol_high_arr, 0.01), 0, 1
         )
+        s_high_vol = w_vol * vol_above + w_comp * (1 - comp_arr)
 
         # 低波动
-        vol_below = np.clip((vol_low_arr - vol_arr) / np.maximum(vol_low_arr, 0.01), 0, 1)
-        s_low_vol = (
-            w_vol * vol_below +
-            w_comp * comp_arr
+        vol_below = np.clip(
+            (vol_low_arr - vol_arr) / np.maximum(vol_low_arr, 0.01), 0, 1
         )
+        s_low_vol = w_vol * vol_below + w_comp * comp_arr
 
         # 突破
-        s_breakout = (
-            w_comp * comp_arr * 0.6 +
-            w_adx * adx_norm * 0.4
-        )
+        s_breakout = w_comp * comp_arr * 0.6 + w_adx * adx_norm * 0.4
 
         # 牛市衰竭
-        rsi_above_ob = np.clip((rsi_arr - rsi_ob_arr) / np.maximum(100 - rsi_ob_arr, 1.0), 0, 1)
-        bb_above = np.clip((bb_arr - bb_upper_arr) / np.maximum(1 - bb_upper_arr, 0.01), 0, 1)
-        s_exh_bull = (
-            w_div * bearish_arr +
-            w_rsi * rsi_above_ob +
-            w_bb * bb_above
+        rsi_above_ob = np.clip(
+            (rsi_arr - rsi_ob_arr) / np.maximum(100 - rsi_ob_arr, 1.0), 0, 1
         )
+        bb_above = np.clip(
+            (bb_arr - bb_upper_arr) / np.maximum(1 - bb_upper_arr, 0.01), 0, 1
+        )
+        s_exh_bull = w_div * bearish_arr + w_rsi * rsi_above_ob + w_bb * bb_above
 
         # 熊市衰竭
-        rsi_below_os = np.clip((rsi_os_arr - rsi_arr) / np.maximum(rsi_os_arr, 1.0), 0, 1)
-        bb_below = np.clip((bb_lower_arr - bb_arr) / np.maximum(bb_lower_arr, 0.01), 0, 1)
-        s_exh_bear = (
-            w_div * bullish_arr +
-            w_rsi * rsi_below_os +
-            w_bb * bb_below
+        rsi_below_os = np.clip(
+            (rsi_os_arr - rsi_arr) / np.maximum(rsi_os_arr, 1.0), 0, 1
         )
+        bb_below = np.clip(
+            (bb_lower_arr - bb_arr) / np.maximum(bb_lower_arr, 0.01), 0, 1
+        )
+        s_exh_bear = w_div * bullish_arr + w_rsi * rsi_below_os + w_bb * bb_below
 
         # 归一化各分数到[0,1]
-        all_raw = np.column_stack([
-            s_trend_up, s_trend_down, s_range, s_high_vol,
-            s_low_vol, s_breakout, s_exh_bull, s_exh_bear,
-        ])
+        all_raw = np.column_stack(
+            [
+                s_trend_up,
+                s_trend_down,
+                s_range,
+                s_high_vol,
+                s_low_vol,
+                s_breakout,
+                s_exh_bull,
+                s_exh_bear,
+            ]
+        )
         row_max = np.maximum(all_raw.max(axis=1), 1e-8)
         all_norm = all_raw / row_max[:, np.newaxis]
 
-        # 确定离散标签
+        # 方案A：对每个连续分数应用滚动均值平滑（与确认窗口同参数），
+        # 使离散标签与连续分数保持一致。
         regime_values = [r.value for r in MarketRegime]
-        best_idx = np.argmax(all_norm, axis=1)
+        score_df = pd.DataFrame(all_norm, columns=[f"score_{v}" for v in regime_values])
+        smooth_window = max(1, cfg.confirm_days)
+        smoothed = score_df.rolling(window=smooth_window, min_periods=1).mean()
+        smoothed_arr = smoothed.values
+
+        # 用平滑后的分数重新确定离散标签
+        best_idx = np.argmax(smoothed_arr, axis=1)
         regimes = [regime_values[i] for i in best_idx]
 
-        # 置信度 = 最高分 - 第二高分
-        sorted_scores = np.sort(all_norm, axis=1)
+        # 置信度 = 最高分 - 第二高分（基于平滑分数）
+        sorted_scores = np.sort(smoothed_arr, axis=1)
         confidences = sorted_scores[:, -1] - sorted_scores[:, -2]
 
         # 确认窗口（状态机，无后视）
-        regimes, confidences = self._apply_confirm_window(regimes, confidences, cfg.confirm_days)
+        regimes, confidences = self._apply_confirm_window(
+            regimes, confidences, cfg.confirm_days
+        )
 
         # 构建结果
-        result = pd.DataFrame({
-            "regime": regimes,
-            "regime_label": [MarketRegime(r).name for r in regimes],
-            "regime_confidence": confidences,
-        })
+        result = pd.DataFrame(
+            {
+                "regime": regimes,
+                "regime_label": [MarketRegime(r).name for r in regimes],
+                "regime_confidence": confidences,
+            }
+        )
 
-        # 输出连续分数
+        # 输出平滑后的连续分数（与确认后的标签一致）
         for i, regime in enumerate(MarketRegime):
-            result[f"score_{regime.value}"] = all_norm[:, i]
+            result[f"score_{regime.value}"] = smoothed_arr[:, i]
 
         return result
 
     @staticmethod
-    def _get_threshold_arr(thresholds: Dict[str, pd.Series],
-                           key: str, default: float, n: int) -> np.ndarray:
+    def _get_threshold_arr(
+        thresholds: Dict[str, pd.Series], key: str, default: float, n: int
+    ) -> np.ndarray:
         """从阈值字典提取numpy数组，缺失时用默认值填充。"""
         if key in thresholds:
             arr = thresholds[key].values
@@ -780,42 +835,43 @@ class MarketRegimeDetector:
         return np.full(n, default)
 
     @staticmethod
-    def _get_weight_arr(weights_df: pd.DataFrame,
-                        name: str, n: int) -> np.ndarray:
+    def _get_weight_arr(weights_df: pd.DataFrame, name: str, n: int) -> np.ndarray:
         """从权重矩阵提取numpy数组。"""
         if name in weights_df.columns:
             arr = weights_df[name].values
             return np.nan_to_num(arr, nan=EQUAL_WEIGHT)
         return np.full(n, EQUAL_WEIGHT)
 
-    def _apply_confirm_window(self, regimes: List[str],
-                               confidences: np.ndarray,
-                               confirm_days: int) -> Tuple[List[str], np.ndarray]:
+    def _apply_confirm_window(
+        self, regimes: List[str], confidences: np.ndarray, confirm_days: int
+    ) -> Tuple[List[str], np.ndarray]:
         """
-        确认窗口：状态机实现，无后视检查。
+        确认窗口：经典状态机实现，无后视检查。
 
-        维护当前确认的regime和连续计数器。
-        当新regime连续出现confirm_days次后，才正式切换。
+        维护 current（已确认的regime）和 candidate（候选regime）及连续计数。
+        只有当候选regime连续出现 confirm_days 次后，才将 current 切换为该候选。
         """
         if confirm_days <= 1 or len(regimes) == 0:
             return regimes, confidences
 
         confirmed = []
         confirmed_conf = []
-        current_regime = regimes[0]
-        counter = 1  # 当前regime已连续出现次数
+        current = regimes[0]  # 已确认的regime
+        candidate = regimes[0]  # 正在计数的候选regime
+        counter = 0  # 候选regime连续出现的次数
 
         for i in range(len(regimes)):
-            if regimes[i] == current_regime:
+            if regimes[i] == candidate:
                 counter += 1
             else:
-                counter = 1  # 新regime开始计数
+                candidate = regimes[i]
+                counter = 1
 
-            # 新regime连续出现confirm_days次才切换
+            # 候选regime连续出现confirm_days次，切换current
             if counter >= confirm_days:
-                current_regime = regimes[i]
+                current = candidate
 
-            confirmed.append(current_regime)
+            confirmed.append(current)
             confirmed_conf.append(confidences[i])
 
         return confirmed, np.array(confirmed_conf)
@@ -852,13 +908,19 @@ class MarketRegimeDetector:
 
         # 存储拟合终值（用于transform）
         if self._ic_weights_matrix is not None:
-            last_valid = self._ic_weights_matrix.dropna().iloc[-1] if len(self._ic_weights_matrix.dropna()) > 0 else None
+            last_valid = (
+                self._ic_weights_matrix.dropna().iloc[-1]
+                if len(self._ic_weights_matrix.dropna()) > 0
+                else None
+            )
             if last_valid is not None:
                 self._fitted_ic_weights = last_valid.to_dict()
 
         if self._dynamic_thresholds is not None:
             for key, series in self._dynamic_thresholds.items():
-                last_val = series.dropna().iloc[-1] if len(series.dropna()) > 0 else None
+                last_val = (
+                    series.dropna().iloc[-1] if len(series.dropna()) > 0 else None
+                )
                 if last_val is not None:
                     self._fitted_threshold_values[key] = float(last_val)
 
@@ -871,6 +933,11 @@ class MarketRegimeDetector:
 
         不重新计算IC权重和动态阈值，使用fit时的终值。
         确保无前视偏差。
+
+        局限性：长期样本外使用静态阈值可能失效（市场结构变化）。
+        短期内（约threshold_window天内）影响可接受；
+        如需长期样本外使用，建议定期重新fit或在transform中
+        维护滚动窗口继续更新阈值（当前简化实现不包含此功能）。
 
         Args:
             df: 包含OHLCV数据的DataFrame
@@ -888,6 +955,7 @@ class MarketRegimeDetector:
         indicators = self.compute_indicators(df)
 
         # 使用拟合的固定阈值（非滚动，避免样本外数据不足）
+        # 注意：此为fit结束时刻的快照，长期样本外可能漂移
         n = len(indicators)
         thresholds = {}
         for key, val in self._fitted_threshold_values.items():
@@ -895,8 +963,10 @@ class MarketRegimeDetector:
 
         # 使用拟合的固定IC权重
         weights_df = pd.DataFrame(
-            {name: self._fitted_ic_weights.get(name, EQUAL_WEIGHT)
-             for name in IC_INDICATORS},
+            {
+                name: self._fitted_ic_weights.get(name, EQUAL_WEIGHT)
+                for name in IC_INDICATORS
+            },
             index=indicators.index,
         )
 
@@ -905,15 +975,17 @@ class MarketRegimeDetector:
 
         # 合并
         indicator_cols = [c for c in indicators.columns if c not in regime_df.columns]
-        combined = pd.concat([
-            indicators[indicator_cols].reset_index(drop=True),
-            regime_df.reset_index(drop=True),
-        ], axis=1)
+        combined = pd.concat(
+            [
+                indicators[indicator_cols].reset_index(drop=True),
+                regime_df.reset_index(drop=True),
+            ],
+            axis=1,
+        )
 
         return combined
 
-    def fit_transform(self, df: pd.DataFrame,
-                      verbose: bool = False) -> pd.DataFrame:
+    def fit_transform(self, df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
         """
         拟合并转换（回测场景）。
 
@@ -951,24 +1023,89 @@ class MarketRegimeDetector:
 
         # 合并
         indicator_cols = [c for c in indicators.columns if c not in regime_df.columns]
-        combined = pd.concat([
-            indicators[indicator_cols].reset_index(drop=True),
-            regime_df.reset_index(drop=True),
-        ], axis=1)
+        combined = pd.concat(
+            [
+                indicators[indicator_cols].reset_index(drop=True),
+                regime_df.reset_index(drop=True),
+            ],
+            axis=1,
+        )
 
         # 存储拟合状态
         if weights_df is not None:
-            last_valid = weights_df.dropna().iloc[-1] if len(weights_df.dropna()) > 0 else None
+            last_valid = (
+                weights_df.dropna().iloc[-1] if len(weights_df.dropna()) > 0 else None
+            )
             if last_valid is not None:
                 self._fitted_ic_weights = last_valid.to_dict()
         if thresholds is not None:
             for key, series in thresholds.items():
-                last_val = series.dropna().iloc[-1] if len(series.dropna()) > 0 else None
+                last_val = (
+                    series.dropna().iloc[-1] if len(series.dropna()) > 0 else None
+                )
                 if last_val is not None:
                     self._fitted_threshold_values[key] = float(last_val)
         self._fitted = True
 
         return combined
+
+    # ----------------------------------------------------------------
+    # 权重映射（向前兼容 EnvironmentAdapter）
+    # ----------------------------------------------------------------
+
+    # 8种环境 → 策略类型映射
+    _REGIME_WEIGHT_MAP = {
+        "trend_up": {"trend": 0.55, "reversal": 0.15, "spread": 0.15, "momentum": 0.15},
+        "trend_down": {"trend": 0.50, "reversal": 0.20, "spread": 0.15, "momentum": 0.15},
+        "range_bound": {"trend": 0.15, "reversal": 0.55, "spread": 0.20, "momentum": 0.10},
+        "high_volatility": {"trend": 0.20, "reversal": 0.30, "spread": 0.10, "momentum": 0.40},
+        "low_volatility": {"trend": 0.25, "reversal": 0.25, "spread": 0.20, "momentum": 0.30},
+        "breakout": {"trend": 0.30, "reversal": 0.10, "spread": 0.10, "momentum": 0.50},
+        "exhaustion_bull": {"trend": 0.10, "reversal": 0.60, "spread": 0.10, "momentum": 0.20},
+        "exhaustion_bear": {"trend": 0.10, "reversal": 0.60, "spread": 0.10, "momentum": 0.20},
+    }
+
+    # 向后兼容的趋势/震荡 → 策略权重映射
+    _SIMPLE_WEIGHT_MAP = {
+        "trend": {"trend": 0.50, "reversal": 0.25, "spread": 0.25},
+        "range": {"trend": 0.20, "reversal": 0.50, "spread": 0.30},
+    }
+
+    def get_regime_weights(
+        self, regime: str, separator: str = "_"
+    ) -> Dict[str, float]:
+        """
+        根据市场环境获取策略权重分配。
+
+        支持两种输入格式:
+          1. 8种细分环境: trend_up, trend_down, range_bound, high_volatility,
+             low_volatility, breakout, exhaustion_bull, exhaustion_bear
+          2. 向后兼容的简化格式: "trend" / "range"
+             → 默认从当前活跃的细分环境中推断简化标签
+
+        Args:
+            regime: 市场环境标签
+            separator: 用于构建归一化键的分隔符，默认 "_"
+
+        Returns:
+            {策略类型: 权重} 的字典
+        """
+        # 先尝试直接匹配8种环境
+        normalized = regime.lower().strip()
+        if normalized in self._REGIME_WEIGHT_MAP:
+            return dict(self._REGIME_WEIGHT_MAP[normalized])
+
+        # 简化标签匹配（向后兼容 EnvironmentAdapter 的 "trend"/"range"）
+        if normalized in self._SIMPLE_WEIGHT_MAP:
+            return dict(self._SIMPLE_WEIGHT_MAP[normalized])
+
+        # 尝试用分隔符构建键
+        constructed = regime.lower().strip().replace("-", separator).replace(" ", separator)
+        if constructed in self._REGIME_WEIGHT_MAP:
+            return dict(self._REGIME_WEIGHT_MAP[constructed])
+
+        # 兜底: 等权分配
+        return {"trend": 0.34, "reversal": 0.33, "spread": 0.33}
 
     # ----------------------------------------------------------------
     # 主入口（兼容旧接口）
@@ -992,7 +1129,7 @@ class MarketRegimeDetector:
             symbols = df["symbol"].unique()
             for idx, sym in enumerate(symbols):
                 if verbose:
-                    print(f"处理品种 {idx+1}/{len(symbols)}: {sym}")
+                    print(f"处理品种 {idx + 1}/{len(symbols)}: {sym}")
                 group = df[df["symbol"] == sym].sort_values("date").copy()
                 result = self.fit_transform(group, verbose=verbose)
                 results.append(result)
@@ -1004,8 +1141,9 @@ class MarketRegimeDetector:
     # 样本外验证（fit/transform分离，无前视偏差）
     # ----------------------------------------------------------------
 
-    def validate(self, df: pd.DataFrame,
-                 strategy_returns: Optional[pd.Series] = None) -> ValidationResult:
+    def validate(
+        self, df: pd.DataFrame, strategy_returns: Optional[pd.Series] = None
+    ) -> ValidationResult:
         """
         样本外验证：用样本内参数对样本外分类。
 
@@ -1065,13 +1203,17 @@ class MarketRegimeDetector:
         regime_sharpe_diff = {}
         if strategy_returns is not None:
             # 按日期对齐
-            strat_df = pd.DataFrame({
-                "date": df_out["date"].values,
-                "strategy_return": strategy_returns.values[:len(df_out)]
-                if len(strategy_returns) >= len(df_out) else
-                np.pad(strategy_returns.values,
-                       (0, max(0, len(df_out) - len(strategy_returns)))),
-            })
+            strat_df = pd.DataFrame(
+                {
+                    "date": df_out["date"].values,
+                    "strategy_return": strategy_returns.values[: len(df_out)]
+                    if len(strategy_returns) >= len(df_out)
+                    else np.pad(
+                        strategy_returns.values,
+                        (0, max(0, len(df_out) - len(strategy_returns))),
+                    ),
+                }
+            )
             combined_out = result_out.copy()
             combined_out["date"] = df_out["date"].values
             combined_out = combined_out.merge(strat_df, on="date", how="left")
@@ -1093,8 +1235,9 @@ class MarketRegimeDetector:
             regime_sharpe_diff=regime_sharpe_diff,
         )
 
-    def _compute_ic_dict(self, indicators: pd.DataFrame,
-                          returns: pd.Series) -> Dict[str, float]:
+    def _compute_ic_dict(
+        self, indicators: pd.DataFrame, returns: pd.Series
+    ) -> Dict[str, float]:
         """计算各指标的IC均值（使用历史收益率）。"""
         ic_dict = {}
         for name in IC_INDICATORS:

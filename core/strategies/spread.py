@@ -5,11 +5,18 @@
 当近月-远月价差扩大时做多近月+做空远月；
 当价差缩小时反向操作。
 """
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    from pybroker import ExecContext
+else:
+    try:
+        from pybroker import ExecContext
+    except ImportError:
+        ExecContext = None  # type: ignore
 
 from .base import BaseStrategy
 

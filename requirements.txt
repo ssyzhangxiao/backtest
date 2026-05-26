@@ -1,4 +1,5 @@
 pybroker>=1.0.0
+numba>=0.56.0
 streamlit>=1.28.0
 pandas>=1.5.0
 numpy>=1.23.0

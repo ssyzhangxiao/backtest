@@ -1,7 +1,7 @@
 """数据导入页面模块。"""
 import streamlit as st
 
-from config import DATA_DIR
+from core.config import DATA_DIR
 from utils.session_state import load_data_cached, load_tqsdk_cached, compute_env_cached
 
 # TqSdk 默认账号

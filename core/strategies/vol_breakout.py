@@ -5,12 +5,21 @@
 突破下轨时做空。通道随波动率自适应变化，大波动时通道变宽，
 低波动时通道收窄。
 """
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import pybroker
-from pybroker import ExecContext
+
+if TYPE_CHECKING:
+    import pybroker
+    from pybroker import ExecContext
+else:
+    try:
+        import pybroker
+        from pybroker import ExecContext
+    except ImportError:
+        pybroker = None  # type: ignore
+        ExecContext = None  # type: ignore
 
 from .base import BaseStrategy
 

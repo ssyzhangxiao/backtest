@@ -13,9 +13,15 @@
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 
-from pybroker import ExecContext
+if TYPE_CHECKING:
+    from pybroker import ExecContext
+else:
+    try:
+        from pybroker import ExecContext
+    except ImportError:
+        ExecContext = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 

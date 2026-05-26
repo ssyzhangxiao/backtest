@@ -9,7 +9,7 @@ import plotly.express as px
 from core.optimizer import ParameterOptimizer
 from core.strategies import STRATEGY_REGISTRY
 from utils.plots import PlotManager
-from config import DATA_DIR
+from core.config import DATA_DIR
 
 
 def render_optimization(config: dict):

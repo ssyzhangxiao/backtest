@@ -3,7 +3,7 @@ import pandas as pd
 import pybroker
 from typing import Optional
 
-from config import _PYBROKER_COLUMNS
+from core.config import _PYBROKER_COLUMNS
 
 _PYBROKER_COLUMNS_REGISTERED = False
 
