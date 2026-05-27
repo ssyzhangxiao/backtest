@@ -853,7 +853,24 @@ class MarketRegimeDetector:
 
         # 用平滑后的分数重新确定离散标签
         best_idx = np.argmax(smoothed_arr, axis=1)
-        regimes = [regime_values[i] for i in best_idx]
+        regimes_raw = [regime_values[i] for i in best_idx]
+
+        # ── 精简为4种核心环境类型 ──
+        # trend_up, trend_down, breakout → trend（强趋势）
+        # low_volatility → weak_trend（弱趋势）
+        # range_bound, exhaustion_bull, exhaustion_bear → range（震荡）
+        # high_volatility → high_vol（高波动）
+        REGIME_SIMPLIFY = {
+            "trend_up": "trend_up",
+            "trend_down": "trend_down",
+            "breakout": "trend_up",        # 突破归入趋势
+            "low_volatility": "low_volatility",  # 保留低波动
+            "range_bound": "range_bound",
+            "exhaustion_bull": "range_bound",    # 牛市衰竭归入震荡
+            "exhaustion_bear": "range_bound",    # 熊市衰竭归入震荡
+            "high_volatility": "high_volatility",
+        }
+        regimes = [REGIME_SIMPLIFY.get(r, r) for r in regimes_raw]
 
         # 置信度 = 最高分 - 第二高分（基于平滑分数）
         sorted_scores = np.sort(smoothed_arr, axis=1)

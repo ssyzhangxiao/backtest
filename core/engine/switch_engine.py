@@ -49,10 +49,10 @@ class SwitchConfig:
     performance_threshold: float = -0.5  # Sharpe低于此值触发
     performance_gap_threshold: float = 0.3  # 策略间Sharpe差距阈值（保留兼容）
 
-    # 新增：综合评分最低Sharpe提升阈值（避免微小差异频繁切换）
-    min_sharpe_gap: float = 0.2
+    # 综合评分最低Sharpe提升阈值（避免微小差异频繁切换）
+    min_sharpe_gap: float = 0.15
 
-    # 新增：绩效样本最低天数（不足则强制不触发绩效切换）
+    # 绩效样本最低天数（不足则强制不触发绩效切换）
     min_samples: int = 10
 
     # 切换成本
@@ -60,14 +60,17 @@ class SwitchConfig:
     slippage_rate: float = 0.0002
     max_switching_cost_pct: float = 0.01  # 最大切换成本占比
 
-    # 冷却期（基于交易日序号）
+    # 冷却期（基于交易日序号）— 5天冷却期
     cooldown_days: int = 5
 
     # 权重过渡
     transition_days: int = 3
 
-    # 新增：无候选策略时的默认策略
+    # 无候选策略时的默认策略
     default_strategy: str = "dual_ma"
+
+    # 切换成本惩罚系数（在综合评分差中扣除预估成本）
+    cost_penalty_factor: float = 1.0
 
 
 @dataclass
@@ -143,16 +146,21 @@ class StrategySwitchEngine:
 
         score = 0.6 * Sharpe + 0.3 * (1 - max_drawdown) - 0.1 * turnover
 
-        缺失数据处理策略（优化点2）：
-          - 若整个 performance_by_regime 为空（perf 为 None/空字典），
-            返回 -inf，避免无历史数据策略被选中。
+        缺失数据处理策略：
+          - 若 performance_by_regime 为空，使用 profile 默认参数计算评分，
+            而非返回 -inf，确保无历史数据的新策略仍可被选中。
           - 若 perf 非空但缺少部分指标，通过 perf.get(key, default) 使用默认值：
             Sharpe→0, max_drawdown→profile.max_drawdown(0.2), avg_turnover→profile.avg_turnover(0.5)。
-          - 此策略在保障最低数据质量同时允许部分指标缺失。
         """
         perf = profile.get_performance(regime)
         if not perf:
-            return float("-inf")
+            # 无历史绩效数据时，使用 profile 默认参数计算中性评分
+            # 适合该环境的策略获得额外加分
+            regime_bonus = 0.1 if regime in profile.suitable_regimes else -0.1
+            dd = profile.max_drawdown
+            turnover = profile.avg_turnover
+            score = 0.6 * 0.0 + 0.3 * (1.0 - dd) - 0.1 * turnover + regime_bonus
+            return score
 
         sharpe = perf.get("sharpe", 0.0)
         # max_drawdown 以小数表示（如 0.2 = 20%），1 - max_drawdown 越大越好
@@ -487,8 +495,21 @@ class StrategySwitchEngine:
         )
         cost_acceptable = switching_cost <= max_cost if position_value > 0 else True
 
+        # ---- 成本惩罚：从评分差中扣除预估切换成本 ----
+        # 将成本转化为Sharpe等价惩罚
+        if position_value > 0 and has_position:
+            cost_penalty = (switching_cost / position_value) * cfg.cost_penalty_factor
+        else:
+            cost_penalty = 0.0
+        adjusted_score_gap = score_gap - cost_penalty
+
         # ---- 综合决策 ----
-        should_switch = (regime_triggered or perf_triggered) and cost_acceptable
+        # 成本惩罚后评分差仍需超过 min_sharpe_gap
+        should_switch = (
+            (regime_triggered or perf_triggered)
+            and cost_acceptable
+            and adjusted_score_gap > cfg.min_sharpe_gap
+        )
 
         # 预期改善：使用综合评分差（若有当前策略），否则退化为 Sharpe 差
         if current_profile is not None:

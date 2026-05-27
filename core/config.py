@@ -103,3 +103,8 @@ class BacktestConfig:
     # weekly: 每周最后一个交易日再平衡（使用 Friday，或周内最后一天）
     # monthly: 每月最后一个交易日再平衡
     rebalance_frequency: str = "none"
+
+    # ── 多策略模式（新增） ──
+    # True: 信号融合模式（多策略加权信号，不切换）
+    # False: 策略切换模式（市场环境→策略匹配切换）
+    fusion_mode: bool = False

@@ -55,7 +55,7 @@ SYMBOLS = [
 TQSDK_PHONE = "13600198250"
 TQSDK_PASSWORD = "lg123456789"
 
-# ── 系统内置 5 个策略 ──
+# ── 系统内置策略（全部5个策略） ──
 STRATEGY_NAMES = ["dual_ma", "rsi", "vol_breakout", "term_structure", "spread"]
 
 # ── 工具函数 ──
@@ -154,26 +154,22 @@ def phase2_single_strategy_baseline(ds):
 # Phase 3: 等权组合 (E2)
 # ═══════════════════════════════════════════════════════════════
 def phase3_equal_weight(ds):
-    """多策略等权重组合，PyBroker 引擎内部多 executor 并行。"""
+    """多策略信号融合组合（波动率倒数加权）。"""
     print("\n" + "=" * 60)
-    print("Phase 3: 等权组合 (E2)")
+    print("Phase 3: 信号融合组合 (E2)")
     print("=" * 60)
 
     config = BacktestConfig(
         initial_cash=INITIAL_CASH,
         commission_rate=0.0003,
         slippage_rate=0.0002,
-        strategy_weights={
-            "dual_ma": 0.25, "rsi": 0.20,
-            "vol_breakout": 0.25, "term_structure": 0.20, "spread": 0.10,
-        },
+        fusion_mode=True,  # 信号融合模式：多策略加权信号
     )
 
     try:
         runner = PyBrokerBacktestRunner(ds, config)
-        runner.register_strategies(
-            ["dual_ma", "rsi", "vol_breakout", "term_structure"]
-        )
+        # 注册3个启用策略，fusion_mode=True 时使用信号融合
+        runner.register_strategies(STRATEGY_NAMES)
 
         result = runner.run(FULL_START, FULL_END)
         kpi = extract_kpi(result)
@@ -215,13 +211,12 @@ def phase4_strategy_switching(ds):
         initial_cash=INITIAL_CASH,
         commission_rate=0.0003,
         slippage_rate=0.0002,
+        fusion_mode=False,  # 策略切换模式：市场环境→策略匹配
     )
 
     try:
         runner = PyBrokerBacktestRunner(ds, config)
-        runner.register_strategies(
-            ["dual_ma", "rsi", "vol_breakout", "term_structure"]
-        )
+        runner.register_strategies(STRATEGY_NAMES)
 
         result = runner.run(FULL_START, FULL_END)
         kpi = extract_kpi(result)
@@ -265,7 +260,7 @@ def phase5_walkforward(ds):
 
     try:
         runner = PyBrokerBacktestRunner(ds, config)
-        runner.register_strategies(["dual_ma", "rsi", "vol_breakout"])
+        runner.register_strategies(STRATEGY_NAMES)
 
         wf_result = runner.walkforward(FULL_START, FULL_END)
 
@@ -371,7 +366,7 @@ def phase7_bootstrap(ds):
 
     try:
         runner = PyBrokerBacktestRunner(ds, config)
-        runner.register_strategies(["dual_ma", "rsi", "vol_breakout"])
+        runner.register_strategies(STRATEGY_NAMES)
 
         # 先执行一次完整回测
         result = runner.run(FULL_START, FULL_END)

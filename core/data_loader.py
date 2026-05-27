@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +584,59 @@ class DataLoader:
         self.all_contracts = combined
         return combined
 
+    def load_csv_files_by_paths(self, file_paths: list) -> pd.DataFrame:
+        """
+        按指定文件路径加载 CSV 文件（仅加载目标品种）。
+
+        Args:
+            file_paths: CSV 文件路径列表
+        """
+        self.load_errors = []
+        first_format = None
+        dfs = []
+
+        for f in file_paths:
+            try:
+                df = pd.read_csv(f)
+                if df.empty:
+                    self.load_errors.append({"file": f, "error": "文件为空"})
+                    continue
+
+                fmt = self._detect_format_from_df(df)
+                if first_format is None:
+                    first_format = fmt
+                    self.data_mode = first_format
+
+                if fmt == "contract":
+                    dfs.append(df)
+                else:
+                    loaded = self._load_product_csv(f, df)
+                    if loaded is not None and not loaded.empty:
+                        dfs.append(loaded)
+            except Exception as e:
+                self.load_errors.append({"file": f, "error": str(e)})
+                continue
+
+        if not dfs:
+            raise ValueError("没有成功加载任何CSV文件")
+
+        combined = pd.concat(dfs, ignore_index=True)
+        combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+        invalid_dates = combined["date"].isna()
+        if invalid_dates.any():
+            combined = combined[~invalid_dates]
+
+        combined = combined.sort_values(["date", "symbol"]).reset_index(drop=True)
+
+        if self.data_mode == "product":
+            combined["product"] = combined["symbol"]
+        else:
+            product_extracted = combined["symbol"].str.extract(r"^([A-Za-z]+)")[0]
+            combined["product"] = product_extracted.fillna(combined["symbol"])
+
+        self.all_contracts = combined
+        return combined
+
     # ------------------------------------------------------------------
     # 统一加载方法
     # ------------------------------------------------------------------
@@ -611,71 +665,52 @@ class DataLoader:
 
     def identify_dominant_contracts(self, method: str = "open_interest") -> pd.Series:
         """
-        每日识别主力合约。
+        每日按品种识别主力合约。
+
+        对每个品种的每个交易日，分别选出持仓量最大的合约作为主力合约，
+        而非跨品种选出一个。这样每个品种每天都有自己的主力合约。
         """
         if self.all_contracts is None:
             raise RuntimeError("请先调用 load_data() 加载数据")
 
         if self.data_mode == "product":
+            # 品种模式：每行就是一个品种的数据，全部是主力
             idx = self.all_contracts.groupby("date")["open_interest"].idxmax()
             dominant = self.all_contracts.loc[idx, ["date", "symbol"]].set_index(
                 "date"
             )["symbol"]
         else:
-            # 按 date, symbol 排序，确保"第一个合约"有确定顺序
+            # 合约模式：按 (date, product) 分组，每个品种每天选一个主力
             df = self.all_contracts.sort_values(["date", "symbol"]).reset_index(drop=True)
 
-            if method == "open_interest":
-                # 先按持仓量识别主力
-                oi_idx = df.groupby("date")["open_interest"].idxmax()
-                oi_dominant = df.loc[oi_idx, ["date", "symbol", "open_interest"]].copy()
+            if "product" not in df.columns:
+                # 无 product 列时回退到跨品种识别
+                warnings.warn("数据缺少 product 列，回退到跨品种识别主力合约")
+                idx = df.groupby("date")["open_interest"].idxmax()
+                dominant = df.loc[idx, ["date", "symbol"]].set_index("date")["symbol"]
+            elif method == "open_interest":
+                # 按 (date, product) 分组，每组选持仓量最大的合约
+                oi_idx = df.groupby(["date", "product"])["open_interest"].idxmax()
+                oi_dominant = df.loc[oi_idx, ["date", "product", "symbol", "open_interest"]].copy()
 
-                # 找出 open_interest 为 0 的日期 → 回退到 volume
-                zero_oi_dates = oi_dominant[oi_dominant["open_interest"] == 0]["date"].unique()
-
-                if len(zero_oi_dates) > 0:
-                    # 对这些日期按 volume 重新识别
-                    vol_mask = df["date"].isin(zero_oi_dates)
-                    if vol_mask.any():
-                        vol_idx = (
-                            df[vol_mask].groupby("date")["volume"].idxmax()
-                        )
-                        vol_dominant = df.loc[vol_idx, ["date", "symbol", "volume"]].copy()
-
-                        # 找出 volume 也为 0 的日期 → 回退到第一个合约
-                        zero_vol_dates = vol_dominant[
-                            vol_dominant["volume"] == 0
-                        ]["date"].unique()
-
-                        if len(zero_vol_dates) > 0:
-                            # 按 symbol 排序后取每组第一个合约
-                            first_mask = df["date"].isin(zero_vol_dates)
-                            first_contracts = (
-                                df[first_mask].groupby("date")["symbol"].first()
-                            )
-                            warnings.warn(
-                                f"{len(zero_vol_dates)} 个交易日的持仓量和成交量均为零，"
-                                f"已回退到按 symbol 排序的第一个合约作为主力"
-                            )
-                            # 更新 vol_dominant 中这些日期的 symbol
-                            for dt, sym in first_contracts.items():
-                                vol_dominant.loc[
-                                    vol_dominant["date"] == dt, "symbol"
-                                ] = sym
-
-                        # 将 volume 回退结果更新到 oi_dominant
-                        for dt in zero_oi_dates:
-                            if dt in vol_dominant["date"].values:
-                                oi_dominant.loc[
-                                    oi_dominant["date"] == dt, "symbol"
-                                ] = vol_dominant.loc[
-                                    vol_dominant["date"] == dt, "symbol"
-                                ].values[0]
+                # 找出 open_interest 为 0 的记录 → 回退到 volume
+                zero_oi_mask = oi_dominant["open_interest"] == 0
+                if zero_oi_mask.any():
+                    zero_oi_keys = oi_dominant[zero_oi_mask][["date", "product"]]
+                    for _, row in zero_oi_keys.iterrows():
+                        mask = (df["date"] == row["date"]) & (df["product"] == row["product"])
+                        candidates = df[mask]
+                        if len(candidates) > 0:
+                            best = candidates.loc[candidates["volume"].idxmax()]
+                            oi_dominant.loc[
+                                (oi_dominant["date"] == row["date"]) & (oi_dominant["product"] == row["product"]),
+                                "symbol"
+                            ] = best["symbol"]
 
                 dominant = oi_dominant.set_index("date")["symbol"]
 
             elif method == "volume":
-                idx = df.groupby("date")["volume"].idxmax()
+                idx = df.groupby(["date", "product"])["volume"].idxmax()
                 dominant = df.loc[idx, ["date", "symbol"]].set_index("date")["symbol"]
             else:
                 raise ValueError(f"不支持的识别方法: {method}")
@@ -700,9 +735,22 @@ class DataLoader:
 
         dominant_df = self.dominant_map.reset_index()
         dominant_df.columns = ["date", "dominant_symbol"]
-        dominant_df["prev_dominant_symbol"] = dominant_df["dominant_symbol"].shift(1)
 
-        df = df.merge(dominant_df, on="date", how="left")
+        # 从 dominant_symbol 提取 product，用于按品种匹配
+        if "product" in df.columns:
+            dominant_df["product"] = dominant_df["dominant_symbol"].str.extract(
+                r"\.([A-Za-z]+)\d", expand=False
+            )
+            # 按 (date, product) 匹配，避免笛卡尔积
+            df = df.merge(dominant_df, on=["date", "product"], how="left")
+        else:
+            df = df.merge(dominant_df, on="date", how="left")
+
+        # 按品种计算 prev_dominant_symbol
+        if "product" in df.columns:
+            df["prev_dominant_symbol"] = df.groupby("product")["dominant_symbol"].shift(1)
+        else:
+            df["prev_dominant_symbol"] = df["dominant_symbol"].shift(1)
 
         # 如果是品种模式，所有都是主力合约
         if self.data_mode == "product":
@@ -724,19 +772,126 @@ class DataLoader:
         self.continuous_df = df[df["is_dominant"]].copy().reset_index(drop=True)
         return self.full_df
 
+    def build_spread_pairs(self) -> pd.DataFrame:
+        """
+        构建近远月合约对，将远月收盘价合并到主力合约行中。
+
+        对每个品种的每个交易日：
+          - 近月 = 当日主力合约
+          - 远月 = 同品种中持仓量第二大的合约（或按到期月份排序的下一个合约）
+
+        在 full_df 中新增列：
+          - far_symbol: 远月合约代码
+          - far_close: 远月收盘价
+          - spread: 近月收盘价 - 远月收盘价
+        """
+        if self.full_df is None:
+            self.build_continuous_series()
+
+        df = self.full_df.copy()
+
+        if self.data_mode == "product":
+            # 品种模式无法构建跨期价差，添加空列
+            df["far_symbol"] = ""
+            df["far_close"] = np.nan
+            df["spread"] = np.nan
+            self.full_df = df
+            return df
+
+        # 仅对主力合约行构建近远月对
+        dominant_rows = df[df["is_dominant"]].copy()
+
+        far_data = []
+        for date, group in dominant_rows.groupby("date"):
+            for _, row in group.iterrows():
+                product = row.get("product", "")
+                dom_symbol = row["dominant_symbol"]
+
+                # 同品种、同日、非主力的合约
+                same_product = df[
+                    (df["date"] == date)
+                    & (df.get("product", "") == product)
+                    & (df["symbol"] != dom_symbol)
+                ]
+
+                if same_product.empty:
+                    far_data.append({
+                        "date": date,
+                        "dominant_symbol": dom_symbol,
+                        "far_symbol": "",
+                        "far_close": np.nan,
+                    })
+                    continue
+
+                # 按持仓量排序，取第二大持仓量的合约作为远月
+                same_product_sorted = same_product.sort_values(
+                    "open_interest", ascending=False
+                )
+                far_row = same_product_sorted.iloc[0]
+
+                far_data.append({
+                    "date": date,
+                    "dominant_symbol": dom_symbol,
+                    "far_symbol": far_row["symbol"],
+                    "far_close": far_row["close"],
+                })
+
+        if not far_data:
+            df["far_symbol"] = ""
+            df["far_close"] = np.nan
+            df["spread"] = np.nan
+            self.full_df = df
+            return df
+
+        far_df = pd.DataFrame(far_data)
+
+        # 合并远月数据到 full_df（仅主力合约行有远月信息）
+        df = df.merge(
+            far_df[["date", "dominant_symbol", "far_symbol", "far_close"]],
+            on=["date", "dominant_symbol"],
+            how="left",
+        )
+        df["spread"] = df["close"] - df["far_close"]
+
+        self.full_df = df
+        # 更新 PYBROKER_COLUMNS
+        for col in ["far_symbol", "far_close", "spread"]:
+            if col not in self.PYBROKER_COLUMNS:
+                self.PYBROKER_COLUMNS.append(col)
+
+        return df
+
     # ------------------------------------------------------------------
     # 输出接口
     # ------------------------------------------------------------------
 
     def get_pybroker_df(self) -> pd.DataFrame:
         """
-        获取 PyBroker 兼容格式的 DataFrame。
+        获取 PyBroker 兼容格式的 DataFrame（仅主力合约，按品种拼接连续序列）。
+
+        非主力合约数据质量差且流动性不足，不应参与回测。
+        spread/term_structure 所需的远月数据通过 far_close 列注入。
+
+        关键：symbol 列使用品种代码（如 SHFE.RB）而非具体合约（如 SHFE.rb2401），
+        使 PyBroker 按品种分组运行策略，避免换月时产生大量无意义交易。
         """
         if self.full_df is None:
             self.build_continuous_series()
 
-        available = [c for c in self.PYBROKER_COLUMNS if c in self.full_df.columns]
-        result = self.full_df[available].copy()
+        # 仅输出主力合约行
+        dominant_df = self.full_df[self.full_df["is_dominant"]].copy()
+
+        # 用品种代码替代具体合约名，实现连续序列
+        # 仅在合约模式（symbol 含合约号如 rb2401）时替换，品种模式已是品种级
+        if "product" in dominant_df.columns and self.data_mode == "contract":
+            # 构建品种级 symbol：交易所.品种（如 SHFE.RB），品种统一大写
+            if "symbol" in dominant_df.columns:
+                dominant_df["exchange"] = dominant_df["symbol"].str.split(".").str[0]
+                dominant_df["symbol"] = dominant_df["exchange"] + "." + dominant_df["product"].str.upper()
+                dominant_df.drop(columns=["exchange"], inplace=True)
+
+        available = [c for c in self.PYBROKER_COLUMNS if c in dominant_df.columns]
+        result = dominant_df[available].copy()
         return result.sort_values(["date", "symbol"]).reset_index(drop=True)
 
     def get_dominant_only_df(self) -> pd.DataFrame:

@@ -46,6 +46,9 @@ class StrategyProfile:
     max_drawdown: float = 0.2
     avg_turnover: float = 0.5
 
+    # 是否启用（禁用的策略不参与切换和组合）
+    enabled: bool = True
+
     # 统计
     total_backtests: int = 0
     last_updated: str = ""
@@ -88,7 +91,7 @@ class StrategyLibrary:
             description="双均线趋势跟随策略。短期均线上穿长期均线做多，下穿做空。",
             strategy_class_name="DualMAStrategy",
             default_params={
-                "short_ma": 5, "long_ma": 20, "adx_threshold": 30.0,
+                "short_ma": 3, "long_ma": 15, "adx_threshold": 30.0,
                 "position_size": 0.2, "trailing_stop_pct": 0.03, "time_stop_days": 15,
             },
             param_ranges={
@@ -102,30 +105,30 @@ class StrategyLibrary:
             trailing_stop_pct=0.03,
         ))
 
-        # RSI反转
+        # RSI反转（v2: 趋势过滤 + 动态阈值）
         self.register(StrategyProfile(
             name="rsi",
-            description="RSI反转策略。超卖做多，超买做空，仅在震荡市开仓。",
+            description="RSI策略（v2: 趋势市顺势RSI，震荡市逆势RSI，阈值80/20适配期货波动）。",
             strategy_class_name="RSIStrategy",
             default_params={
-                "rsi_period": 14, "oversold": 30.0, "overbought": 70.0,
+                "rsi_period": 10, "oversold": 15.0, "overbought": 70.0,
                 "adx_threshold": 25.0, "position_size": 0.2,
             },
             param_ranges={
                 "rsi_period": [10, 14, 20],
-                "oversold": [20.0, 25.0, 30.0],
-                "overbought": [70.0, 75.0, 80.0],
+                "oversold": [15.0, 20.0, 25.0],
+                "overbought": [75.0, 80.0, 85.0],
             },
-            suitable_regimes=[MarketRegime.RANGE_BOUND, MarketRegime.EXHAUSTION_BULL, MarketRegime.EXHAUSTION_BEAR],
+            suitable_regimes=[MarketRegime.RANGE_BOUND, MarketRegime.EXHAUSTION_BULL, MarketRegime.EXHAUSTION_BEAR, MarketRegime.TREND_UP, MarketRegime.TREND_DOWN],
             max_position_pct=0.15,
             stop_loss_pct=0.03,
             trailing_stop_pct=0.02,
         ))
 
-        # 期限结构套利
+        # 期限结构套利（基于价格偏离长期均值的均值回归）
         self.register(StrategyProfile(
             name="term_structure",
-            description="期限结构套利策略。基于价格偏离长期均值的均值回归。",
+            description="期限结构套利策略。基于价格偏离长期均值的均值回归，升水做空、贴水做多。",
             strategy_class_name="TermStructureStrategy",
             default_params={
                 "lookback": 20, "entry_threshold": 8.0, "exit_threshold": 0.5,
@@ -148,7 +151,7 @@ class StrategyLibrary:
             description="波动率突破策略。基于ATR构建动态通道，突破上轨做多，突破下轨做空。",
             strategy_class_name="VolatilityBreakoutStrategy",
             default_params={
-                "atr_period": 26, "band_period": 30, "atr_multiplier": 2.0,
+                "atr_period": 14, "band_period": 20, "atr_multiplier": 1.5,
                 "position_size": 0.2, "trailing_stop_atr_mult": 3.0,
             },
             param_ranges={
@@ -162,10 +165,10 @@ class StrategyLibrary:
             trailing_stop_pct=0.03,
         ))
 
-        # 跨期套利
+        # 跨期套利（基于近远月价差Z-Score的均值回归）
         self.register(StrategyProfile(
             name="spread",
-            description="跨期套利策略。利用近远月价差变化获利。",
+            description="跨期套利策略。利用近远月价差Z-Score变化获利，价差扩大做空、缩小做多。",
             strategy_class_name="SpreadStrategy",
             default_params={
                 "spread_ma_period": 20, "spread_entry_threshold": 2.0,
@@ -192,9 +195,9 @@ class StrategyLibrary:
         return self._profiles.get(name)
 
     def get_strategies_for_regime(self, regime: MarketRegime) -> List[StrategyProfile]:
-        """获取适用于某市场环境的策略列表。"""
+        """获取适用于某市场环境的策略列表（仅返回启用的策略）。"""
         names = self._regime_mapping.get(regime, [])
-        return [self._profiles[n] for n in names if n in self._profiles]
+        return [self._profiles[n] for n in names if n in self._profiles and self._profiles[n].enabled]
 
     def get_best_strategy(self, regime: MarketRegime, metric: str = "sharpe") -> Optional[StrategyProfile]:
         """获取某环境下表现最好的策略。"""
@@ -211,9 +214,11 @@ class StrategyLibrary:
                 best = s
         return best
 
-    def list_all(self) -> List[StrategyProfile]:
+    def list_all(self, include_disabled: bool = False) -> List[StrategyProfile]:
         """列出所有策略。"""
-        return list(self._profiles.values())
+        if include_disabled:
+            return list(self._profiles.values())
+        return [p for p in self._profiles.values() if p.enabled]
 
     def update_performance(self, strategy_name: str, regime: MarketRegime,
                            metrics: Dict[str, float]):
