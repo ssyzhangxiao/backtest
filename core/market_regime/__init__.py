@@ -54,6 +54,7 @@ import pandas as pd
 class MarketRegime(Enum):
     """市场环境类型枚举。"""
 
+    UNKNOWN = "unknown"
     TREND_UP = "trend_up"
     TREND_DOWN = "trend_down"
     RANGE_BOUND = "range_bound"
@@ -62,6 +63,60 @@ class MarketRegime(Enum):
     BREAKOUT = "breakout"
     EXHAUSTION_BULL = "exhaustion_bull"
     EXHAUSTION_BEAR = "exhaustion_bear"
+
+
+class TrendType(Enum):
+    """市场趋势类型。"""
+
+    STRONG_UP = "strong_up"        # 强上涨趋势
+    WEAK_UP = "weak_up"            # 弱上涨趋势
+    SIDEWAYS = "sideways"          # 震荡/横盘
+    WEAK_DOWN = "weak_down"        # 弱下跌趋势
+    STRONG_DOWN = "strong_down"    # 强下跌趋势
+
+
+@dataclass
+class TrendConfig:
+    """趋势判断配置。"""
+
+    # 均线参数
+    ma_short: int = 5
+    ma_medium: int = 20
+    ma_long: int = 60
+
+    # MACD参数
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+
+    # RSI参数
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+
+    # ADX参数
+    adx_period: int = 14
+    adx_trend_threshold: float = 25.0
+    adx_strong_threshold: float = 40.0
+
+    # 波动率参数
+    atr_period: int = 14
+
+    # 状态转换
+    state_transition_threshold: float = 0.6  # 状态转换置信度阈值
+    confirm_days: int = 3  # 确认窗口天数
+    confidence_window: int = 10  # 置信度计算窗口
+
+
+@dataclass
+class TrendResult:
+    """趋势判断结果。"""
+
+    trend_type: TrendType
+    trend_name: str
+    confidence: float
+    indicators: Dict[str, float]
+    trend_scores: Dict[str, float]  # 各趋势类型的分数
 
 
 @dataclass
@@ -790,7 +845,7 @@ class MarketRegimeDetector:
 
         # 方案A：对每个连续分数应用滚动均值平滑（与确认窗口同参数），
         # 使离散标签与连续分数保持一致。
-        regime_values = [r.value for r in MarketRegime]
+        regime_values = [r.value for r in MarketRegime if r != MarketRegime.UNKNOWN]
         score_df = pd.DataFrame(all_norm, columns=[f"score_{v}" for v in regime_values])
         smooth_window = max(1, cfg.confirm_days)
         smoothed = score_df.rolling(window=smooth_window, min_periods=1).mean()
@@ -819,8 +874,8 @@ class MarketRegimeDetector:
         )
 
         # 输出平滑后的连续分数（与确认后的标签一致）
-        for i, regime in enumerate(MarketRegime):
-            result[f"score_{regime.value}"] = smoothed_arr[:, i]
+        for idx, regime_val in enumerate(regime_values):
+            result[f"score_{regime_val}"] = smoothed_arr[:, idx]
 
         return result
 
@@ -1309,3 +1364,426 @@ class MarketRegimeDetector:
             MarketRegime.EXHAUSTION_BEAR: ["dual_ma", "vol_breakout"],
         }
         return mapping.get(regime, ["dual_ma"])
+
+
+class EnhancedTrendDetector:
+    """
+    增强版市场趋势判断引擎：
+    - 多维度技术指标组合分析
+    - 状态转换逻辑与置信度
+    - 过滤机制防抖动
+    """
+
+    def __init__(self, config: Optional[TrendConfig] = None):
+        self.config = config or TrendConfig()
+        self._state_history: List[TrendType] = []
+        self._confidence_history: List[float] = []
+
+    def _compute_ma_system(
+        self, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        均线系统指标（多周期均线）。
+        包含短期、中期、长期均线及相互关系。
+        """
+        ma_short = close.rolling(window=self.config.ma_short, min_periods=self.config.ma_short).mean()
+        ma_medium = close.rolling(window=self.config.ma_medium, min_periods=self.config.ma_medium).mean()
+        ma_long = close.rolling(window=self.config.ma_long, min_periods=self.config.ma_long).mean()
+
+        ma_up = (ma_short > ma_medium) & (ma_medium > ma_long)
+        ma_down = (ma_short < ma_medium) & (ma_medium < ma_long)
+
+        spread_short_medium = (ma_short - ma_medium) / close
+        spread_medium_long = (ma_medium - ma_long) / close
+
+        pos_short = (close - ma_short) / ma_short
+        pos_medium = (close - ma_medium) / ma_medium
+        pos_long = (close - ma_long) / ma_long
+
+        return {
+            "ma_short": ma_short,
+            "ma_medium": ma_medium,
+            "ma_long": ma_long,
+            "ma_up": ma_up.astype(float),
+            "ma_down": ma_down.astype(float),
+            "spread_sm": spread_short_medium,
+            "spread_ml": spread_medium_long,
+            "pos_s": pos_short,
+            "pos_m": pos_medium,
+            "pos_l": pos_long,
+        }
+
+    def _compute_macd(
+        self, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        MACD 指标系统。
+        包含 DIF、DEA、MACD柱状线、金叉/死叉。
+        """
+        ema_fast = close.ewm(span=self.config.macd_fast, min_periods=self.config.macd_fast).mean()
+        ema_slow = close.ewm(span=self.config.macd_slow, min_periods=self.config.macd_slow).mean()
+
+        dif = ema_fast - ema_slow
+        dea = dif.ewm(span=self.config.macd_signal, min_periods=self.config.macd_signal).mean()
+        macd_bar = (dif - dea) * 2
+
+        golden_cross = (dif > dea) & (dif.shift(1) <= dea.shift(1))
+        death_cross = (dif < dea) & (dif.shift(1) >= dea.shift(1))
+
+        macd_up = (dif > 0) & (macd_bar > 0)
+        macd_down = (dif < 0) & (macd_bar < 0)
+
+        return {
+            "macd_dif": dif,
+            "macd_dea": dea,
+            "macd_bar": macd_bar,
+            "macd_golden_cross": golden_cross.astype(float),
+            "macd_death_cross": death_cross.astype(float),
+            "macd_up": macd_up.astype(float),
+            "macd_down": macd_down.astype(float),
+        }
+
+    def _compute_rsi_system(
+        self, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        RSI 指标系统。
+        包含 RSI、超买/超卖、RSI趋势。
+        """
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=self.config.rsi_period, min_periods=self.config.rsi_period).mean()
+        avg_loss = loss.rolling(window=self.config.rsi_period, min_periods=self.config.rsi_period).mean()
+        rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+        rsi = pd.Series(100 - 100 / (1 + rs), index=close.index)
+
+        overbought = rsi >= self.config.rsi_overbought
+        oversold = rsi <= self.config.rsi_oversold
+
+        rsi_ma = rsi.rolling(window=5, min_periods=5).mean()
+        rsi_rising = rsi > rsi_ma
+        rsi_falling = rsi < rsi_ma
+
+        return {
+            "rsi": rsi,
+            "rsi_overbought": overbought.astype(float),
+            "rsi_oversold": oversold.astype(float),
+            "rsi_rising": rsi_rising.astype(float),
+            "rsi_falling": rsi_falling.astype(float),
+        }
+
+    def _compute_adx_system(
+        self, high: pd.Series, low: pd.Series, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        ADX 指标系统。
+        包含 ADX、+DI、-DI、趋势强度判断。
+        """
+        period = self.config.adx_period
+
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        if len(tr) > 0:
+            tr.iloc[0] = tr1.iloc[0]
+
+        atr = tr.rolling(window=period, min_periods=period).mean()
+        atr_safe = atr.replace(0, np.nan)
+        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
+        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
+
+        dx_denom = (plus_di + minus_di).abs()
+        dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
+        dx = pd.Series(dx, index=high.index)
+        adx = dx.rolling(window=period, min_periods=period).mean()
+
+        strong_trend = adx >= self.config.adx_strong_threshold
+        weak_trend = (adx >= self.config.adx_trend_threshold) & (adx < self.config.adx_strong_threshold)
+        no_trend = adx < self.config.adx_trend_threshold
+
+        up_direction = plus_di > minus_di
+        down_direction = minus_di > plus_di
+
+        return {
+            "adx": adx,
+            "adx_plus_di": plus_di,
+            "adx_minus_di": minus_di,
+            "adx_strong_trend": strong_trend.astype(float),
+            "adx_weak_trend": weak_trend.astype(float),
+            "adx_no_trend": no_trend.astype(float),
+            "adx_up_direction": up_direction.astype(float),
+            "adx_down_direction": down_direction.astype(float),
+        }
+
+    def _compute_bollinger_system(
+        self, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        布林带系统指标。
+        包含中轨、上下轨、带宽、位置、收缩/扩张。
+        """
+        period = 20
+        std_dev = 2.0
+
+        ma = close.rolling(window=period, min_periods=period).mean()
+        std = close.rolling(window=period, min_periods=period).std()
+        upper = ma + std_dev * std
+        lower = ma - std_dev * std
+        bandwidth = (upper - lower) / ma.replace(0, np.nan)
+        position = (close - lower) / (upper - lower).replace(0, np.nan)
+
+        bandwidth_ma = bandwidth.rolling(window=10, min_periods=10).mean()
+        contracting = bandwidth < bandwidth_ma
+        expanding = bandwidth > bandwidth_ma
+
+        breakout_up = close > upper
+        breakout_down = close < lower
+
+        return {
+            "bb_middle": ma,
+            "bb_upper": upper,
+            "bb_lower": lower,
+            "bb_bandwidth": bandwidth,
+            "bb_position": position,
+            "bb_contracting": contracting.astype(float),
+            "bb_expanding": expanding.astype(float),
+            "bb_breakout_up": breakout_up.astype(float),
+            "bb_breakout_down": breakout_down.astype(float),
+        }
+
+    def _compute_momentum_system(
+        self, close: pd.Series
+    ) -> Dict[str, pd.Series]:
+        """
+        动量系统指标。
+        包含简单动量、ROC、加速度。
+        """
+        mom_5 = (close - close.shift(5)) / close.shift(5)
+        mom_20 = (close - close.shift(20)) / close.shift(20)
+
+        roc_10 = (close / close.shift(10) - 1) * 100
+
+        acceleration = mom_5.diff()
+
+        mom_rising = mom_5 > mom_5.shift(1)
+        mom_falling = mom_5 < mom_5.shift(1)
+
+        return {
+            "momentum_5": mom_5,
+            "momentum_20": mom_20,
+            "roc_10": roc_10,
+            "acceleration": acceleration,
+            "momentum_rising": mom_rising.astype(float),
+            "momentum_falling": mom_falling.astype(float),
+        }
+
+    def compute_all_indicators(
+        self,
+        df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        计算所有技术指标（6大类）。
+        """
+        if not {"close", "high", "low"}.issubset(df.columns):
+            raise ValueError("数据缺少必要列: close, high, low")
+
+        result = df.copy()
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+
+        ma_ind = self._compute_ma_system(close)
+        result = result.assign(**ma_ind)
+
+        macd_ind = self._compute_macd(close)
+        result = result.assign(**macd_ind)
+
+        rsi_ind = self._compute_rsi_system(close)
+        result = result.assign(**rsi_ind)
+
+        adx_ind = self._compute_adx_system(high, low, close)
+        result = result.assign(**adx_ind)
+
+        bb_ind = self._compute_bollinger_system(close)
+        result = result.assign(**bb_ind)
+
+        mom_ind = self._compute_momentum_system(close)
+        result = result.assign(**mom_ind)
+
+        return result
+
+    def compute_trend_scores(
+        self, df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        计算各趋势类型的得分（0-1）。
+        """
+        indicators = self.compute_all_indicators(df)
+        n = len(indicators)
+
+        scores = pd.DataFrame(
+            {
+                "strong_up": np.zeros(n),
+                "weak_up": np.zeros(n),
+                "sideways": np.zeros(n),
+                "weak_down": np.zeros(n),
+                "strong_down": np.zeros(n),
+            },
+            index=indicators.index,
+        )
+
+        scores["strong_up"] = (
+            indicators["adx_strong_trend"] * indicators["adx_up_direction"] * 0.3 +
+            indicators["ma_up"] * 0.2 +
+            indicators["macd_up"] * 0.2 +
+            indicators["momentum_rising"] * (indicators["momentum_5"] > 0).astype(float) * 0.15 +
+            indicators["bb_breakout_up"] * 0.15
+        )
+
+        scores["weak_up"] = (
+            indicators["adx_weak_trend"] * indicators["adx_up_direction"] * 0.3 +
+            indicators["ma_up"] * indicators["adx_no_trend"] * 0.25 +
+            indicators["macd_up"] * 0.2 +
+            (indicators["pos_m"] > 0).astype(float) * 0.25
+        )
+
+        scores["sideways"] = (
+            indicators["adx_no_trend"] * 0.35 +
+            indicators["bb_contracting"] * 0.2 +
+            ((indicators["bb_position"] > 0.2) & (indicators["bb_position"] < 0.8)).astype(float) * 0.25 +
+            (indicators["momentum_5"].abs() < 0.02).astype(float) * 0.2
+        )
+
+        scores["weak_down"] = (
+            indicators["adx_weak_trend"] * indicators["adx_down_direction"] * 0.3 +
+            indicators["ma_down"] * indicators["adx_no_trend"] * 0.25 +
+            indicators["macd_down"] * 0.2 +
+            (indicators["pos_m"] < 0).astype(float) * 0.25
+        )
+
+        scores["strong_down"] = (
+            indicators["adx_strong_trend"] * indicators["adx_down_direction"] * 0.3 +
+            indicators["ma_down"] * 0.2 +
+            indicators["macd_down"] * 0.2 +
+            indicators["momentum_falling"] * (indicators["momentum_5"] < 0).astype(float) * 0.15 +
+            indicators["bb_breakout_down"] * 0.15
+        )
+
+        total = scores.sum(axis=1)
+        total_safe = total.replace(0, 1)
+        for col in scores.columns:
+            scores[col] = scores[col] / total_safe
+
+        return scores
+
+    def detect_trend(
+        self, df: pd.DataFrame, use_filter: bool = True
+    ) -> pd.DataFrame:
+        """
+        检测市场趋势。
+
+        Args:
+            df: OHLCV 数据
+            use_filter: 是否启用状态转换过滤
+
+        Returns:
+            包含趋势判断结果的 DataFrame
+        """
+        indicators = self.compute_all_indicators(df)
+        scores = self.compute_trend_scores(df)
+
+        result = indicators.copy()
+
+        result["trend_confidence"] = scores.max(axis=1)
+        trend_type_map = {
+            "strong_up": TrendType.STRONG_UP,
+            "weak_up": TrendType.WEAK_UP,
+            "sideways": TrendType.SIDEWAYS,
+            "weak_down": TrendType.WEAK_DOWN,
+            "strong_down": TrendType.STRONG_DOWN,
+        }
+        result["trend_type_str"] = scores.idxmax(axis=1)
+        result["trend_type"] = result["trend_type_str"].map(trend_type_map)
+
+        if use_filter:
+            result = self._apply_state_transition_filter(result)
+
+        self._state_history = result["trend_type"].tolist()
+        self._confidence_history = result["trend_confidence"].tolist()
+
+        return result
+
+    def _apply_state_transition_filter(
+        self, result: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        应用状态转换过滤机制。
+        - 状态转换需达到置信度阈值
+        - 确认窗口
+        - 防抖动
+        """
+        filtered = result.copy()
+        n = len(filtered)
+        confirm_days = self.config.confirm_days
+        threshold = self.config.state_transition_threshold
+
+        if n == 0:
+            return filtered
+
+        current_trend = filtered["trend_type"].iloc[0]
+        current_confidence = filtered["trend_confidence"].iloc[0]
+        consecutive_count = 1
+
+        filtered_trends = [current_trend]
+        filtered_confidences = [current_confidence]
+
+        for i in range(1, n):
+            candidate_trend = filtered["trend_type"].iloc[i]
+            candidate_confidence = filtered["trend_confidence"].iloc[i]
+
+            if candidate_trend == current_trend:
+                consecutive_count += 1
+                current_confidence = candidate_confidence
+            else:
+                if (candidate_confidence >= threshold and
+                    consecutive_count >= confirm_days):
+                    current_trend = candidate_trend
+                    current_confidence = candidate_confidence
+                    consecutive_count = 1
+
+            filtered_trends.append(current_trend)
+            filtered_confidences.append(current_confidence)
+
+        filtered["trend_type"] = filtered_trends
+        filtered["trend_confidence"] = filtered_confidences
+
+        return filtered
+
+    def get_summary(
+        self, result_df: pd.DataFrame
+    ) -> Dict:
+        """
+        获取趋势判断结果摘要。
+        """
+        if result_df.empty:
+            return {}
+
+        trend_counts = result_df["trend_type_str"].value_counts()
+        avg_confidence = result_df["trend_confidence"].mean()
+
+        return {
+            "date_range": (
+                str(result_df["date"].min().date()),
+                str(result_df["date"].max().date()),
+            ),
+            "total_days": len(result_df),
+            "trend_distribution": trend_counts.to_dict(),
+            "average_confidence": avg_confidence,
+        }

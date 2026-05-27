@@ -35,3 +35,4 @@ md_to_html.py
 
 # 配置示例文件
 backtest_config_example.json
+data_cache/

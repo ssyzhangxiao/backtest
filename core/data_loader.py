@@ -1,34 +1,122 @@
 """
-展期法数据加载模块。
+统一数据加载器模块。
 
-支持两种数据格式：
-1. 合约模式：按合约分文件（如 RB2310.csv），包含具体合约数据，支持展期
-2. 品种模式：按品种分文件（如 SHFE.RB.csv），品种连续指数数据，无展期
+支持两种数据源：
+1. TqSdk 数据源：从 TqSdk 直接获取真实交易所合约数据，支持断线重连和数据缓存
+2. 本地 CSV 数据源：读取本地 CSV 期货数据，支持合约模式和品种模式
 
 输出格式兼容 PyBroker：包含 date, symbol, open, high, low, close, volume, open_interest,
-以及辅助列 is_dominant, dominant_symbol, product。
+以及辅助列 is_dominant, dominant_symbol, prev_dominant_symbol, rollover_flag, product。
 """
 
 import os
+import re
 import glob
+import time
+import pickle
 import warnings
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+
 import pandas as pd
-from typing import Optional, List, Dict
+
+
+# ---------------------------------------------------------------------------
+# 缓存目录配置
+# ---------------------------------------------------------------------------
+CACHE_DIR = Path(__file__).parent.parent / "data_cache"
+CACHE_DIR.mkdir(exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 品种 → (TqSdk 交易所, TqSdk 品种代码) 完整映射
+# ---------------------------------------------------------------------------
+PRODUCT_EXCHANGE_MAP: Dict[str, Tuple[str, str]] = {
+    # 上期所 SHFE
+    "SHFE.RB": ("SHFE", "rb"),    "SHFE.AG": ("SHFE", "ag"),
+    "SHFE.AU": ("SHFE", "au"),    "SHFE.AL": ("SHFE", "al"),
+    "SHFE.ZN": ("SHFE", "zn"),    "SHFE.CU": ("SHFE", "cu"),
+    "SHFE.NI": ("SHFE", "ni"),    "SHFE.SN": ("SHFE", "sn"),
+    "SHFE.PB": ("SHFE", "pb"),    "SHFE.HC": ("SHFE", "hc"),
+    "SHFE.BU": ("SHFE", "bu"),    "SHFE.RU": ("SHFE", "ru"),
+    "SHFE.SS": ("SHFE", "ss"),    "SHFE.SP": ("SHFE", "sp"),
+    "SHFE.BR": ("SHFE", "br"),    "SHFE.AO": ("SHFE", "ao"),
+    # 大商所 DCE
+    "DCE.M":  ("DCE", "m"),       "DCE.I":  ("DCE", "i"),
+    "DCE.J":  ("DCE", "j"),       "DCE.JM": ("DCE", "jm"),
+    "DCE.C":  ("DCE", "c"),       "DCE.CS": ("DCE", "cs"),
+    "DCE.A":  ("DCE", "a"),       "DCE.B":  ("DCE", "b"),
+    "DCE.P":  ("DCE", "p"),       "DCE.Y":  ("DCE", "y"),
+    "DCE.L":  ("DCE", "l"),       "DCE.PP": ("DCE", "pp"),
+    "DCE.V":  ("DCE", "v"),       "DCE.EB": ("DCE", "eb"),
+    "DCE.EG": ("DCE", "eg"),      "DCE.PG": ("DCE", "pg"),
+    "DCE.JD": ("DCE", "jd"),      "DCE.LH": ("DCE", "lh"),
+    # 郑商所 CZCE
+    "CZCE.TA": ("CZCE", "TA"),    "CZCE.MA": ("CZCE", "MA"),
+    "CZCE.FG": ("CZCE", "FG"),    "CZCE.SA": ("CZCE", "SA"),
+    "CZCE.SF": ("CZCE", "SF"),    "CZCE.SM": ("CZCE", "SM"),
+    "CZCE.CF": ("CZCE", "CF"),    "CZCE.SR": ("CZCE", "SR"),
+    "CZCE.OI": ("CZCE", "OI"),    "CZCE.RM": ("CZCE", "RM"),
+    "CZCE.PF": ("CZCE", "PF"),    "CZCE.PX": ("CZCE", "PX"),
+    "CZCE.SH": ("CZCE", "SH"),    "CZCE.UR": ("CZCE", "UR"),
+    "CZCE.ZC": ("CZCE", "ZC"),    "CZCE.AP": ("CZCE", "AP"),
+    "CZCE.CY": ("CZCE", "CY"),    "CZCE.PK": ("CZCE", "PK"),
+    # 中金所 CFFEX
+    "CFFEX.IF": ("CFFEX", "IF"),  "CFFEX.IC": ("CFFEX", "IC"),
+    "CFFEX.IH": ("CFFEX", "IH"),  "CFFEX.IM": ("CFFEX", "IM"),
+    "CFFEX.T":  ("CFFEX", "T"),   "CFFEX.TF": ("CFFEX", "TF"),
+    "CFFEX.TS": ("CFFEX", "TS"),
+    # 能源中心 INE
+    "INE.SC": ("INE", "sc"),      "INE.NR": ("INE", "nr"),
+    "INE.BC": ("INE", "bc"),      "INE.LU": ("INE", "lu"),
+    "INE.EC": ("INE", "ec"),
+    # 广期所 GFEX
+    "GFEX.LC": ("GFEX", "LC"),    "GFEX.SI": ("GFEX", "SI"),
+}
+
+
+# ---------------------------------------------------------------------------
+# 默认加载的核心品种
+# ---------------------------------------------------------------------------
+_DEFAULT_SYMBOLS = [
+    "SHFE.RB", "SHFE.HC", "SHFE.AU", "SHFE.AG", "SHFE.CU",
+    "DCE.M", "DCE.I", "DCE.J", "DCE.JM", "DCE.C",
+    "DCE.P", "DCE.Y", "DCE.EG", "DCE.PP", "DCE.L",
+    "CZCE.TA", "CZCE.MA", "CZCE.FG", "CZCE.SA", "CZCE.CF",
+    "CZCE.OI", "CZCE.RM", "CZCE.SR", "CZCE.ZC",
+    "CFFEX.IF", "CFFEX.IC", "CFFEX.IH",
+    "INE.SC", "INE.NR",
+]
+
+
+# ---------------------------------------------------------------------------
+# 常量配置
+# ---------------------------------------------------------------------------
+_DAILY_SECONDS = 86400  # 86400 秒 = 1 天，用于 TqSdk K 线日线周期
+_MAX_CONTRACTS_PER_PRODUCT = 20  # 每个品种最多下载的合约数
 
 
 class DataLoader:
     """
-    展期法数据加载器。
+    统一数据加载器。
 
-    负责读取本地CSV期货数据，识别主力合约，生成展期法连续序列，
-    输出 PyBroker 兼容的 DataFrame。
+    支持两种数据源：
+    1. TqSdk 数据源：从 TqSdk 直接获取真实交易所合约数据
+    2. 本地 CSV 数据源：读取本地 CSV 期货数据
 
-    自动检测数据格式：
-    - 如果CSV包含 symbol 列且 symbol 值为具体合约代码（如 RB2310），使用合约模式
-    - 如果CSV包含 symbol 列且 symbol 值为品种代码（如 SHFE.RB），使用品种模式
+    对于 TqSdk 数据源，支持：
+    - 断线自动重连
+    - 数据缓存与本地存储
+    - 完整的品种映射
+
+    对于本地 CSV 数据源，支持：
+    - 自动检测数据格式（合约模式/品种模式）
+    - 合约模式：按合约分文件（如 RB2310.csv），包含具体合约数据，支持展期
+    - 品种模式：按品种分文件（如 SHFE.RB.csv），品种连续指数数据，无展期
 
     Attributes:
-        data_dir: CSV文件所在目录路径
+        data_source: 数据源类型，'tqsdk' 或 'csv'
+        data_dir: CSV文件所在目录路径（仅 CSV 模式）
         all_contracts: 所有合约的原始数据（合并后）
         dominant_map: 每日主力合约映射 {date: symbol}
         continuous_df: 展期法连续主力合约数据
@@ -36,6 +124,13 @@ class DataLoader:
         data_mode: 数据模式，'contract' 或 'product'
         load_errors: 加载失败的文件及错误信息列表
     """
+
+    PYBROKER_COLUMNS = [
+        "date", "symbol", "open", "high", "low", "close",
+        "volume", "open_interest",
+        "is_dominant", "dominant_symbol", "prev_dominant_symbol",
+        "rollover_flag", "product",
+    ]
 
     CONTRACT_REQUIRED_COLUMNS = [
         "date",
@@ -58,25 +153,287 @@ class DataLoader:
     ]
     FORMAT_DETECT_ROWS = 5
 
-    def __init__(self, data_dir: str):
+    def __init__(
+        self,
+        data_source: str = "tqsdk",
+        data_dir: Optional[str] = None,
+        phone: Optional[str] = "13600198250",
+        password: Optional[str] = "lg123456789",
+        symbols: Optional[List[str]] = None,
+        data_length: int = 2000,
+        enable_cache: bool = True,
+        cache_ttl_hours: int = 24,
+        max_reconnect_attempts: int = 5,
+        reconnect_delay_seconds: float = 2.0,
+    ):
+        """
+        初始化数据加载器。
+
+        Args:
+            data_source: 数据源类型，'tqsdk' 或 'csv'
+            data_dir: CSV文件所在目录路径（仅 CSV 模式）
+            phone: TqSdk 账号手机号（仅 TqSdk 模式）
+            password: TqSdk 账号密码（仅 TqSdk 模式）
+            symbols: 品种代码列表，默认加载核心品种（仅 TqSdk 模式）
+            data_length: 每个合约下载的 K 线数量（日线），仅 TqSdk 模式
+            enable_cache: 是否启用数据缓存（仅 TqSdk 模式）
+            cache_ttl_hours: 缓存有效期（小时）（仅 TqSdk 模式）
+            max_reconnect_attempts: 最大重连次数（仅 TqSdk 模式）
+            reconnect_delay_seconds: 重连延迟（秒）（仅 TqSdk 模式）
+        """
+        self.data_source = data_source.lower()
         self.data_dir = data_dir
+
+        # TqSdk 相关配置
+        self._phone = phone
+        self._password = password
+        self._symbols = symbols or _DEFAULT_SYMBOLS
+        self._data_length = data_length
+        self._enable_cache = enable_cache
+        self._cache_ttl_hours = cache_ttl_hours
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._reconnect_delay_seconds = reconnect_delay_seconds
+        self._api = None
+
+        # 数据存储
         self.all_contracts: Optional[pd.DataFrame] = None
         self.dominant_map: Optional[pd.Series] = None
         self.continuous_df: Optional[pd.DataFrame] = None
         self.full_df: Optional[pd.DataFrame] = None
         self.data_mode: Optional[str] = None
-        self.load_errors: List[Dict[str, str]] = []
+        self.load_errors: List[Dict] = []
         self._product_symbols: Optional[Dict[str, List[str]]] = None
+
+    # ------------------------------------------------------------------
+    # TqSdk 相关方法
+    # ------------------------------------------------------------------
+
+    def _get_cache_path(self, symbol: str) -> Path:
+        """获取品种数据的缓存路径"""
+        sanitized = symbol.replace(".", "_").replace("-", "_")
+        return CACHE_DIR / f"{sanitized}_{self._data_length}.pkl"
+
+    def _is_cache_valid(self, cache_path: Path) -> bool:
+        """检查缓存是否有效"""
+        if not self._enable_cache:
+            return False
+        if not cache_path.exists():
+            return False
+
+        mtime = cache_path.stat().st_mtime
+        hours_since = (time.time() - mtime) / 3600
+        return hours_since < self._cache_ttl_hours
+
+    def _load_from_cache(self, symbol: str) -> Optional[pd.DataFrame]:
+        """从缓存加载数据"""
+        cache_path = self._get_cache_path(symbol)
+        if not self._is_cache_valid(cache_path):
+            return None
+
+        try:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            print(f"  [缓存] 加载 {symbol} 数据成功")
+            return data
+        except Exception as e:
+            warnings.warn(f"缓存加载失败: {e}")
+            return None
+
+    def _save_to_cache(self, symbol: str, data: pd.DataFrame):
+        """保存数据到缓存"""
+        if not self._enable_cache:
+            return
+
+        cache_path = self._get_cache_path(symbol)
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump(data, f)
+            print(f"  [缓存] 保存 {symbol} 数据成功")
+        except Exception as e:
+            warnings.warn(f"缓存保存失败: {e}")
+
+    def _create_api(self):
+        """创建 TqSdk API 连接（带重连机制）"""
+        from tqsdk import TqApi, TqAuth
+
+        for attempt in range(self._max_reconnect_attempts + 1):
+            try:
+                print(f"  [连接] 尝试连接 TqSdk ({attempt + 1}/{self._max_reconnect_attempts + 1})...")
+                self._api = TqApi(auth=TqAuth(self._phone, self._password))
+                print("  [连接] TqSdk 连接成功")
+                return
+            except Exception as e:
+                if attempt < self._max_reconnect_attempts:
+                    delay = self._reconnect_delay_seconds * (2 ** attempt)
+                    print(f"  [连接] 连接失败: {e}，{delay} 秒后重试...")
+                    time.sleep(delay)
+                else:
+                    raise RuntimeError(f"连接 TqSdk 失败（尝试 {self._max_reconnect_attempts + 1} 次）: {e}") from e
+
+    def _close_api(self):
+        """关闭 API 连接"""
+        if self._api:
+            try:
+                self._api.close()
+                self._api = None
+                print("  [连接] TqSdk 连接已关闭")
+            except Exception as e:
+                warnings.warn(f"关闭连接失败: {e}")
+
+    @staticmethod
+    def _parse_contract_month(symbol: str) -> Tuple[int, int]:
+        """从合约代码中提取年份和月份。"""
+        m = re.search(r'(\d{2})(\d{2})$', symbol)
+        if m:
+            yy = int(m.group(1))
+            mm = int(m.group(2))
+            year = 2000 + yy if yy < 50 else 1900 + yy
+            return year, mm
+        return 2099, 13
+
+    def _load_one_product(self, product_symbol: str) -> pd.DataFrame:
+        """加载单个品种的数据"""
+        pe_info = PRODUCT_EXCHANGE_MAP.get(product_symbol)
+        if pe_info is None:
+            raise ValueError(f"未知品种: {product_symbol}")
+
+        exchange_id, product_code = pe_info
+
+        # 查询合约列表
+        quotes = self._api.query_quotes(
+            ins_class="FUTURE",
+            product_id=product_code,
+            exchange_id=exchange_id,
+            expired=True,
+        )
+        self._api.wait_update(deadline=10)
+
+        if not quotes:
+            raise RuntimeError(f"未查到 {product_symbol} 的合约")
+
+        # 按到期月份排序，取最近的 N 个合约
+        sorted_contracts = sorted(quotes, key=self._parse_contract_month)[:_MAX_CONTRACTS_PER_PRODUCT]
+        print(f"  {product_symbol}: 找到 {len(sorted_contracts)} 个合约")
+
+        contract_dfs = []
+        for ins_id in sorted_contracts:
+            try:
+                klines = self._api.get_kline_serial(
+                    ins_id, _DAILY_SECONDS, data_length=self._data_length
+                )
+                self._api.wait_update(deadline=5)
+
+                close_series = klines["close"]
+                if len(close_series.dropna()) == 0:
+                    continue
+
+                df_contract = pd.DataFrame({
+                    "date": pd.to_datetime(klines["datetime"], unit="ns", errors="coerce"),
+                    "symbol": ins_id,
+                    "product": product_code,
+                    "open": klines["open"].astype(float),
+                    "high": klines["high"].astype(float),
+                    "low": klines["low"].astype(float),
+                    "close": klines["close"].astype(float),
+                    "volume": klines["volume"].astype(float),
+                    "open_interest": klines["open_oi"].astype(float),
+                })
+                df_contract = df_contract.dropna(subset=["date", "close"])
+                if not df_contract.empty:
+                    contract_dfs.append(df_contract)
+            except Exception as e:
+                self.load_errors.append({
+                    "symbol": product_symbol,
+                    "contract": ins_id,
+                    "error": f"加载合约K线失败: {e}",
+                })
+                warnings.warn(f"  加载合约 {ins_id} 失败: {e}")
+                continue
+
+        if not contract_dfs:
+            raise RuntimeError(f"{product_symbol} 没有可用数据")
+
+        product_df = pd.concat(contract_dfs, ignore_index=True)
+        print(f"  {product_symbol}: 加载 {len(product_df)} 条记录")
+        return product_df
+
+    def load_from_tqsdk(self, show_progress: bool = True):
+        """
+        从 TqSdk 加载数据（带缓存和重连）。
+        """
+        if not self._phone or not self._password:
+            raise ValueError(
+                "load_from_tqsdk() 需要提供 phone 和 password，"
+                "请先设置 TqSdk 账号"
+            )
+
+        print("=" * 60)
+        print("  TqSdk 数据加载")
+        print("=" * 60)
+
+        all_dfs = []
+        self.load_errors = []
+
+        # 品种循环迭代器（如果启用进度条则包装 tqdm）
+        symbols_iter = self._symbols
+        if show_progress:
+            try:
+                from tqdm import tqdm
+                symbols_iter = tqdm(self._symbols, desc="加载品种", unit="品种")
+            except ImportError:
+                pass
+
+        for symbol in symbols_iter:
+            # 尝试从缓存加载
+            cached = self._load_from_cache(symbol)
+            if cached is not None:
+                all_dfs.append(cached)
+                continue
+
+            # 缓存未命中或失效，从 TqSdk 加载
+            try:
+                self._create_api()
+                df = self._load_one_product(symbol)
+                self._save_to_cache(symbol, df)
+                all_dfs.append(df)
+                self._close_api()
+            except Exception as e:
+                self.load_errors.append({"symbol": symbol, "error": str(e)})
+                warnings.warn(f"加载 {symbol} 失败: {e}")
+                continue
+
+        if not all_dfs:
+            error_detail = "\n".join(
+                f"  - {e['symbol']}: {e['error']}" for e in self.load_errors
+            )
+            raise RuntimeError(f"TqSdk 未加载到任何有效数据:\n{error_detail}")
+
+        self.all_contracts = pd.concat(all_dfs, ignore_index=True)
+        self.all_contracts = self.all_contracts.sort_values(["date", "symbol"]).reset_index(drop=True)
+        self.data_mode = "contract"
+        self._product_symbols = None
+
+        if self.load_errors:
+            warnings.warn(
+                f"部分品种/合约加载失败 ({len(self.load_errors)}/{len(self._symbols)}): "
+                + "; ".join(
+                    f"{e.get('symbol', '?')}"
+                    f"{('/' + e['contract']) if 'contract' in e else ''}"
+                    f": {e['error']}"
+                    for e in self.load_errors
+                )
+            )
+
+        print(f"\n  [汇总] 共加载 {len(self.all_contracts)} 行数据")
+        return self.all_contracts
+
+    # ------------------------------------------------------------------
+    # CSV 相关方法
+    # ------------------------------------------------------------------
 
     def _detect_format_from_df(self, df: pd.DataFrame) -> str:
         """
         基于 DataFrame 列名检测数据格式。
-
-        Args:
-            df: 已读取的 DataFrame
-
-        Returns:
-            'contract' 或 'product'
         """
         cols = set(df.columns)
         contract_cols = set(self.CONTRACT_REQUIRED_COLUMNS)
@@ -91,23 +448,64 @@ class DataLoader:
         else:
             return "product"
 
+    def _load_product_csv(
+        self, filepath: str, df: Optional[pd.DataFrame] = None
+    ) -> Optional[pd.DataFrame]:
+        """
+        加载品种汇总格式的CSV文件。
+        """
+        try:
+            if df is None:
+                df = pd.read_csv(filepath)
+            required = {"datetime", "open", "high", "low", "close"}
+            if not required.issubset(set(df.columns)):
+                return None
+
+            rename_map = {"datetime": "date"}
+            if "position" in df.columns:
+                rename_map["position"] = "open_interest"
+            elif "open_interest" not in df.columns:
+                df["open_interest"] = 0
+                warnings.warn(
+                    f"{filepath}: 缺少 position/open_interest 列，"
+                    "主力合约识别将回退到 volume"
+                )
+
+            df = df.rename(columns=rename_map)
+
+            if "symbol" not in df.columns:
+                basename = os.path.basename(filepath).replace(".csv", "")
+                df["symbol"] = basename
+
+            if "volume" not in df.columns:
+                df["volume"] = 0
+
+            standard_cols = [
+                "date",
+                "symbol",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest",
+            ]
+            available_cols = [c for c in standard_cols if c in df.columns]
+            df = df[available_cols].copy()
+
+            for col in ["open", "high", "low", "close", "volume", "open_interest"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+            return df
+        except Exception:
+            return None
+
     def load_csv_files(self, file_pattern: str = "*.csv") -> pd.DataFrame:
         """
         读取目录下所有匹配的CSV文件并合并。
-
-        自动检测数据格式并使用对应的加载逻辑。
-
-        Args:
-            file_pattern: 文件匹配模式，默认 '*.csv'
-
-        Returns:
-            合并后的 DataFrame，包含所有合约数据
-
-        Raises:
-            FileNotFoundError: 当目录不存在或无匹配文件时
-            ValueError: 当CSV缺少必要列时
         """
-        if not os.path.isdir(self.data_dir):
+        if not self.data_dir or not os.path.isdir(self.data_dir):
             raise FileNotFoundError(f"数据目录不存在: {self.data_dir}")
 
         pattern = os.path.join(self.data_dir, file_pattern)
@@ -185,85 +583,38 @@ class DataLoader:
         self.all_contracts = combined
         return combined
 
-    def _load_product_csv(
-        self, filepath: str, df: Optional[pd.DataFrame] = None
-    ) -> Optional[pd.DataFrame]:
-        """
-        加载品种汇总格式的CSV文件。
+    # ------------------------------------------------------------------
+    # 统一加载方法
+    # ------------------------------------------------------------------
 
-        品种格式列：datetime, open, high, low, close, volume, amount, position, symbol
-        转换为标准格式：date, symbol, open, high, low, close, volume, open_interest
+    def load_data(self, file_pattern: str = "*.csv", show_progress: bool = True):
+        """
+        统一加载数据的方法。
 
         Args:
-            filepath: CSV文件路径
-            df: 可选，已读取的 DataFrame（避免二次读取）
+            file_pattern: 文件匹配模式（仅 CSV 模式）
+            show_progress: 是否显示进度条（仅 TqSdk 模式）
 
         Returns:
-            标准格式的 DataFrame，或 None
+            合并后的 DataFrame
         """
-        try:
-            if df is None:
-                df = pd.read_csv(filepath)
-            required = {"datetime", "open", "high", "low", "close"}
-            if not required.issubset(set(df.columns)):
-                return None
+        if self.data_source == "tqsdk":
+            return self.load_from_tqsdk(show_progress=show_progress)
+        elif self.data_source == "csv":
+            return self.load_csv_files(file_pattern=file_pattern)
+        else:
+            raise ValueError(f"不支持的数据源类型: {self.data_source}")
 
-            rename_map = {"datetime": "date"}
-            if "position" in df.columns:
-                rename_map["position"] = "open_interest"
-            elif "open_interest" not in df.columns:
-                df["open_interest"] = 0
-                warnings.warn(
-                    f"{filepath}: 缺少 position/open_interest 列，"
-                    "主力合约识别将回退到 volume"
-                )
-
-            df = df.rename(columns=rename_map)
-
-            if "symbol" not in df.columns:
-                basename = os.path.basename(filepath).replace(".csv", "")
-                df["symbol"] = basename
-
-            if "volume" not in df.columns:
-                df["volume"] = 0
-
-            standard_cols = [
-                "date",
-                "symbol",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "open_interest",
-            ]
-            available_cols = [c for c in standard_cols if c in df.columns]
-            df = df[available_cols].copy()
-
-            for col in ["open", "high", "low", "close", "volume", "open_interest"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-            return df
-        except Exception:
-            return None
+    # ------------------------------------------------------------------
+    # 主力合约识别
+    # ------------------------------------------------------------------
 
     def identify_dominant_contracts(self, method: str = "open_interest") -> pd.Series:
         """
         每日识别主力合约。
-
-        在品种模式下，每个品种只有一条记录，自动为主力。
-        在合约模式下，以持仓量最大的合约作为主力合约；
-        若持仓量全为零，回退到成交量（volume）识别。
-
-        Args:
-            method: 识别方法，'open_interest' 或 'volume'
-
-        Returns:
-            Series，索引为日期，值为主力合约代码
         """
         if self.all_contracts is None:
-            raise RuntimeError("请先调用 load_csv_files() 加载数据")
+            raise RuntimeError("请先调用 load_data() 加载数据")
 
         if self.data_mode == "product":
             idx = self.all_contracts.groupby("date")["open_interest"].idxmax()
@@ -271,46 +622,77 @@ class DataLoader:
                 "date"
             )["symbol"]
         else:
-            actual_method = method
-            if method == "open_interest":
-                oi_sum = self.all_contracts.groupby("date")["open_interest"].sum()
-                if (oi_sum == 0).all():
-                    warnings.warn(
-                        "所有日期的 open_interest 均为零，回退到 volume 识别主力合约"
-                    )
-                    actual_method = "volume"
+            # 按 date, symbol 排序，确保"第一个合约"有确定顺序
+            df = self.all_contracts.sort_values(["date", "symbol"]).reset_index(drop=True)
 
-            if actual_method == "open_interest":
-                idx = self.all_contracts.groupby("date")["open_interest"].idxmax()
-            elif actual_method == "volume":
-                idx = self.all_contracts.groupby("date")["volume"].idxmax()
+            if method == "open_interest":
+                # 先按持仓量识别主力
+                oi_idx = df.groupby("date")["open_interest"].idxmax()
+                oi_dominant = df.loc[oi_idx, ["date", "symbol", "open_interest"]].copy()
+
+                # 找出 open_interest 为 0 的日期 → 回退到 volume
+                zero_oi_dates = oi_dominant[oi_dominant["open_interest"] == 0]["date"].unique()
+
+                if len(zero_oi_dates) > 0:
+                    # 对这些日期按 volume 重新识别
+                    vol_mask = df["date"].isin(zero_oi_dates)
+                    if vol_mask.any():
+                        vol_idx = (
+                            df[vol_mask].groupby("date")["volume"].idxmax()
+                        )
+                        vol_dominant = df.loc[vol_idx, ["date", "symbol", "volume"]].copy()
+
+                        # 找出 volume 也为 0 的日期 → 回退到第一个合约
+                        zero_vol_dates = vol_dominant[
+                            vol_dominant["volume"] == 0
+                        ]["date"].unique()
+
+                        if len(zero_vol_dates) > 0:
+                            # 按 symbol 排序后取每组第一个合约
+                            first_mask = df["date"].isin(zero_vol_dates)
+                            first_contracts = (
+                                df[first_mask].groupby("date")["symbol"].first()
+                            )
+                            warnings.warn(
+                                f"{len(zero_vol_dates)} 个交易日的持仓量和成交量均为零，"
+                                f"已回退到按 symbol 排序的第一个合约作为主力"
+                            )
+                            # 更新 vol_dominant 中这些日期的 symbol
+                            for dt, sym in first_contracts.items():
+                                vol_dominant.loc[
+                                    vol_dominant["date"] == dt, "symbol"
+                                ] = sym
+
+                        # 将 volume 回退结果更新到 oi_dominant
+                        for dt in zero_oi_dates:
+                            if dt in vol_dominant["date"].values:
+                                oi_dominant.loc[
+                                    oi_dominant["date"] == dt, "symbol"
+                                ] = vol_dominant.loc[
+                                    vol_dominant["date"] == dt, "symbol"
+                                ].values[0]
+
+                dominant = oi_dominant.set_index("date")["symbol"]
+
+            elif method == "volume":
+                idx = df.groupby("date")["volume"].idxmax()
+                dominant = df.loc[idx, ["date", "symbol"]].set_index("date")["symbol"]
             else:
                 raise ValueError(f"不支持的识别方法: {method}")
-
-            dominant = self.all_contracts.loc[idx, ["date", "symbol"]].set_index(
-                "date"
-            )["symbol"]
 
         self.dominant_map = dominant
         return dominant
 
+    # ------------------------------------------------------------------
+    # 连续序列构建（含展期标记）
+    # ------------------------------------------------------------------
+
     def build_continuous_series(self) -> pd.DataFrame:
         """
         构建展期法连续主力合约序列。
-
-        在每日主力合约数据上添加辅助列：
-        - is_dominant: 是否为当日主力合约
-        - dominant_symbol: 当日主力合约代码
-        - prev_dominant_symbol: 前一日主力合约代码（用于检测展期）
-
-        展期标志（rollover_flag）仅在主力合约行标记，
-        非主力合约行始终为 False，避免误导依赖该标志的逻辑。
-
-        Returns:
-            包含所有合约数据的 DataFrame，带有展期辅助列
         """
         if self.all_contracts is None:
-            raise RuntimeError("请先调用 load_csv_files() 加载数据")
+            raise RuntimeError("请先调用 load_data() 加载数据")
         if self.dominant_map is None:
             self.identify_dominant_contracts()
 
@@ -321,7 +703,7 @@ class DataLoader:
         dominant_df["prev_dominant_symbol"] = dominant_df["dominant_symbol"].shift(1)
 
         df = df.merge(dominant_df, on="date", how="left")
-        
+
         # 如果是品种模式，所有都是主力合约
         if self.data_mode == "product":
             df["is_dominant"] = True
@@ -342,94 +724,29 @@ class DataLoader:
         self.continuous_df = df[df["is_dominant"]].copy().reset_index(drop=True)
         return self.full_df
 
+    # ------------------------------------------------------------------
+    # 输出接口
+    # ------------------------------------------------------------------
+
     def get_pybroker_df(self) -> pd.DataFrame:
         """
         获取 PyBroker 兼容格式的 DataFrame。
-
-        PyBroker 要求的列：date, symbol, open, high, low, close, volume。
-        额外注册的列：open_interest, is_dominant, dominant_symbol, prev_dominant_symbol,
-                      rollover_flag, product。
-
-        Returns:
-            PyBroker 可直接使用的 DataFrame
         """
         if self.full_df is None:
             self.build_continuous_series()
 
-        cols = [
-            "date",
-            "symbol",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "open_interest",
-            "is_dominant",
-            "dominant_symbol",
-            "prev_dominant_symbol",
-            "rollover_flag",
-            "product",
-        ]
-        available_cols = [c for c in cols if c in self.full_df.columns]
-        result = self.full_df[available_cols].copy()
-        result = result.sort_values(["date", "symbol"]).reset_index(drop=True)
-        return result
+        available = [c for c in self.PYBROKER_COLUMNS if c in self.full_df.columns]
+        result = self.full_df[available].copy()
+        return result.sort_values(["date", "symbol"]).reset_index(drop=True)
 
     def get_dominant_only_df(self) -> pd.DataFrame:
-        """
-        仅获取主力合约数据（展期法连续序列）。
-
-        Returns:
-            仅包含主力合约行的 DataFrame
-        """
+        """仅获取主力合约数据。"""
         if self.continuous_df is None:
             self.build_continuous_series()
         return self.continuous_df.copy()
 
-    @property
-    def product_symbols(self) -> Dict[str, List[str]]:
-        """
-        获取各品种的合约代码列表（带缓存）。
-
-        Returns:
-            字典 {品种代码: [合约代码列表]}
-        """
-        if self._product_symbols is None:
-            if self.all_contracts is None:
-                raise RuntimeError("请先调用 load_csv_files() 加载数据")
-            self._product_symbols = {
-                p: sorted(g["symbol"].unique().tolist())
-                for p, g in self.all_contracts.groupby("product")
-            }
-        return self._product_symbols
-
-    def get_product_symbols(
-        self, product: Optional[str] = None
-    ) -> Dict[str, List[str]]:
-        """
-        获取各品种的合约代码列表。
-
-        Args:
-            product: 可选，指定品种代码，为 None 时返回所有品种
-
-        Returns:
-            字典 {品种代码: [合约代码列表]}
-        """
-        if product:
-            syms = self.product_symbols.get(product, [])
-            return {product: syms}
-        return self.product_symbols
-
     def get_rollover_dates(self) -> pd.DataFrame:
-        """
-        获取所有展期日期及对应的合约切换信息。
-
-        品种模式下始终返回空 DataFrame（无展期）。
-
-        Returns:
-            DataFrame，包含 date, prev_dominant_symbol, dominant_symbol
-        """
+        """获取所有展期日期及对应的合约切换信息。"""
         if self.full_df is None:
             self.build_continuous_series()
 
@@ -447,18 +764,33 @@ class DataLoader:
         )
         return rollover
 
-    def get_data_summary(self) -> Dict:
-        """
-        获取数据摘要信息。
+    @property
+    def product_symbols(self) -> Dict[str, List[str]]:
+        """获取各品种的合约代码列表（带缓存）。"""
+        if self._product_symbols is None:
+            if self.all_contracts is None:
+                raise RuntimeError("请先调用 load_data() 加载数据")
+            self._product_symbols = {
+                p: sorted(g["symbol"].unique().tolist())
+                for p, g in self.all_contracts.groupby("product")
+            }
+        return self._product_symbols
 
-        Returns:
-            包含数据概况的字典
-        """
+    def get_product_symbols(self, product: Optional[str] = None) -> Dict[str, List[str]]:
+        """获取指定品种的合约代码列表。"""
+        ps = self.product_symbols
+        if product:
+            return {product: ps.get(product, [])}
+        return ps
+
+    def get_data_summary(self) -> Dict:
+        """获取数据摘要。"""
         if self.all_contracts is None:
             return {"status": "未加载数据"}
 
         products = self.product_symbols
         summary = {
+            "data_source": self.data_source,
             "data_mode": self.data_mode,
             "total_symbols": self.all_contracts["symbol"].nunique(),
             "date_range": (
@@ -469,10 +801,20 @@ class DataLoader:
                 p: {"contracts": len(syms), "symbols": syms[:5]}
                 for p, syms in products.items()
             },
-            "rollover_count": len(self.get_rollover_dates())
-            if self.full_df is not None
-            else 0,
         }
+        if self.full_df is not None and self.data_mode == "contract":
+            summary["rollover_count"] = len(self.get_rollover_dates())
         if self.load_errors:
             summary["load_errors"] = self.load_errors
         return summary
+
+    def close(self):
+        """关闭连接（仅 TqSdk 模式）。"""
+        if self.data_source == "tqsdk":
+            self._close_api()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

@@ -89,7 +89,7 @@ class BacktestRunner:
         self.config = config or BacktestConfig()
 
         # 初始化各模块
-        self.data_loader = DataLoader(data_dir)
+        self.data_loader = DataLoader(data_dir=data_dir, data_source="csv")
         self.regime_detector = MarketRegimeDetector()
         self.strategy_library = StrategyLibrary()
         self.switch_engine = StrategySwitchEngine(self.strategy_library)

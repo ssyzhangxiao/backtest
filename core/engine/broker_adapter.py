@@ -130,6 +130,10 @@ class PyBrokerDataSource:
 
         self._df = df.copy()
         self._df["date"] = pd.to_datetime(self._df["date"])
+        # 将 TqSdk 返回的 Decimal 等特殊类型转为 float，避免 PyBroker 报错
+        for col in ["open", "high", "low", "close", "volume", "open_interest"]:
+            if col in self._df.columns:
+                self._df[col] = pd.to_numeric(self._df[col], errors="coerce").astype(float)
         self._df = self._df.sort_values(["symbol", "date"]).reset_index(drop=True)
         self._symbols = sorted(self._df["symbol"].unique())
 
@@ -207,10 +211,11 @@ def create_hybrid_data_source(
 
     if phone and password and symbols:
         try:
-            from core.data_loader_tqsdk import TqSdkDataSource
+            from core.data_loader import DataLoader
 
             logger.info("尝试从 TqSdk 加载数据 (%d 个品种)...", len(symbols))
-            tqsdk_loader = TqSdkDataSource(
+            tqsdk_loader = DataLoader(
+                data_source="tqsdk",
                 phone=phone,
                 password=password,
                 symbols=symbols,
@@ -251,7 +256,7 @@ def create_hybrid_data_source(
     try:
         from core.data_loader import DataLoader
 
-        loader = DataLoader(data_dir)
+        loader = DataLoader(data_source="csv", data_dir=data_dir)
         loader.load_csv_files("*.csv")
         loader.build_continuous_series()
         df = loader.get_pybroker_df()
@@ -337,49 +342,58 @@ class RegimeIndicator:
         detector = self._detector  # 捕获引用
 
         def regime_fn(bar_data):
-            """返回环境标签序列。"""
-            df = pd.DataFrame(
-                {
-                    "open": bar_data.open,
-                    "high": bar_data.high,
-                    "low": bar_data.low,
-                    "close": bar_data.close,
-                    "volume": bar_data.volume,
-                }
-            )
-            if len(df) < 20:
-                return pd.Series(["UNKNOWN"] * len(df), index=bar_data.date)
+            """返回环境标签序列（numpy array）。
+            
+            使用已 fit 的 detector.transform()，避免重新 fit_transform
+            单品种数据可能不足以独立拟合。
+            """
+            n = len(bar_data.date)
+            if n < 20:
+                return np.array(["unknown"] * n)
             try:
-                result = detector.detect(df)
+                df = pd.DataFrame(
+                    {
+                        "open": bar_data.open,
+                        "high": bar_data.high,
+                        "low": bar_data.low,
+                        "close": bar_data.close,
+                        "volume": bar_data.volume,
+                    },
+                    index=pd.to_datetime(bar_data.date),
+                )
+                # 使用 transform（使用已拟合参数）而非 detect（重新拟合）
+                result = detector.transform(df)
                 if "regime" in result.columns:
-                    # 对齐到 bar_data 的日期
-                    regime_series = result.set_index("date")["regime"]
-                    return regime_series.reindex(bar_data.index, fill_value="UNKNOWN")
+                    # transform 输出不含 date 列，直接使用 df.index 对齐
+                    regime_series = pd.Series(result["regime"].values, index=df.index)
+                    return regime_series.reindex(df.index, fill_value="unknown").to_numpy()
             except Exception:
                 pass
-            return pd.Series(["UNKNOWN"] * len(bar_data), index=bar_data.index)
+            return np.array(["unknown"] * n)
 
         def regime_conf_fn(bar_data):
-            """返回环境置信度序列。"""
-            df = pd.DataFrame(
-                {
-                    "open": bar_data.open,
-                    "high": bar_data.high,
-                    "low": bar_data.low,
-                    "close": bar_data.close,
-                    "volume": bar_data.volume,
-                }
-            )
-            if len(df) < 20:
-                return pd.Series([0.5] * len(df), index=bar_data.index)
+            """返回环境置信度序列（numpy array）。"""
+            n = len(bar_data.date)
+            if n < 20:
+                return np.full(n, 0.5)
             try:
-                result = detector.detect(df)
+                df = pd.DataFrame(
+                    {
+                        "open": bar_data.open,
+                        "high": bar_data.high,
+                        "low": bar_data.low,
+                        "close": bar_data.close,
+                        "volume": bar_data.volume,
+                    },
+                    index=pd.to_datetime(bar_data.date),
+                )
+                result = detector.transform(df)
                 if "regime_confidence" in result.columns:
-                    conf_series = result.set_index("date")["regime_confidence"]
-                    return conf_series.reindex(bar_data.index, fill_value=0.5)
+                    conf_series = pd.Series(result["regime_confidence"].values, index=df.index)
+                    return conf_series.reindex(df.index, fill_value=0.5).to_numpy()
             except Exception:
                 pass
-            return pd.Series([0.5] * len(bar_data), index=bar_data.index)
+            return np.full(n, 0.5)
 
         return regime_fn, regime_conf_fn
 
@@ -444,31 +458,24 @@ class StrategyExecutorFactory:
             regime_str = None
             regime_confidence = 0.5
             try:
-                regime_str = ctx.indicator("regime")
-                regime_confidence_val = ctx.indicator("regime_confidence")
-                if regime_str is not None:
-                    # PyBroker indicator 返回 Series，取最新值
-                    if hasattr(regime_str, "iloc"):
-                        regime_str = (
-                            str(regime_str.iloc[-1]) if len(regime_str) > 0 else None
-                        )
-                    else:
-                        regime_str = str(regime_str)
-                if regime_confidence_val is not None:
-                    if hasattr(regime_confidence_val, "iloc"):
-                        regime_confidence = (
-                            float(regime_confidence_val.iloc[-1])
-                            if len(regime_confidence_val) > 0
-                            else 0.5
-                        )
-                    else:
-                        regime_confidence = float(regime_confidence_val)
+                regime_raw = ctx.indicator("regime")
+                if regime_raw is not None:
+                    if hasattr(regime_raw, "iloc") and len(regime_raw) > 0:
+                        regime_str = str(regime_raw.iloc[-1])
+                    elif hasattr(regime_raw, "__getitem__") and len(regime_raw) > 0:
+                        regime_str = str(regime_raw[-1])
+                conf_raw = ctx.indicator("regime_confidence")
+                if conf_raw is not None:
+                    if hasattr(conf_raw, "iloc") and len(conf_raw) > 0:
+                        regime_confidence = float(conf_raw.iloc[-1])
+                    elif hasattr(conf_raw, "__getitem__") and len(conf_raw) > 0:
+                        regime_confidence = float(conf_raw[-1])
             except Exception:
                 pass  # 指标未注册时忽略
 
             # ── 2. 计算滚动 Sharpe ──
             try:
-                current_equity = ctx.total_equity
+                current_equity = float(ctx.total_equity)
             except Exception:
                 current_equity = prev_equity
             daily_ret = (current_equity / prev_equity) - 1 if prev_equity > 0 else 0.0
@@ -478,8 +485,8 @@ class StrategyExecutorFactory:
             current_sharpe = 0.0
             if len(daily_returns) >= lookback:
                 ret_list = list(daily_returns)
-                mean_ret = np.mean(ret_list)
-                std_ret = np.std(ret_list, ddof=1)
+                mean_ret = float(np.mean(ret_list))
+                std_ret = float(np.std(ret_list, ddof=1))
                 if std_ret > 1e-10:
                     current_sharpe = (mean_ret / std_ret) * np.sqrt(252)
 
@@ -529,27 +536,42 @@ class StrategyExecutorFactory:
 
             try:
                 raw = ctx.indicator("sma_5")
-                sma_5_val = raw[-1] if hasattr(raw, "iloc") and len(raw) > 0 else raw
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    sma_5_val = raw.iloc[-1]
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    sma_5_val = raw[-1]
             except Exception:
                 pass
             try:
                 raw = ctx.indicator("sma_20")
-                sma_20_val = raw[-1] if hasattr(raw, "iloc") and len(raw) > 0 else raw
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    sma_20_val = raw.iloc[-1]
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    sma_20_val = raw[-1]
             except Exception:
                 pass
             try:
                 raw = ctx.indicator("rsi_14")
-                rsi_val = raw[-1] if hasattr(raw, "iloc") and len(raw) > 0 else raw
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    rsi_val = raw.iloc[-1]
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    rsi_val = raw[-1]
             except Exception:
                 pass
             try:
                 raw = ctx.indicator("bb_upper")
-                bb_upper_val = raw[-1] if hasattr(raw, "iloc") and len(raw) > 0 else raw
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    bb_upper_val = raw.iloc[-1]
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    bb_upper_val = raw[-1]
             except Exception:
                 pass
             try:
                 raw = ctx.indicator("bb_lower")
-                bb_lower_val = raw[-1] if hasattr(raw, "iloc") and len(raw) > 0 else raw
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    bb_lower_val = raw.iloc[-1]
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    bb_lower_val = raw[-1]
             except Exception:
                 pass
 
@@ -562,17 +584,6 @@ class StrategyExecutorFactory:
                         signal = 1
                     elif sma_5_val < sma_20_val:
                         signal = -1
-                else:
-                    # 回退到 ctx 已有的指标方法
-                    try:
-                        sma_5 = ctx.sma(5)
-                        sma_20 = ctx.sma(20)
-                        if sma_5[-1] > sma_20[-1]:
-                            signal = 1
-                        elif sma_5[-1] < sma_20[-1]:
-                            signal = -1
-                    except Exception:
-                        pass
 
             elif active_strategy == "rsi":
                 oversold = params.get("oversold", 30.0)
@@ -582,15 +593,6 @@ class StrategyExecutorFactory:
                         signal = 1
                     elif rsi_val > overbought:
                         signal = -1
-                else:
-                    try:
-                        rsi = ctx.rsi(14)
-                        if rsi[-1] < oversold:
-                            signal = 1
-                        elif rsi[-1] > overbought:
-                            signal = -1
-                    except Exception:
-                        pass
 
             elif active_strategy == "vol_breakout":
                 if bb_upper_val is not None and bb_lower_val is not None:
@@ -598,15 +600,6 @@ class StrategyExecutorFactory:
                         signal = 1
                     elif current_close < bb_lower_val:
                         signal = -1
-                else:
-                    try:
-                        bb = ctx.bb(30)
-                        if current_close > bb.upper[-1]:
-                            signal = 1
-                        elif current_close < bb.lower[-1]:
-                            signal = -1
-                    except Exception:
-                        pass
 
             # term_structure, spread 等在此扩展
 
@@ -760,6 +753,25 @@ class PyBrokerBacktestRunner:
             & (df["date"] <= pd.Timestamp(end_date))
         ]
 
+        # ── 过滤到主力合约（连续数据）──
+        # 当数据包含多个合约时（如 rb2009, rb2010...），
+        # 仅使用主力合约避免 20x 杠杆效应扭曲回测结果。
+        if "is_dominant" in df.columns and df["is_dominant"].any():
+            df = df[df["is_dominant"]].copy()
+            # 使用统一的产品名作为 symbol，确保 PyBroker 识别为单一品种
+            if "product" in df.columns:
+                df["symbol"] = df["product"]
+            logger.info(
+                "已过滤到主力合约: %d 行, %d 品种",
+                len(df),
+                df["symbol"].nunique(),
+            )
+        elif "is_dominant" not in df.columns:
+            # 无 dominants 信息时，按每个产品只保留最后一个合约（数据最多的）
+            logger.info(
+                "没有主力合约信息，使用全部数据 (%d 行)", len(df)
+            )
+
         # ── 拟合环境检测器 ──
         self.regime_indicator.fit(df)
         regime_fn, regime_conf_fn = self.regime_indicator.create_pybroker_regime_fn()
@@ -771,31 +783,41 @@ class PyBrokerBacktestRunner:
             sell_delay=self.config.pybroker_sell_delay,
             bootstrap_samples=self.config.pybroker_bootstrap_samples,
         )
+        # 确保所有数值列都是 Python float，避免 Decimal 类型问题
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = df[col].astype(float).to_numpy()
         strategy = pybroker.Strategy(df, start_date, end_date, config=pb_config)
 
-        # ── 注册向量化指标（pybroker.indicator 通过 StaticScope 全局注册） ──
+        # ── 注册向量化指标 ──
+        # PyBroker 内部将 bar_data.close 等字段转为 numpy array，
+        # 因此需要先转换为 pd.Series 才能使用 .rolling/.diff 等方法。
         def _sma_5(bar_data):
-            return bar_data.close.rolling(5).mean()
+            return pd.Series(bar_data.close).rolling(5).mean().to_numpy()
 
         def _sma_20(bar_data):
-            return bar_data.close.rolling(20).mean()
+            return pd.Series(bar_data.close).rolling(20).mean().to_numpy()
 
         def _rsi_14(bar_data):
-            delta = bar_data.close.diff()
+            close_ser = pd.Series(bar_data.close)
+            delta = close_ser.diff()
             gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / 14, adjust=False).mean()
             loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1 / 14, adjust=False).mean()
-            rs = np.where(loss > 0, gain / loss, 100.0)
-            return 100 - 100 / (1 + rs)
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - 100 / (1 + rs)
+            return rsi.to_numpy()
 
         def _bb_upper(bar_data):
-            center = bar_data.close.rolling(30).mean()
-            std = bar_data.close.rolling(30).std()
-            return center + 2 * std
+            ser = pd.Series(bar_data.close)
+            center = ser.rolling(30).mean()
+            std = ser.rolling(30).std()
+            return (center + 2 * std).to_numpy()
 
         def _bb_lower(bar_data):
-            center = bar_data.close.rolling(30).mean()
-            std = bar_data.close.rolling(30).std()
-            return center - 2 * std
+            ser = pd.Series(bar_data.close)
+            center = ser.rolling(30).mean()
+            std = ser.rolling(30).std()
+            return (center - 2 * std).to_numpy()
 
         def _regime(bar_data):
             return regime_fn(bar_data)
@@ -812,14 +834,15 @@ class PyBrokerBacktestRunner:
             pybroker.indicator("regime", _regime),
             pybroker.indicator("regime_confidence", _regime_conf),
         ]
-        # 抑制未使用警告
-        _ = _indicators
 
         # ── 添加策略执行函数 ──
-        symbols = self.data_source.symbols
-        for name in strategies:
-            executor = self.executor_factory.create_executor(name)
-            strategy.add_execution(executor, symbols=symbols)
+        # PyBroker 限制每个 symbol 只能出现在一个 Execution 中。
+        # 但 executor 内部已通过 switch_engine.decide() 实现多策略切换，
+        # 因此只需添加一个 executor 即可覆盖所有注册策略。
+        symbols = sorted(df["symbol"].unique().tolist())
+        primary_strategy = strategies[0] if strategies else "dual_ma"
+        executor = self.executor_factory.create_executor(primary_strategy)
+        strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
 
         # ── 执行回测（PyBroker v1.2: Strategy.backtest()） ──
         pb_result = strategy.backtest(
@@ -1164,6 +1187,12 @@ class PyBrokerBacktestRunner:
             & (df["date"] <= pd.Timestamp(end_date))
         ]
 
+        # ── 过滤到主力合约（连续数据）──
+        if "is_dominant" in df.columns and df["is_dominant"].any():
+            df = df[df["is_dominant"]].copy()
+            if "product" in df.columns:
+                df["symbol"] = df["product"]
+
         pb_config = pybroker.StrategyConfig(
             initial_cash=self.config.initial_cash,
             buy_delay=self.config.pybroker_buy_delay,
@@ -1171,32 +1200,35 @@ class PyBrokerBacktestRunner:
         )
         strategy = pybroker.Strategy(df, start_date, end_date, config=pb_config)
 
-        # 注册指标（与 _run_pybroker 相同的指标）
+        # 注册指标（与 _run_pybroker 相同的指标，兼容 numpy array）
         def _wf_sma_5(bar_data):
-            return bar_data.close.rolling(5).mean()
+            return pd.Series(bar_data.close).rolling(5).mean().to_numpy()
 
         def _wf_sma_20(bar_data):
-            return bar_data.close.rolling(20).mean()
+            return pd.Series(bar_data.close).rolling(20).mean().to_numpy()
 
         def _wf_rsi_14(bar_data):
-            delta = bar_data.close.diff()
+            close_ser = pd.Series(bar_data.close)
+            delta = close_ser.diff()
             gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / 14, adjust=False).mean()
             loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1 / 14, adjust=False).mean()
-            rs = np.where(loss > 0, gain / loss, 100.0)
-            return 100 - 100 / (1 + rs)
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - 100 / (1 + rs)
+            return rsi.fillna(50.0).to_numpy()
 
         def _wf_bb_upper(bar_data):
-            center = bar_data.close.rolling(30).mean()
-            std = bar_data.close.rolling(30).std()
-            return center + 2 * std
+            close_ser = pd.Series(bar_data.close)
+            center = close_ser.rolling(30).mean()
+            std = close_ser.rolling(30).std()
+            return (center + 2 * std).to_numpy()
 
         def _wf_bb_lower(bar_data):
-            center = bar_data.close.rolling(30).mean()
-            std = bar_data.close.rolling(30).std()
-            return center - 2 * std
+            close_ser = pd.Series(bar_data.close)
+            center = close_ser.rolling(30).mean()
+            std = close_ser.rolling(30).std()
+            return (center - 2 * std).to_numpy()
 
-        regime_fn, _ = self.regime_indicator.create_pybroker_regime_fn()
-        _, regime_conf_fn = self.regime_indicator.create_pybroker_regime_fn()
+        regime_fn, regime_conf_fn = self.regime_indicator.create_pybroker_regime_fn()
 
         def _wf_regime(bar_data):
             return regime_fn(bar_data)
@@ -1213,13 +1245,11 @@ class PyBrokerBacktestRunner:
             pybroker.indicator("regime", _wf_regime),
             pybroker.indicator("regime_confidence", _wf_regime_conf),
         ]
-        _ = _wf_indicators
 
-        # 添加执行函数
-        symbols = self.data_source.symbols
-        for name in self._registered_strategies:
-            executor = self.executor_factory.create_executor(name)
-            strategy.add_execution(executor, symbols=symbols)
+        # 只添加一个执行器（PyBroker 限制同一 symbol 只能一个 executor）
+        symbols = sorted(df["symbol"].unique().tolist())
+        executor = self.executor_factory.create_executor("dual_ma")
+        strategy.add_execution(executor, symbols=symbols, indicators=_wf_indicators)
 
         # Windows 数量估算
         n_windows = max(2, int(1.0 / (1.0 - train_ratio)))
