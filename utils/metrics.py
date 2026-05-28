@@ -5,11 +5,14 @@
 供前端展示和分析使用。
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List
 
 from core.performance import PerformanceEvaluator
+
+_logger = logging.getLogger(__name__)
 
 
 class MetricsCalculator:
@@ -54,8 +57,8 @@ class MetricsCalculator:
                     # 格式: 指标名列，第一列是指标
                     for col in df.columns:
                         metrics[col] = df.iloc[0][col] if len(df) > 0 else 0
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug("从 DataFrame 提取指标失败: %s", e)
 
         # 方式3: 如果 result 有 __dict__，尝试从那里提取
         if hasattr(result, '__dict__'):

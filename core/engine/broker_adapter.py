@@ -414,8 +414,8 @@ class RegimeIndicator:
                     return regime_series.reindex(
                         df.index, fill_value="unknown"
                     ).to_numpy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("regime_fn 计算失败，回退到 unknown: %s", e)
             return np.array(["unknown"] * n)
 
         def regime_conf_fn(bar_data):
@@ -440,8 +440,8 @@ class RegimeIndicator:
                         result["regime_confidence"].values, index=df.index
                     )
                     return conf_series.reindex(df.index, fill_value=0.5).to_numpy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("regime_conf_fn 计算失败，回退到 0.5: %s", e)
             return np.full(n, 0.5)
 
         def regime_stab_fn(bar_data):
@@ -466,8 +466,8 @@ class RegimeIndicator:
                         result["regime_stability"].values, index=df.index
                     )
                     return stab_series.reindex(df.index, fill_value=1.0).to_numpy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("regime_stab_fn 计算失败，回退到 1.0: %s", e)
             return np.full(n, 1.0)
 
         return regime_fn, regime_conf_fn, regime_stab_fn
@@ -582,13 +582,12 @@ class StrategyExecutorFactory:
                         regime_stability = float(stab_raw.iloc[-1])
                     elif hasattr(stab_raw, "__getitem__") and len(stab_raw) > 0:
                         regime_stability = float(stab_raw[-1])
-            except Exception:
-                pass
-
-            # ── 2. 计算滚动 Sharpe ──
+            except Exception as e:
+                logger.debug("获取环境指标失败: %s", e)
             try:
                 current_equity = float(ctx.total_equity)
-            except Exception:
+            except Exception as e:
+                logger.debug("获取当前权益失败，使用前值: %s", e)
                 current_equity = prev_equity
             daily_ret = (current_equity / prev_equity) - 1 if prev_equity > 0 else 0.0
             daily_returns.append(daily_ret)
@@ -634,8 +633,8 @@ class StrategyExecutorFactory:
                             active_strategy,
                             decision.reason.value,
                         )
-                except Exception:
-                    pass  # 切换失败不影响执行
+                except Exception as e:
+                    logger.debug("策略切换评估失败，保持当前策略: %s", e)
             else:
                 active_strategy = strategy_name
 
@@ -653,74 +652,28 @@ class StrategyExecutorFactory:
             bb_upper_val = None
             bb_lower_val = None
 
-            try:
-                raw = ctx.indicator("sma_5")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    sma_5_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    sma_5_val = raw[-1]
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("sma_20")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    sma_20_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    sma_20_val = raw[-1]
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("rsi_14")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    rsi_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    rsi_val = raw[-1]
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("rsi_slope")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    rsi_slope_val = float(raw.iloc[-1])
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    rsi_slope_val = float(raw[-1])
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("bb_upper")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    bb_upper_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    bb_upper_val = raw[-1]
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("bb_lower")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    bb_lower_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    bb_lower_val = raw[-1]
-            except Exception:
-                pass
+            def _get_indicator(ctx, name: str):
+                """安全获取 PyBroker 指标值，失败时记录日志并返回 None。"""
+                try:
+                    raw = ctx.indicator(name)
+                    if hasattr(raw, "iloc") and len(raw) > 0:
+                        return raw.iloc[-1]
+                    elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                        return raw[-1]
+                except Exception as e:
+                    logger.debug("指标 %s 获取失败: %s", name, e)
+                return None
 
-            # ── term_structure / spread 指标 ──
-            sma_lookback_val = None
-            spread_zscore_val = None
-            try:
-                raw = ctx.indicator("sma_lookback")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    sma_lookback_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    sma_lookback_val = raw[-1]
-            except Exception:
-                pass
-            try:
-                raw = ctx.indicator("spread_zscore")
-                if hasattr(raw, "iloc") and len(raw) > 0:
-                    spread_zscore_val = raw.iloc[-1]
-                elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                    spread_zscore_val = raw[-1]
-            except Exception:
-                pass
+            sma_5_val = _get_indicator(ctx, "sma_5")
+            sma_20_val = _get_indicator(ctx, "sma_20")
+            rsi_val = _get_indicator(ctx, "rsi_14")
+            rsi_slope_raw = _get_indicator(ctx, "rsi_slope")
+            rsi_slope_val = float(rsi_slope_raw) if rsi_slope_raw is not None else 0.0
+            bb_upper_val = _get_indicator(ctx, "bb_upper")
+            bb_lower_val = _get_indicator(ctx, "bb_lower")
+
+            sma_lookback_val = _get_indicator(ctx, "sma_lookback")
+            spread_zscore_val = _get_indicator(ctx, "spread_zscore")
 
             # ── 5. 根据激活策略执行交易 ──
             signal = 0  # 0=none, 1=buy, -1=sell
@@ -790,14 +743,9 @@ class StrategyExecutorFactory:
 
                 # 获取 ATR 值用于动态止损
                 atr_val = None
-                try:
-                    raw = ctx.indicator("atr_14")
-                    if hasattr(raw, "iloc") and len(raw) > 0:
-                        atr_val = float(raw.iloc[-1])
-                    elif hasattr(raw, "__getitem__") and len(raw) > 0:
-                        atr_val = float(raw[-1])
-                except Exception:
-                    pass
+                atr_val = _get_indicator(ctx, "atr_14")
+                if atr_val is not None:
+                    atr_val = float(atr_val)
 
                 # 动态止损线：max(固定止损, 2*ATR/price)
                 if atr_val is not None and current_close > 0:
@@ -1050,8 +998,8 @@ class StrategyExecutorFactory:
         for name, strategy in strategy_instances.items():
             try:
                 all_indicators.extend(strategy.register_indicators())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("策略 %s 注册指标失败: %s", name, e)
 
         strategy_names = list(strategy_instances.keys())
         if use_weighted_fusion and self.library is not None:
@@ -1082,8 +1030,8 @@ class StrategyExecutorFactory:
                             current_regime = str(regime_raw.iloc[-1]).upper()
                         elif hasattr(regime_raw, "__getitem__") and len(regime_raw) > 0:
                             current_regime = str(regime_raw[-1]).upper()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("融合执行器获取环境指标失败: %s", e)
 
             signals = []
             total_weight = 0.0
@@ -1119,8 +1067,8 @@ class StrategyExecutorFactory:
                     try:
                         pos = ctx.long_pos()
                         has_long = pos is not None and pos.shares > 0
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("融合执行器检查多头持仓失败: %s", e)
                     if has_long:
                         ctx.sell_all_shares()
 

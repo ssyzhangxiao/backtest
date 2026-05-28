@@ -437,8 +437,8 @@ class BacktestRunner:
                     strategy_signal_cache[sname] = self._generate_signals(
                         sname, data, params, regime_df
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("策略 %s 信号生成失败: %s", sname, e)
 
         for i in range(len(signals)):
             close = signals["close"].iloc[i]
@@ -498,8 +498,8 @@ class BacktestRunner:
                                 switch_decision.to_strategy,
                                 switch_decision.reason.value,
                             )
-                    except Exception:
-                        pass  # 切换引擎评估失败不影响主流程
+                    except Exception as e:
+                        logger.debug("策略切换评估失败: %s", e)
 
             # ── 策略切换时替换信号 ──
             if active_strategy and active_strategy in strategy_signal_cache:

@@ -14,12 +14,15 @@ import re
 import glob
 import time
 import pickle
+import logging
 import warnings
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +502,8 @@ class DataLoader:
                     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
             return df
-        except Exception:
+        except Exception as e:
+            _logger.warning("加载 CSV 文件失败: %s", e)
             return None
 
     def load_csv_files(self, file_pattern: str = "*.csv") -> pd.DataFrame:

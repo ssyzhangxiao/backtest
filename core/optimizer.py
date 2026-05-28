@@ -460,7 +460,8 @@ class ParameterOptimizer:
                     }
                     m.update(params)
                     train_results.append(m)
-                except Exception:
+                except Exception as e:
+                    logger.debug("参数组合 %s 回测失败: %s", params, e)
                     continue
 
             if not train_results:
@@ -509,10 +510,8 @@ class ParameterOptimizer:
                     **test_m,
                 }
                 wf_results.append(record)
-            except Exception:
-                pass
-
-            current_start = train_end
+            except Exception as e:
+                logger.debug("滚动窗口回测失败: %s", e)
 
         if not wf_results:
             return pd.DataFrame()

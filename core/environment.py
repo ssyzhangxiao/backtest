@@ -14,11 +14,14 @@ v4: 内部委托给 MarketRegimeDetector 消除重复计算，
      保留独立的连续评分和动态权重功能。
 """
 
+import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional, Tuple
 
 from .market_regime import MarketRegimeDetector
+
+_logger = logging.getLogger(__name__)
 
 
 class EnvironmentAdapter:
@@ -253,8 +256,8 @@ class EnvironmentAdapter:
             regime_df = self._detector.classify_regime(indicators)
             result["regime"] = regime_df["regime"]
             result["regime_confidence"] = regime_df["regime_confidence"]
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("MarketRegimeDetector 分类失败: %s", e)
 
         weights_df = self.compute_dynamic_weights(result["trend_score"])
         result["weight_trend"] = weights_df["weight_trend"]
