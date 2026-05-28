@@ -133,7 +133,9 @@ class PyBrokerDataSource:
         # 将 TqSdk 返回的 Decimal 等特殊类型转为 float，避免 PyBroker 报错
         for col in ["open", "high", "low", "close", "volume", "open_interest"]:
             if col in self._df.columns:
-                self._df[col] = pd.to_numeric(self._df[col], errors="coerce").astype(float)
+                self._df[col] = pd.to_numeric(self._df[col], errors="coerce").astype(
+                    float
+                )
         self._df = self._df.sort_values(["symbol", "date"]).reset_index(drop=True)
         self._symbols = sorted(self._df["symbol"].unique())
 
@@ -250,7 +252,9 @@ def create_hybrid_data_source(
             tqsdk_dom = tqsdk_loader.full_df[tqsdk_loader.full_df["is_dominant"]].copy()
             if "product" in tqsdk_dom.columns and "spread" in tqsdk_dom.columns:
                 tqsdk_dom["exchange"] = tqsdk_dom["symbol"].str.split(".").str[0]
-                tqsdk_dom["symbol"] = tqsdk_dom["exchange"] + "." + tqsdk_dom["product"].str.upper()
+                tqsdk_dom["symbol"] = (
+                    tqsdk_dom["exchange"] + "." + tqsdk_dom["product"].str.upper()
+                )
                 tqsdk_dom.drop(columns=["exchange"], inplace=True)
 
                 # 将 spread/far_close/far_symbol 合并到 CSV 数据
@@ -258,6 +262,7 @@ def create_hybrid_data_source(
                 available_cols = [c for c in spread_cols if c in tqsdk_dom.columns]
                 if available_cols:
                     import pandas as pd
+
                     spread_df = tqsdk_dom[available_cols].copy()
                     # 统一日期格式为日期（去掉时间部分），确保 merge 能匹配
                     spread_df["date"] = pd.to_datetime(spread_df["date"]).dt.normalize()
@@ -286,7 +291,17 @@ def create_hybrid_data_source(
         from core.data_loader import DataLoader
 
         loader = DataLoader(data_source="csv", data_dir=data_dir)
-        loader.load_csv_files("*.csv")
+        if symbols:
+            target_csv_files = []
+            for sym in symbols:
+                csv_path = os.path.join(data_dir, f"{sym}.csv")
+                if os.path.exists(csv_path):
+                    target_csv_files.append(csv_path)
+            if not target_csv_files:
+                raise RuntimeError(f"未找到目标品种的 CSV 文件: {symbols}")
+            loader.load_csv_files_by_paths(target_csv_files)
+        else:
+            loader.load_csv_files("*.csv")
         loader.build_continuous_series()
         df = loader.get_pybroker_df()
 
@@ -294,8 +309,9 @@ def create_hybrid_data_source(
             raise RuntimeError("DataLoader 返回空数据")
 
         logger.info(
-            "本地 CSV 数据加载成功: %d 行",
+            "本地 CSV 数据加载成功: %d 行, %d 品种",
             len(df),
+            df["symbol"].nunique() if "symbol" in df.columns else 0,
         )
         return PyBrokerDataSource(df)
 
@@ -372,7 +388,7 @@ class RegimeIndicator:
 
         def regime_fn(bar_data):
             """返回环境标签序列（numpy array）。
-            
+
             使用已 fit 的 detector.transform()，避免重新 fit_transform
             单品种数据可能不足以独立拟合。
             """
@@ -395,7 +411,9 @@ class RegimeIndicator:
                 if "regime" in result.columns:
                     # transform 输出不含 date 列，直接使用 df.index 对齐
                     regime_series = pd.Series(result["regime"].values, index=df.index)
-                    return regime_series.reindex(df.index, fill_value="unknown").to_numpy()
+                    return regime_series.reindex(
+                        df.index, fill_value="unknown"
+                    ).to_numpy()
             except Exception:
                 pass
             return np.array(["unknown"] * n)
@@ -418,13 +436,41 @@ class RegimeIndicator:
                 )
                 result = detector.transform(df)
                 if "regime_confidence" in result.columns:
-                    conf_series = pd.Series(result["regime_confidence"].values, index=df.index)
+                    conf_series = pd.Series(
+                        result["regime_confidence"].values, index=df.index
+                    )
                     return conf_series.reindex(df.index, fill_value=0.5).to_numpy()
             except Exception:
                 pass
             return np.full(n, 0.5)
 
-        return regime_fn, regime_conf_fn
+        def regime_stab_fn(bar_data):
+            """返回环境稳定性序列（numpy array）。"""
+            n = len(bar_data.date)
+            if n < 20:
+                return np.full(n, 1.0)
+            try:
+                df = pd.DataFrame(
+                    {
+                        "open": bar_data.open,
+                        "high": bar_data.high,
+                        "low": bar_data.low,
+                        "close": bar_data.close,
+                        "volume": bar_data.volume,
+                    },
+                    index=pd.to_datetime(bar_data.date),
+                )
+                result = detector.transform(df)
+                if "regime_stability" in result.columns:
+                    stab_series = pd.Series(
+                        result["regime_stability"].values, index=df.index
+                    )
+                    return stab_series.reindex(df.index, fill_value=1.0).to_numpy()
+            except Exception:
+                pass
+            return np.full(n, 1.0)
+
+        return regime_fn, regime_conf_fn, regime_stab_fn
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -455,8 +501,13 @@ class StrategyExecutorFactory:
         self.config = config or BacktestConfig()
         self._position_size = self.config.max_position_pct
 
-    def create_executor(self, strategy_name: str, enable_switching: bool = True,
-                        all_strategy_names: Optional[List[str]] = None):
+    def create_executor(
+        self,
+        strategy_name: str,
+        enable_switching: bool = True,
+        all_strategy_names: Optional[List[str]] = None,
+        custom_params: Optional[Dict[str, Dict[str, any]]] = None,
+    ):
         """
         创建单个策略的 PyBroker 执行函数。
 
@@ -464,6 +515,7 @@ class StrategyExecutorFactory:
             strategy_name: 主策略名称（如 "dual_ma", "rsi"）
             enable_switching: 是否启用策略切换（单策略基线测试时应关闭）
             all_strategy_names: 所有注册策略名称列表，用于信号融合模式
+            custom_params: 自定义策略参数，格式 {"dual_ma": {"short_ma": 5}, ...}
 
         Returns:
             可传入 pybroker.Strategy.add_execution() 的执行函数。
@@ -473,6 +525,8 @@ class StrategyExecutorFactory:
             raise ValueError(f"未知策略: {strategy_name}")
 
         params = dict(profile.default_params)
+        if custom_params and strategy_name in custom_params:
+            params.update(custom_params[strategy_name])
         position_size = self._position_size
         stop_loss_pct = self.config.stop_loss_pct
         switch_engine = self.switch_engine
@@ -490,7 +544,10 @@ class StrategyExecutorFactory:
             strategy_params = {}
             for sname in all_strategy_names:
                 sp = self.library.get_profile(sname)
-                strategy_params[sname] = dict(sp.default_params) if sp else dict(params)
+                sparams = dict(sp.default_params) if sp else dict(params)
+                if custom_params and sname in custom_params:
+                    sparams.update(custom_params[sname])
+                strategy_params[sname] = sparams
 
         # ── 滚动 Sharpe 状态（闭包内维护） ──
         switch_cfg = SwitchConfig()
@@ -505,6 +562,7 @@ class StrategyExecutorFactory:
             # ── 1. 获取当前市场环境 ──
             regime_str = None
             regime_confidence = 0.5
+            regime_stability = 1.0
             try:
                 regime_raw = ctx.indicator("regime")
                 if regime_raw is not None:
@@ -518,6 +576,12 @@ class StrategyExecutorFactory:
                         regime_confidence = float(conf_raw.iloc[-1])
                     elif hasattr(conf_raw, "__getitem__") and len(conf_raw) > 0:
                         regime_confidence = float(conf_raw[-1])
+                stab_raw = ctx.indicator("regime_stability")
+                if stab_raw is not None:
+                    if hasattr(stab_raw, "iloc") and len(stab_raw) > 0:
+                        regime_stability = float(stab_raw.iloc[-1])
+                    elif hasattr(stab_raw, "__getitem__") and len(stab_raw) > 0:
+                        regime_stability = float(stab_raw[-1])
             except Exception:
                 pass
 
@@ -585,6 +649,7 @@ class StrategyExecutorFactory:
             sma_5_val = None
             sma_20_val = None
             rsi_val = None
+            rsi_slope_val = 0.0
             bb_upper_val = None
             bb_lower_val = None
 
@@ -610,6 +675,14 @@ class StrategyExecutorFactory:
                     rsi_val = raw.iloc[-1]
                 elif hasattr(raw, "__getitem__") and len(raw) > 0:
                     rsi_val = raw[-1]
+            except Exception:
+                pass
+            try:
+                raw = ctx.indicator("rsi_slope")
+                if hasattr(raw, "iloc") and len(raw) > 0:
+                    rsi_slope_val = float(raw.iloc[-1])
+                elif hasattr(raw, "__getitem__") and len(raw) > 0:
+                    rsi_slope_val = float(raw[-1])
             except Exception:
                 pass
             try:
@@ -652,10 +725,11 @@ class StrategyExecutorFactory:
             # ── 5. 根据激活策略执行交易 ──
             signal = 0  # 0=none, 1=buy, -1=sell
 
-            # 将 term_structure / spread 指标注入 params
+            # 将 term_structure / spread / rsi_slope 指标注入 params
             _extra_indicators = {
                 "_sma_lookback_val": sma_lookback_val,
                 "_spread_zscore_val": spread_zscore_val,
+                "_rsi_slope": rsi_slope_val,
             }
 
             if use_signal_fusion:
@@ -664,9 +738,15 @@ class StrategyExecutorFactory:
                     sparams = dict(strategy_params.get(sname, params))
                     sparams.update(_extra_indicators)
                     s = self._calc_single_signal(
-                        sname, sma_5_val, sma_20_val, rsi_val,
-                        bb_upper_val, bb_lower_val, current_close,
-                        sparams, regime_str,
+                        sname,
+                        sma_5_val,
+                        sma_20_val,
+                        rsi_val,
+                        bb_upper_val,
+                        bb_lower_val,
+                        current_close,
+                        sparams,
+                        regime_str,
                     )
                     signal += s * weight
                 # 融合信号阈值：绝对值 > 0.2 才开仓
@@ -681,16 +761,27 @@ class StrategyExecutorFactory:
                 exec_params = dict(params)
                 exec_params.update(_extra_indicators)
                 signal = self._calc_single_signal(
-                    active_strategy, sma_5_val, sma_20_val, rsi_val,
-                    bb_upper_val, bb_lower_val, current_close,
-                    exec_params, regime_str,
+                    active_strategy,
+                    sma_5_val,
+                    sma_20_val,
+                    rsi_val,
+                    bb_upper_val,
+                    bb_lower_val,
+                    current_close,
+                    exec_params,
+                    regime_str,
                 )
 
-            # ── 6. 环境自适应过滤 ──
+            # ── 6. 环境自适应过滤（v2: 减仓而非禁止 + 稳定性缩放） ──
             # 信号融合模式下跳过过滤（融合信号已综合考虑各策略）
+            position_scale = 1.0
             if not use_signal_fusion and signal != 0 and regime_str is not None:
-                if not self._should_trade(regime_str, active_strategy):
-                    signal = 0
+                _, pos_scale = self._should_trade(
+                    regime_str, active_strategy, regime_confidence
+                )
+                position_scale = pos_scale
+                if regime_stability < 0.6:
+                    position_scale *= 0.7
 
             # ── 7. ATR 动态止损 + 移动止损 ──
             if stop_loss_pct > 0:
@@ -740,61 +831,76 @@ class StrategyExecutorFactory:
             has_long = ctx.pos(ctx.symbol, "long") is not None
             has_short = ctx.pos(ctx.symbol, "short") is not None
 
+            effective_size = position_size * position_scale
+            if effective_size < 0.05:
+                effective_size = 0.05
+
             if signal == 1 and not has_long:
-                # 做多信号且无多头 → 先平空头（如有），再开多
                 if has_short:
                     ctx.cover_all_shares()
-                ctx.buy_shares = ctx.calc_target_shares(position_size)
+                ctx.buy_shares = ctx.calc_target_shares(effective_size)
             elif signal == -1 and not has_short:
-                # 做空信号且无空头 → 先平多头（如有），再开空
                 if has_long:
                     ctx.sell_all_shares()
-                ctx.sell_shares = ctx.calc_target_shares(position_size)
+                ctx.sell_shares = ctx.calc_target_shares(effective_size)
 
         executor_fn.__name__ = f"executor_{strategy_name}"
         return executor_fn
 
     @staticmethod
-    def _should_trade(regime: Optional[str], strategy_name: str) -> bool:
+    def _should_trade(
+        regime: Optional[str], strategy_name: str, regime_confidence: float = 1.0
+    ) -> Tuple[bool, float]:
         """
-        判断给定策略在当前市场环境下是否应该交易。
+        判断给定策略在当前市场环境下是否应该交易，返回仓位缩放系数。
 
-        规则：
-          - dual_ma: RANGE_BOUND 时不交易（趋势策略不适合震荡市）
-          - vol_breakout: LOW_VOLATILITY 时不交易（突破需要波动）
-          - term_structure: TREND_UP/TREND_DOWN 时不交易（均值回归不适合强趋势）
-          - spread: TREND_UP/TREND_DOWN 时不交易（价差回归不适合强趋势）
+        规则（v2: 禁止→减仓）：
+          - dual_ma: RANGE_BOUND 时仓位减半（0.5），低置信度时再乘0.3
+          - vol_breakout: LOW_VOLATILITY 时仓位减半（0.5），低置信度时再乘0.3
+          - term_structure: TREND_UP/TREND_DOWN 时仓位减半（0.5）
+          - spread: TREND_UP/TREND_DOWN 时仓位减半（0.5）
           - rsi: 始终允许（内部已有趋势/震荡自适应逻辑）
+          - 低置信度（<0.6）时，非完全匹配的环境额外减仓（乘0.3）
+
+        Returns:
+            (should_trade, position_scale) 元组
+            should_trade: 是否应该交易（始终为True，不再完全禁止）
+            position_scale: 仓位缩放系数（0.0~1.0）
         """
         if regime is None:
-            return True
+            return True, 1.0
         regime_upper = (
             regime.upper() if isinstance(regime, str) else str(regime).upper()
         )
 
+        scale = 1.0
+
         if strategy_name == "dual_ma":
             if regime_upper in ("RANGE_BOUND",):
-                return False
-            return True
+                scale = 0.5
         elif strategy_name == "vol_breakout":
             if regime_upper in ("LOW_VOLATILITY",):
-                return False
-            return True
+                scale = 0.5
         elif strategy_name == "term_structure":
             if regime_upper in ("TREND_UP", "TREND_DOWN"):
-                return False
-            return True
+                scale = 0.5
         elif strategy_name == "spread":
             if regime_upper in ("TREND_UP", "TREND_DOWN"):
-                return False
-            return True
-        return True
+                scale = 0.5
+
+        if regime_confidence < 0.6 and scale < 1.0:
+            scale *= 0.3
+
+        return True, scale
 
     @staticmethod
     def _calc_single_signal(
         strategy_name: str,
-        sma_5_val, sma_20_val, rsi_val,
-        bb_upper_val, bb_lower_val,
+        sma_5_val,
+        sma_20_val,
+        rsi_val,
+        bb_upper_val,
+        bb_lower_val,
         current_close: float,
         params: dict,
         regime_str: Optional[str],
@@ -815,15 +921,30 @@ class StrategyExecutorFactory:
                     signal = -1
 
         elif strategy_name == "rsi":
-            oversold = params.get("oversold", 20.0)
+            oversold = params.get("oversold", 25.0)
             overbought = params.get("overbought", 80.0)
+            trending_overbought = params.get("trending_overbought", 60.0)
+            trending_oversold = params.get("trending_oversold", 40.0)
             if rsi_val is not None:
-                is_trending = regime_str in ("trend_up", "trend_down", "breakout") if regime_str else False
+                is_trending = (
+                    regime_str in ("trend_up", "trend_down", "breakout")
+                    if regime_str
+                    else False
+                )
                 if is_trending:
-                    if rsi_val > overbought:
+                    ob = trending_overbought
+                    os_ = trending_oversold
+                    if rsi_val > ob:
                         signal = 1
-                    elif rsi_val < oversold:
+                    elif rsi_val < os_:
                         signal = -1
+                    rsi_slope = params.get("_rsi_slope", 0.0)
+                    if signal != 0 and rsi_slope > 0 and signal == 1:
+                        pass
+                    elif signal != 0 and rsi_slope < 0 and signal == -1:
+                        pass
+                    elif signal != 0 and abs(rsi_slope) < 0.01:
+                        signal = 0
                 else:
                     if rsi_val < oversold:
                         signal = 1
@@ -849,7 +970,7 @@ class StrategyExecutorFactory:
                 if term_spread > entry_threshold:
                     signal = -1  # 价格高估，做空
                 elif term_spread < -entry_threshold:
-                    signal = 1   # 价格低估，做多
+                    signal = 1  # 价格低估，做多
 
         elif strategy_name == "spread":
             # 跨期套利（单品种代理）：短期均线与长期均线价差的Z-Score回归
@@ -861,7 +982,7 @@ class StrategyExecutorFactory:
                 if spread_z > entry_z:
                     signal = -1  # 价差过大，做空
                 elif spread_z < -entry_z:
-                    signal = 1   # 价差过小，做多
+                    signal = 1  # 价差过小，做多
 
         return signal
 
@@ -915,9 +1036,13 @@ class PyBrokerBacktestRunner:
     """
 
     def __init__(
-        self, data_source: PyBrokerDataSource, config: Optional[BacktestConfig] = None
+        self,
+        data_source: PyBrokerDataSource,
+        config: Optional[BacktestConfig] = None,
+        target_symbols: Optional[List[str]] = None,
     ):
         self.data_source = data_source
+        self.target_symbols = target_symbols or data_source.symbols
         self.config = config or BacktestConfig()
         self.library = StrategyLibrary()
         self.switch_engine = StrategySwitchEngine(self.library)
@@ -944,6 +1069,7 @@ class PyBrokerBacktestRunner:
         end_date: str,
         initial_cash: Optional[float] = None,
         use_fallback: bool = False,
+        custom_params: Optional[Dict[str, Dict[str, any]]] = None,
     ) -> PyBrokerResult:
         """
         执行回测（PyBroker 主引擎优先）。
@@ -953,6 +1079,8 @@ class PyBrokerBacktestRunner:
             end_date: 回测结束日期
             initial_cash: 初始资金，默认 config.initial_cash
             use_fallback: 强制使用自研简化引擎
+            custom_params: 自定义策略参数，格式 {"dual_ma": {"short_ma": 5, "long_ma": 20}, ...}
+                           用于参数优化时覆盖默认参数
 
         Returns:
             PyBrokerResult
@@ -961,6 +1089,7 @@ class PyBrokerBacktestRunner:
             raise RuntimeError("请先调用 register_strategies() 注册策略")
 
         cash = initial_cash or self.config.initial_cash
+        self._custom_params = custom_params
 
         if PYBROKER_AVAILABLE and not use_fallback:
             try:
@@ -1002,6 +1131,23 @@ class PyBrokerBacktestRunner:
             & (df["date"] <= pd.Timestamp(end_date))
         ]
 
+        # ── 过滤到目标品种 ──
+        if self.target_symbols:
+            available = set(df["symbol"].unique())
+            target_set = set(self.target_symbols)
+            matched = target_set & available
+            if not matched:
+                raise RuntimeError(
+                    f"目标品种 {self.target_symbols} 不在数据中。"
+                    f"可用品种: {sorted(available)[:10]}..."
+                )
+            df = df[df["symbol"].isin(matched)].copy()
+            logger.info(
+                "过滤到目标品种: %s (%d 行)",
+                sorted(matched),
+                len(df),
+            )
+
         # ── 过滤到主力合约（连续数据）──
         # 当数据包含多个合约时（如 rb2009, rb2010...），
         # 仅使用主力合约避免 20x 杠杆效应扭曲回测结果。
@@ -1017,13 +1163,13 @@ class PyBrokerBacktestRunner:
             )
         elif "is_dominant" not in df.columns:
             # 无 dominants 信息时，按每个产品只保留最后一个合约（数据最多的）
-            logger.info(
-                "没有主力合约信息，使用全部数据 (%d 行)", len(df)
-            )
+            logger.info("没有主力合约信息，使用全部数据 (%d 行)", len(df))
 
         # ── 拟合环境检测器 ──
         self.regime_indicator.fit(df)
-        regime_fn, regime_conf_fn = self.regime_indicator.create_pybroker_regime_fn()
+        regime_fn, regime_conf_fn, regime_stab_fn = (
+            self.regime_indicator.create_pybroker_regime_fn()
+        )
 
         # ── 创建 PyBroker StrategyConfig + Strategy ──
         pb_config = pybroker.StrategyConfig(
@@ -1041,23 +1187,95 @@ class PyBrokerBacktestRunner:
         # ── 注册向量化指标 ──
         # PyBroker 内部将 bar_data.close 等字段转为 numpy array，
         # 因此需要先转换为 pd.Series 才能使用 .rolling/.diff 等方法。
+        # 支持通过 custom_params 覆盖默认参数，用于参数优化。
+        custom_params = getattr(self, "_custom_params", None) or {}
+
+        dual_ma_params = (
+            dict(self.library.get_profile("dual_ma").default_params)
+            if self.library.get_profile("dual_ma")
+            else {}
+        )
+        dual_ma_params.update(custom_params.get("dual_ma", {}))
+        _short_ma = int(dual_ma_params.get("short_ma", 5))
+        _long_ma = int(dual_ma_params.get("long_ma", 20))
+
+        rsi_params = (
+            dict(self.library.get_profile("rsi").default_params)
+            if self.library.get_profile("rsi")
+            else {}
+        )
+        rsi_params.update(custom_params.get("rsi", {}))
+        _rsi_period = int(rsi_params.get("rsi_period", 14))
+
+        vol_params = (
+            dict(self.library.get_profile("vol_breakout").default_params)
+            if self.library.get_profile("vol_breakout")
+            else {}
+        )
+        vol_params.update(custom_params.get("vol_breakout", {}))
+        _atr_period = int(vol_params.get("atr_period", 14))
+        _atr_multiplier = float(vol_params.get("atr_multiplier", 1.5))
+        _bb_center_period = int(vol_params.get("bb_center_period", 20))
+
+        ts_params = (
+            dict(self.library.get_profile("term_structure").default_params)
+            if self.library.get_profile("term_structure")
+            else {}
+        )
+        ts_params.update(custom_params.get("term_structure", {}))
+        _lookback = int(ts_params.get("lookback", 20))
+
+        spread_params = (
+            dict(self.library.get_profile("spread").default_params)
+            if self.library.get_profile("spread")
+            else {}
+        )
+        spread_params.update(custom_params.get("spread", {}))
+        _spread_lookback = int(spread_params.get("lookback", 20))
+
         def _sma_5(bar_data):
-            return pd.Series(bar_data.close).rolling(5).mean().to_numpy()
+            return pd.Series(bar_data.close).rolling(_short_ma).mean().to_numpy()
 
         def _sma_20(bar_data):
-            return pd.Series(bar_data.close).rolling(20).mean().to_numpy()
+            return pd.Series(bar_data.close).rolling(_long_ma).mean().to_numpy()
 
         def _rsi_14(bar_data):
             close_ser = pd.Series(bar_data.close)
             delta = close_ser.diff()
-            gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / 14, adjust=False).mean()
-            loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1 / 14, adjust=False).mean()
+            gain = (
+                delta.where(delta > 0, 0.0)
+                .ewm(alpha=1 / _rsi_period, adjust=False)
+                .mean()
+            )
+            loss = (
+                (-delta.where(delta < 0, 0.0))
+                .ewm(alpha=1 / _rsi_period, adjust=False)
+                .mean()
+            )
             rs = gain / loss.replace(0, np.nan)
             rsi = 100 - 100 / (1 + rs)
             return rsi.to_numpy()
 
+        def _rsi_slope(bar_data):
+            close_ser = pd.Series(bar_data.close)
+            delta = close_ser.diff()
+            gain = (
+                delta.where(delta > 0, 0.0)
+                .ewm(alpha=1 / _rsi_period, adjust=False)
+                .mean()
+            )
+            loss = (
+                (-delta.where(delta < 0, 0.0))
+                .ewm(alpha=1 / _rsi_period, adjust=False)
+                .mean()
+            )
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - 100 / (1 + rs)
+            slope = rsi.diff(5) / 5.0
+            return slope.fillna(0).to_numpy()
+
         def _bb_upper(bar_data):
-            """ATR通道上轨：SMA(20) + 1.5 * ATR(14)，用于 vol_breakout 策略。"""
+            """ATR通道上轨：SMA(center) + multiplier * ATR(period)，用于 vol_breakout 策略。"""
             close = pd.Series(bar_data.close)
             high = pd.Series(bar_data.high)
             low = pd.Series(bar_data.low)
@@ -1068,12 +1286,12 @@ class PyBrokerBacktestRunner:
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             if len(tr) > 0:
                 tr.iloc[0] = tr1.iloc[0]
-            atr = tr.rolling(14, min_periods=14).mean()
-            center = close.rolling(20, min_periods=1).mean()
-            return (center + 1.5 * atr).to_numpy()
+            atr = tr.rolling(_atr_period, min_periods=_atr_period).mean()
+            center = close.rolling(_bb_center_period, min_periods=1).mean()
+            return (center + _atr_multiplier * atr).to_numpy()
 
         def _bb_lower(bar_data):
-            """ATR通道下轨：SMA(20) - 1.5 * ATR(14)，用于 vol_breakout 策略。"""
+            """ATR通道下轨：SMA(center) - multiplier * ATR(period)，用于 vol_breakout 策略。"""
             close = pd.Series(bar_data.close)
             high = pd.Series(bar_data.high)
             low = pd.Series(bar_data.low)
@@ -1084,12 +1302,12 @@ class PyBrokerBacktestRunner:
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             if len(tr) > 0:
                 tr.iloc[0] = tr1.iloc[0]
-            atr = tr.rolling(14, min_periods=14).mean()
-            center = close.rolling(20, min_periods=1).mean()
-            return (center - 1.5 * atr).to_numpy()
+            atr = tr.rolling(_atr_period, min_periods=_atr_period).mean()
+            center = close.rolling(_bb_center_period, min_periods=1).mean()
+            return (center - _atr_multiplier * atr).to_numpy()
 
         def _atr_14(bar_data):
-            """ATR(14) 用于动态止损。"""
+            """ATR(period) 用于动态止损。"""
             high = pd.Series(bar_data.high)
             low = pd.Series(bar_data.low)
             close = pd.Series(bar_data.close)
@@ -1100,7 +1318,7 @@ class PyBrokerBacktestRunner:
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             if len(tr) > 0:
                 tr.iloc[0] = tr1.iloc[0]
-            return tr.rolling(14, min_periods=14).mean().to_numpy()
+            return tr.rolling(_atr_period, min_periods=_atr_period).mean().to_numpy()
 
         def _regime(bar_data):
             return regime_fn(bar_data)
@@ -1108,10 +1326,18 @@ class PyBrokerBacktestRunner:
         def _regime_conf(bar_data):
             return regime_conf_fn(bar_data)
 
+        def _regime_stab(bar_data):
+            return regime_stab_fn(bar_data)
+
         # ── term_structure 指标：SMA(lookback) ──
         def _sma_lookback(bar_data):
-            """期限结构策略用的长期均线（默认20日）。"""
-            return pd.Series(bar_data.close).rolling(20, min_periods=1).mean().to_numpy()
+            """期限结构策略用的长期均线。"""
+            return (
+                pd.Series(bar_data.close)
+                .rolling(_lookback, min_periods=1)
+                .mean()
+                .to_numpy()
+            )
 
         # ── spread 指标：近远月价差 Z-Score ──
         def _spread_zscore(bar_data):
@@ -1119,18 +1345,20 @@ class PyBrokerBacktestRunner:
             跨期套利：近远月价差的 Z-Score。
 
             使用 bar_data 中的 spread 列（由 DataLoader.build_spread_pairs 生成），
-            若无 spread 列则退化为 (close - SMA20) / std 的单品种代理。
+            若无 spread 列则退化为 (close - SMA) / std 的单品种代理。
             """
-            if hasattr(bar_data, 'spread') or (hasattr(bar_data, '__dict__') and 'spread' in bar_data.__dict__):
+            if hasattr(bar_data, "spread") or (
+                hasattr(bar_data, "__dict__") and "spread" in bar_data.__dict__
+            ):
                 spread_ser = pd.Series(bar_data.spread)
             else:
-                # 退化：用价格偏离SMA20作为价差代理
+                # 退化：用价格偏离SMA作为价差代理
                 close_ser = pd.Series(bar_data.close)
-                ma20 = close_ser.rolling(20, min_periods=1).mean()
-                spread_ser = close_ser - ma20
+                ma = close_ser.rolling(_spread_lookback, min_periods=1).mean()
+                spread_ser = close_ser - ma
 
-            ma = spread_ser.rolling(20, min_periods=1).mean()
-            std = spread_ser.rolling(20, min_periods=1).std()
+            ma = spread_ser.rolling(_spread_lookback, min_periods=1).mean()
+            std = spread_ser.rolling(_spread_lookback, min_periods=1).std()
             std = std.replace(0, np.nan)
             zscore = (spread_ser - ma) / std
             return zscore.fillna(0).to_numpy()
@@ -1139,11 +1367,13 @@ class PyBrokerBacktestRunner:
             pybroker.indicator("sma_5", _sma_5),
             pybroker.indicator("sma_20", _sma_20),
             pybroker.indicator("rsi_14", _rsi_14),
+            pybroker.indicator("rsi_slope", _rsi_slope),
             pybroker.indicator("bb_upper", _bb_upper),
             pybroker.indicator("bb_lower", _bb_lower),
             pybroker.indicator("atr_14", _atr_14),
             pybroker.indicator("regime", _regime),
             pybroker.indicator("regime_confidence", _regime_conf),
+            pybroker.indicator("regime_stability", _regime_stab),
             pybroker.indicator("sma_lookback", _sma_lookback),
             pybroker.indicator("spread_zscore", _spread_zscore),
         ]
@@ -1163,6 +1393,7 @@ class PyBrokerBacktestRunner:
             primary_strategy,
             enable_switching=enable_switching,
             all_strategy_names=strategies if len(strategies) > 1 else None,
+            custom_params=custom_params,
         )
         strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
 
@@ -1570,7 +1801,7 @@ class PyBrokerBacktestRunner:
             center = close.rolling(20, min_periods=1).mean()
             return (center - 1.5 * atr).to_numpy()
 
-        regime_fn, regime_conf_fn = self.regime_indicator.create_pybroker_regime_fn()
+        regime_fn, regime_conf_fn, _ = self.regime_indicator.create_pybroker_regime_fn()
 
         def _wf_regime(bar_data):
             return regime_fn(bar_data)

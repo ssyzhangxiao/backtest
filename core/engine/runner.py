@@ -207,7 +207,9 @@ class BacktestRunner:
         )
 
         # 模拟交易执行
-        trades, equity = self._simulate_trading(signals, data, strategy_params)
+        trades, equity = self._simulate_trading(
+            signals, data, strategy_params, strategy_name=strategy_name
+        )
 
         # 计算指标
         metrics = self.evaluator.compute_metrics(equity, trades)
@@ -296,13 +298,18 @@ class BacktestRunner:
             rsi = 100 - 100 / (1 + rs)
             oversold = params.get("oversold", 30.0)
             overbought = params.get("overbought", 70.0)
+            # 改进信号逻辑：超买超卖反转 + 中线趋势跟踪
+            # RSI < oversold → 强做多(1), RSI > overbought → 强做空(-1)
+            # RSI 在 40-60 区间 → 趋势跟踪（>50 做多，<50 做空）
             result["signal"] = np.where(
-                rsi < oversold, 1, np.where(rsi > overbought, -1, 0)
+                rsi < oversold,
+                1,
+                np.where(rsi > overbought, -1, np.where(rsi > 50, 1, -1)),
             )
 
         elif strategy_name == "term_structure":
             lookback = params.get("lookback", 20)
-            entry_th = params.get("entry_threshold", 8.0)
+            entry_th = params.get("entry_threshold", 2.0)
             exit_th = params.get("exit_threshold", 0.5)
             sma = close.rolling(window=lookback).mean()
             spread = (close - sma) / sma * 100
@@ -371,7 +378,11 @@ class BacktestRunner:
         return result
 
     def _simulate_trading(
-        self, signals: pd.DataFrame, data: pd.DataFrame, params: Dict
+        self,
+        signals: pd.DataFrame,
+        data: pd.DataFrame,
+        params: Dict,
+        strategy_name: str = "",
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """
         模拟交易执行（v3 修复版）。
@@ -387,7 +398,7 @@ class BacktestRunner:
           - 记录中的 pnl 为净盈亏（基础P&L - 平仓成本）
         """
         position_size = params.get("position_size", 0.2)
-        stop_loss_pct = params.get("trailing_stop_pct", 0.03) or 0.03
+        stop_loss_pct = params.get("trailing_stop_pct", 0.05) or 0.05
         cfg = self.config
         commission = cfg.commission_rate
         slippage = cfg.slippage_rate
@@ -407,7 +418,7 @@ class BacktestRunner:
         prev_equity = cash  # 前一日权益
 
         # ── 策略切换引擎状态 ──
-        active_strategy = None  # 由 switch_engine 管理
+        active_strategy = strategy_name or None  # 由 switch_engine 管理
         switch_engine = self.switch_engine
         regime_df = self._regime_data
         has_regime = (
@@ -416,6 +427,18 @@ class BacktestRunner:
             and "regime" in regime_df.columns
             and "regime_confidence" in regime_df.columns
         )
+
+        # ── 预计算所有策略的信号（用于策略切换时即时替换） ──
+        strategy_signal_cache: Dict[str, pd.DataFrame] = {}
+        if has_regime and switch_engine is not None:
+            for sname in self.strategy_library.list_all():
+                sname = sname.name
+                try:
+                    strategy_signal_cache[sname] = self._generate_signals(
+                        sname, data, params, regime_df
+                    )
+                except Exception:
+                    pass
 
         for i in range(len(signals)):
             close = signals["close"].iloc[i]
@@ -477,6 +500,12 @@ class BacktestRunner:
                             )
                     except Exception:
                         pass  # 切换引擎评估失败不影响主流程
+
+            # ── 策略切换时替换信号 ──
+            if active_strategy and active_strategy in strategy_signal_cache:
+                alt_signals = strategy_signal_cache[active_strategy]
+                if i < len(alt_signals):
+                    signal = int(alt_signals["signal"].iloc[i])
 
             # ── 止损检查 ──
             # v3 修复：统一 P&L 计算模式
@@ -617,19 +646,21 @@ class BacktestRunner:
             # 将 equity index 转为日期列，通过 merge 对齐
             eq_df = equity.reset_index()
             eq_df.columns = ["row_idx", "equity"]
-            # 重建日期映射：用 signals 的日期（run_strategy 中 data["date"]）
-            # 这里用 regime_df 自带的日期 + equity 位置
-            if len(eq_df) == len(regime_df):
-                eq_df["date"] = regime_df["date"].values
 
-            for regime_val in regime_df["regime"].unique():
-                regime_dates = set(
-                    regime_df[regime_df["regime"] == regime_val]["date"].values
-                )
-                regime_eq = eq_df[eq_df["date"].isin(regime_dates)]["equity"]
-                if len(regime_eq) > 10:
-                    perf = self.evaluator.compute_metrics(regime_eq)
-                    regime_perf[str(regime_val)] = perf
+            # 对齐日期：取 equity 和 regime_df 的最小公共长度
+            common_len = min(len(eq_df), len(regime_df))
+            if common_len > 0:
+                eq_df = eq_df.iloc[:common_len].copy()
+                eq_df["date"] = regime_df["date"].iloc[:common_len].values
+
+                for regime_val in regime_df["regime"].unique():
+                    regime_dates = set(
+                        regime_df[regime_df["regime"] == regime_val]["date"].values
+                    )
+                    regime_eq = eq_df[eq_df["date"].isin(regime_dates)]["equity"]
+                    if len(regime_eq) > 10:
+                        perf = self.evaluator.compute_metrics(regime_eq)
+                        regime_perf[str(regime_val)] = perf
 
         return regime_perf
 
@@ -693,8 +724,21 @@ class BacktestRunner:
 
         portfolio_equity = self._compute_portfolio_equity(strategy_results, weights)
 
+        # 合并所有策略的交易记录
+        all_trades = []
+        for name, sresult in strategy_results.items():
+            if sresult.trades is not None and not sresult.trades.empty:
+                trades_copy = sresult.trades.copy()
+                trades_copy["strategy"] = name
+                all_trades.append(trades_copy)
+        combined_trades = (
+            pd.concat(all_trades, ignore_index=True) if all_trades else None
+        )
+
         # 计算组合指标
-        portfolio_metrics = self.evaluator.compute_metrics(portfolio_equity["equity"])
+        portfolio_metrics = self.evaluator.compute_metrics(
+            portfolio_equity["equity"], combined_trades
+        )
 
         # 策略切换日志
         switch_log = self.switch_engine.get_decision_summary()

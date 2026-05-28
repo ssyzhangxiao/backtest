@@ -55,13 +55,16 @@ class SwitchConfig:
     # 绩效样本最低天数（不足则强制不触发绩效切换）
     min_samples: int = 10
 
+    # 绩效持续低劣触发天数（v2: 连续N天Sharpe低于阈值才触发）
+    performance_sustain_days: int = 5
+
     # 切换成本
     commission_rate: float = 0.0003
     slippage_rate: float = 0.0002
     max_switching_cost_pct: float = 0.01  # 最大切换成本占比
 
-    # 冷却期（基于交易日序号）— 5天冷却期
-    cooldown_days: int = 5
+    # 冷却期（基于交易日序号）— 20天冷却期（v2: 从5天延长至20天）
+    cooldown_days: int = 20
 
     # 权重过渡
     transition_days: int = 3
@@ -126,6 +129,10 @@ class StrategySwitchEngine:
         self._last_switch_index: Optional[int] = None  # 改为交易日序号
         self._last_switch_date: Optional[str] = None  # 保留用于过渡权重计算
         self._current_strategy: Optional[str] = None
+        self._low_sharpe_streak: int = 0
+        self._annual_switch_count: int = 0
+        self._annual_switch_year: Optional[int] = None
+        self._auto_fusion_mode: bool = False
 
     # ----------------------------------------------------------------
     # 公共属性
@@ -134,6 +141,10 @@ class StrategySwitchEngine:
     @property
     def decision_log(self) -> List[SwitchDecision]:
         return self._decision_log
+
+    @property
+    def auto_fusion_mode(self) -> bool:
+        return self._auto_fusion_mode
 
     # ----------------------------------------------------------------
     # 评分与评估
@@ -385,6 +396,26 @@ class StrategySwitchEngine:
         """
         cfg = self.config
 
+        # ---- 年度切换计数 + 自动融合检测 ----
+        try:
+            year = int(current_date[:4])
+        except (ValueError, TypeError):
+            year = 0
+        if self._annual_switch_year != year:
+            self._annual_switch_year = year
+            self._annual_switch_count = 0
+        if self._annual_switch_count >= 10:
+            self._auto_fusion_mode = True
+
+        if self._auto_fusion_mode:
+            return None
+
+        # ---- 绩效持续低劣追踪（v2） ----
+        if current_sharpe < cfg.performance_threshold:
+            self._low_sharpe_streak += 1
+        else:
+            self._low_sharpe_streak = 0
+
         # ---- 冷却期检查 ----
         if self.check_cooldown(current_date, trading_day_index):
             return None
@@ -462,8 +493,9 @@ class StrategySwitchEngine:
         if self._current_strategy == best_candidate.name:
             return None
 
-        # ---- 绩效触发评估（基于综合评分差 + 样本有效性） ----
+        # ---- 绩效触发评估（基于综合评分差 + 样本有效性 + 持续天数） ----
         samples_valid = sharpe_samples >= cfg.min_samples
+        sustain_met = self._low_sharpe_streak >= cfg.performance_sustain_days
 
         # 计算当前策略的综合评分
         if current_profile is not None:
@@ -472,7 +504,7 @@ class StrategySwitchEngine:
             current_score = 0.0
 
         perf_triggered, score_gap = self.evaluate_performance(
-            current_score, best_score, samples_valid
+            current_score, best_score, samples_valid and sustain_met
         )
 
         # 如果环境未触发且绩效也未触发，不切换
@@ -497,8 +529,16 @@ class StrategySwitchEngine:
 
         # ---- 成本惩罚：从评分差中扣除预估切换成本 ----
         # 将成本转化为Sharpe等价惩罚
+        # v2: 增加切换成本模型，预期收益改善需超过切换成本+滑点
         if position_value > 0 and has_position:
             cost_penalty = (switching_cost / position_value) * cfg.cost_penalty_factor
+            expected_improvement_value = score_gap * position_value * 0.01
+            min_improvement = switching_cost + position_value * 0.001
+            cost_acceptable = (
+                expected_improvement_value > min_improvement
+                if expected_improvement_value > 0
+                else cost_acceptable
+            )
         else:
             cost_penalty = 0.0
         adjusted_score_gap = score_gap - cost_penalty
@@ -565,6 +605,7 @@ class StrategySwitchEngine:
         if trading_day_index is not None:
             self._last_switch_index = trading_day_index
         self._last_switch_date = current_date
+        self._annual_switch_count += 1
 
     # ----------------------------------------------------------------
     # 事后绩效跟踪

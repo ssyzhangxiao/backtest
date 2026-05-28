@@ -68,11 +68,11 @@ class MarketRegime(Enum):
 class TrendType(Enum):
     """市场趋势类型。"""
 
-    STRONG_UP = "strong_up"        # 强上涨趋势
-    WEAK_UP = "weak_up"            # 弱上涨趋势
-    SIDEWAYS = "sideways"          # 震荡/横盘
-    WEAK_DOWN = "weak_down"        # 弱下跌趋势
-    STRONG_DOWN = "strong_down"    # 强下跌趋势
+    STRONG_UP = "strong_up"  # 强上涨趋势
+    WEAK_UP = "weak_up"  # 弱上涨趋势
+    SIDEWAYS = "sideways"  # 震荡/横盘
+    WEAK_DOWN = "weak_down"  # 弱下跌趋势
+    STRONG_DOWN = "strong_down"  # 强下跌趋势
 
 
 @dataclass
@@ -168,6 +168,14 @@ class RegimeConfig:
 
     # 样本外验证
     validation_split: float = 0.3
+
+    # 滚动窗口环境分类（v2）
+    rolling_window: int = 252
+    rolling_update_freq: int = 20
+
+    # 环境稳定性指标（v2）
+    stability_window: int = 20
+    stability_threshold: float = 0.6
 
 
 @dataclass
@@ -863,11 +871,11 @@ class MarketRegimeDetector:
         REGIME_SIMPLIFY = {
             "trend_up": "trend_up",
             "trend_down": "trend_down",
-            "breakout": "trend_up",        # 突破归入趋势
+            "breakout": "trend_up",  # 突破归入趋势
             "low_volatility": "low_volatility",  # 保留低波动
             "range_bound": "range_bound",
-            "exhaustion_bull": "range_bound",    # 牛市衰竭归入震荡
-            "exhaustion_bear": "range_bound",    # 熊市衰竭归入震荡
+            "exhaustion_bull": "range_bound",  # 牛市衰竭归入震荡
+            "exhaustion_bear": "range_bound",  # 熊市衰竭归入震荡
             "high_volatility": "high_volatility",
         }
         regimes = [REGIME_SIMPLIFY.get(r, r) for r in regimes_raw]
@@ -1001,21 +1009,18 @@ class MarketRegimeDetector:
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        使用已拟合的参数对新数据分类。
+        使用已拟合的参数对新数据分类（v2: 滚动窗口阈值更新 + 稳定性指标）。
 
-        不重新计算IC权重和动态阈值，使用fit时的终值。
-        确保无前视偏差。
-
-        局限性：长期样本外使用静态阈值可能失效（市场结构变化）。
-        短期内（约threshold_window天内）影响可接受；
-        如需长期样本外使用，建议定期重新fit或在transform中
-        维护滚动窗口继续更新阈值（当前简化实现不包含此功能）。
+        v2 改进：
+          - 每 rolling_update_freq 个交易日使用滚动窗口重新计算阈值
+          - 计算环境稳定性指标（过去 stability_window 次分类中同一环境的比例）
+          - 输出 regime_stability 列（0~1），低于 stability_threshold 时标记为不稳定
 
         Args:
             df: 包含OHLCV数据的DataFrame
 
         Returns:
-            带有环境标签、连续分数和置信度的DataFrame
+            带有环境标签、连续分数、置信度和稳定性的DataFrame
 
         Raises:
             RuntimeError: 未调用fit时抛出
@@ -1023,17 +1028,31 @@ class MarketRegimeDetector:
         if not self._fitted:
             raise RuntimeError("请先调用fit()方法")
 
-        # 计算指标
         indicators = self.compute_indicators(df)
-
-        # 使用拟合的固定阈值（非滚动，避免样本外数据不足）
-        # 注意：此为fit结束时刻的快照，长期样本外可能漂移
         n = len(indicators)
+        cfg = self.config
+
+        # ── 滚动窗口阈值更新 ──
+        # 每 rolling_update_freq 个 bar 使用过去 rolling_window 个 bar 重新计算阈值
+        # 其余 bar 使用上一次计算的阈值（或拟合终值作为初始值）
         thresholds = {}
         for key, val in self._fitted_threshold_values.items():
-            thresholds[key] = pd.Series([val] * n, index=indicators.index)
+            thresholds[key] = np.full(n, val)
 
-        # 使用拟合的固定IC权重
+        if n > cfg.rolling_window:
+            for update_idx in range(cfg.rolling_window, n, cfg.rolling_update_freq):
+                window_start = max(0, update_idx - cfg.rolling_window)
+                window_indicators = indicators.iloc[window_start:update_idx]
+                window_thresholds = self.compute_dynamic_thresholds(window_indicators)
+                for key, series in window_thresholds.items():
+                    if key in thresholds and len(series.dropna()) > 0:
+                        last_val = float(series.dropna().iloc[-1])
+                        thresholds[key][update_idx:] = last_val
+
+        for key in thresholds:
+            thresholds[key] = pd.Series(thresholds[key], index=indicators.index)
+
+        # 使用拟合的固定IC权重（IC权重计算成本高，保持静态）
         weights_df = pd.DataFrame(
             {
                 name: self._fitted_ic_weights.get(name, EQUAL_WEIGHT)
@@ -1044,6 +1063,32 @@ class MarketRegimeDetector:
 
         # 分类
         regime_df = self.classify_regime(indicators, thresholds, weights_df)
+
+        # ── 环境稳定性指标 ──
+        # 计算过去 stability_window 次分类中同一环境出现的比例
+        regimes = regime_df["regime"].values
+        stability = np.ones(n)
+        sw = cfg.stability_window
+        for i in range(sw, n):
+            window_regimes = regimes[i - sw : i]
+            current_regime = regimes[i]
+            same_count = np.sum(window_regimes == current_regime)
+            stability[i] = same_count / sw
+        for i in range(min(sw, n)):
+            if i > 0:
+                window_regimes = regimes[:i]
+                same_count = np.sum(window_regimes == regimes[i])
+                stability[i] = same_count / i if i > 0 else 1.0
+
+        regime_df["regime_stability"] = stability
+
+        # 不稳定时降低置信度
+        unstable_mask = stability < cfg.stability_threshold
+        if "regime_confidence" in regime_df.columns:
+            original_conf = regime_df["regime_confidence"].values.copy()
+            adjusted_conf = original_conf.copy()
+            adjusted_conf[unstable_mask] *= 0.7
+            regime_df["regime_confidence"] = adjusted_conf
 
         # 合并
         indicator_cols = [c for c in indicators.columns if c not in regime_df.columns]
@@ -1128,13 +1173,43 @@ class MarketRegimeDetector:
     # 8种环境 → 策略类型映射
     _REGIME_WEIGHT_MAP = {
         "trend_up": {"trend": 0.55, "reversal": 0.15, "spread": 0.15, "momentum": 0.15},
-        "trend_down": {"trend": 0.50, "reversal": 0.20, "spread": 0.15, "momentum": 0.15},
-        "range_bound": {"trend": 0.15, "reversal": 0.55, "spread": 0.20, "momentum": 0.10},
-        "high_volatility": {"trend": 0.20, "reversal": 0.30, "spread": 0.10, "momentum": 0.40},
-        "low_volatility": {"trend": 0.25, "reversal": 0.25, "spread": 0.20, "momentum": 0.30},
+        "trend_down": {
+            "trend": 0.50,
+            "reversal": 0.20,
+            "spread": 0.15,
+            "momentum": 0.15,
+        },
+        "range_bound": {
+            "trend": 0.15,
+            "reversal": 0.55,
+            "spread": 0.20,
+            "momentum": 0.10,
+        },
+        "high_volatility": {
+            "trend": 0.20,
+            "reversal": 0.30,
+            "spread": 0.10,
+            "momentum": 0.40,
+        },
+        "low_volatility": {
+            "trend": 0.25,
+            "reversal": 0.25,
+            "spread": 0.20,
+            "momentum": 0.30,
+        },
         "breakout": {"trend": 0.30, "reversal": 0.10, "spread": 0.10, "momentum": 0.50},
-        "exhaustion_bull": {"trend": 0.10, "reversal": 0.60, "spread": 0.10, "momentum": 0.20},
-        "exhaustion_bear": {"trend": 0.10, "reversal": 0.60, "spread": 0.10, "momentum": 0.20},
+        "exhaustion_bull": {
+            "trend": 0.10,
+            "reversal": 0.60,
+            "spread": 0.10,
+            "momentum": 0.20,
+        },
+        "exhaustion_bear": {
+            "trend": 0.10,
+            "reversal": 0.60,
+            "spread": 0.10,
+            "momentum": 0.20,
+        },
     }
 
     # 向后兼容的趋势/震荡 → 策略权重映射
@@ -1143,9 +1218,7 @@ class MarketRegimeDetector:
         "range": {"trend": 0.20, "reversal": 0.50, "spread": 0.30},
     }
 
-    def get_regime_weights(
-        self, regime: str, separator: str = "_"
-    ) -> Dict[str, float]:
+    def get_regime_weights(self, regime: str, separator: str = "_") -> Dict[str, float]:
         """
         根据市场环境获取策略权重分配。
 
@@ -1172,7 +1245,9 @@ class MarketRegimeDetector:
             return dict(self._SIMPLE_WEIGHT_MAP[normalized])
 
         # 尝试用分隔符构建键
-        constructed = regime.lower().strip().replace("-", separator).replace(" ", separator)
+        constructed = (
+            regime.lower().strip().replace("-", separator).replace(" ", separator)
+        )
         if constructed in self._REGIME_WEIGHT_MAP:
             return dict(self._REGIME_WEIGHT_MAP[constructed])
 
@@ -1396,16 +1471,20 @@ class EnhancedTrendDetector:
         self._state_history: List[TrendType] = []
         self._confidence_history: List[float] = []
 
-    def _compute_ma_system(
-        self, close: pd.Series
-    ) -> Dict[str, pd.Series]:
+    def _compute_ma_system(self, close: pd.Series) -> Dict[str, pd.Series]:
         """
         均线系统指标（多周期均线）。
         包含短期、中期、长期均线及相互关系。
         """
-        ma_short = close.rolling(window=self.config.ma_short, min_periods=self.config.ma_short).mean()
-        ma_medium = close.rolling(window=self.config.ma_medium, min_periods=self.config.ma_medium).mean()
-        ma_long = close.rolling(window=self.config.ma_long, min_periods=self.config.ma_long).mean()
+        ma_short = close.rolling(
+            window=self.config.ma_short, min_periods=self.config.ma_short
+        ).mean()
+        ma_medium = close.rolling(
+            window=self.config.ma_medium, min_periods=self.config.ma_medium
+        ).mean()
+        ma_long = close.rolling(
+            window=self.config.ma_long, min_periods=self.config.ma_long
+        ).mean()
 
         ma_up = (ma_short > ma_medium) & (ma_medium > ma_long)
         ma_down = (ma_short < ma_medium) & (ma_medium < ma_long)
@@ -1430,18 +1509,22 @@ class EnhancedTrendDetector:
             "pos_l": pos_long,
         }
 
-    def _compute_macd(
-        self, close: pd.Series
-    ) -> Dict[str, pd.Series]:
+    def _compute_macd(self, close: pd.Series) -> Dict[str, pd.Series]:
         """
         MACD 指标系统。
         包含 DIF、DEA、MACD柱状线、金叉/死叉。
         """
-        ema_fast = close.ewm(span=self.config.macd_fast, min_periods=self.config.macd_fast).mean()
-        ema_slow = close.ewm(span=self.config.macd_slow, min_periods=self.config.macd_slow).mean()
+        ema_fast = close.ewm(
+            span=self.config.macd_fast, min_periods=self.config.macd_fast
+        ).mean()
+        ema_slow = close.ewm(
+            span=self.config.macd_slow, min_periods=self.config.macd_slow
+        ).mean()
 
         dif = ema_fast - ema_slow
-        dea = dif.ewm(span=self.config.macd_signal, min_periods=self.config.macd_signal).mean()
+        dea = dif.ewm(
+            span=self.config.macd_signal, min_periods=self.config.macd_signal
+        ).mean()
         macd_bar = (dif - dea) * 2
 
         golden_cross = (dif > dea) & (dif.shift(1) <= dea.shift(1))
@@ -1460,9 +1543,7 @@ class EnhancedTrendDetector:
             "macd_down": macd_down.astype(float),
         }
 
-    def _compute_rsi_system(
-        self, close: pd.Series
-    ) -> Dict[str, pd.Series]:
+    def _compute_rsi_system(self, close: pd.Series) -> Dict[str, pd.Series]:
         """
         RSI 指标系统。
         包含 RSI、超买/超卖、RSI趋势。
@@ -1470,8 +1551,12 @@ class EnhancedTrendDetector:
         delta = close.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.rolling(window=self.config.rsi_period, min_periods=self.config.rsi_period).mean()
-        avg_loss = loss.rolling(window=self.config.rsi_period, min_periods=self.config.rsi_period).mean()
+        avg_gain = gain.rolling(
+            window=self.config.rsi_period, min_periods=self.config.rsi_period
+        ).mean()
+        avg_loss = loss.rolling(
+            window=self.config.rsi_period, min_periods=self.config.rsi_period
+        ).mean()
         rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
         rsi = pd.Series(100 - 100 / (1 + rs), index=close.index)
 
@@ -1513,8 +1598,12 @@ class EnhancedTrendDetector:
 
         atr = tr.rolling(window=period, min_periods=period).mean()
         atr_safe = atr.replace(0, np.nan)
-        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
-        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe)
+        plus_di = 100 * (
+            plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+        )
+        minus_di = 100 * (
+            minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+        )
 
         dx_denom = (plus_di + minus_di).abs()
         dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
@@ -1522,7 +1611,9 @@ class EnhancedTrendDetector:
         adx = dx.rolling(window=period, min_periods=period).mean()
 
         strong_trend = adx >= self.config.adx_strong_threshold
-        weak_trend = (adx >= self.config.adx_trend_threshold) & (adx < self.config.adx_strong_threshold)
+        weak_trend = (adx >= self.config.adx_trend_threshold) & (
+            adx < self.config.adx_strong_threshold
+        )
         no_trend = adx < self.config.adx_trend_threshold
 
         up_direction = plus_di > minus_di
@@ -1539,9 +1630,7 @@ class EnhancedTrendDetector:
             "adx_down_direction": down_direction.astype(float),
         }
 
-    def _compute_bollinger_system(
-        self, close: pd.Series
-    ) -> Dict[str, pd.Series]:
+    def _compute_bollinger_system(self, close: pd.Series) -> Dict[str, pd.Series]:
         """
         布林带系统指标。
         包含中轨、上下轨、带宽、位置、收缩/扩张。
@@ -1575,9 +1664,7 @@ class EnhancedTrendDetector:
             "bb_breakout_down": breakout_down.astype(float),
         }
 
-    def _compute_momentum_system(
-        self, close: pd.Series
-    ) -> Dict[str, pd.Series]:
+    def _compute_momentum_system(self, close: pd.Series) -> Dict[str, pd.Series]:
         """
         动量系统指标。
         包含简单动量、ROC、加速度。
@@ -1601,10 +1688,7 @@ class EnhancedTrendDetector:
             "momentum_falling": mom_falling.astype(float),
         }
 
-    def compute_all_indicators(
-        self,
-        df: pd.DataFrame
-    ) -> pd.DataFrame:
+    def compute_all_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         计算所有技术指标（6大类）。
         """
@@ -1636,9 +1720,7 @@ class EnhancedTrendDetector:
 
         return result
 
-    def compute_trend_scores(
-        self, df: pd.DataFrame
-    ) -> pd.DataFrame:
+    def compute_trend_scores(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         计算各趋势类型的得分（0-1）。
         """
@@ -1657,40 +1739,47 @@ class EnhancedTrendDetector:
         )
 
         scores["strong_up"] = (
-            indicators["adx_strong_trend"] * indicators["adx_up_direction"] * 0.3 +
-            indicators["ma_up"] * 0.2 +
-            indicators["macd_up"] * 0.2 +
-            indicators["momentum_rising"] * (indicators["momentum_5"] > 0).astype(float) * 0.15 +
-            indicators["bb_breakout_up"] * 0.15
+            indicators["adx_strong_trend"] * indicators["adx_up_direction"] * 0.3
+            + indicators["ma_up"] * 0.2
+            + indicators["macd_up"] * 0.2
+            + indicators["momentum_rising"]
+            * (indicators["momentum_5"] > 0).astype(float)
+            * 0.15
+            + indicators["bb_breakout_up"] * 0.15
         )
 
         scores["weak_up"] = (
-            indicators["adx_weak_trend"] * indicators["adx_up_direction"] * 0.3 +
-            indicators["ma_up"] * indicators["adx_no_trend"] * 0.25 +
-            indicators["macd_up"] * 0.2 +
-            (indicators["pos_m"] > 0).astype(float) * 0.25
+            indicators["adx_weak_trend"] * indicators["adx_up_direction"] * 0.3
+            + indicators["ma_up"] * indicators["adx_no_trend"] * 0.25
+            + indicators["macd_up"] * 0.2
+            + (indicators["pos_m"] > 0).astype(float) * 0.25
         )
 
         scores["sideways"] = (
-            indicators["adx_no_trend"] * 0.35 +
-            indicators["bb_contracting"] * 0.2 +
-            ((indicators["bb_position"] > 0.2) & (indicators["bb_position"] < 0.8)).astype(float) * 0.25 +
-            (indicators["momentum_5"].abs() < 0.02).astype(float) * 0.2
+            indicators["adx_no_trend"] * 0.35
+            + indicators["bb_contracting"] * 0.2
+            + (
+                (indicators["bb_position"] > 0.2) & (indicators["bb_position"] < 0.8)
+            ).astype(float)
+            * 0.25
+            + (indicators["momentum_5"].abs() < 0.02).astype(float) * 0.2
         )
 
         scores["weak_down"] = (
-            indicators["adx_weak_trend"] * indicators["adx_down_direction"] * 0.3 +
-            indicators["ma_down"] * indicators["adx_no_trend"] * 0.25 +
-            indicators["macd_down"] * 0.2 +
-            (indicators["pos_m"] < 0).astype(float) * 0.25
+            indicators["adx_weak_trend"] * indicators["adx_down_direction"] * 0.3
+            + indicators["ma_down"] * indicators["adx_no_trend"] * 0.25
+            + indicators["macd_down"] * 0.2
+            + (indicators["pos_m"] < 0).astype(float) * 0.25
         )
 
         scores["strong_down"] = (
-            indicators["adx_strong_trend"] * indicators["adx_down_direction"] * 0.3 +
-            indicators["ma_down"] * 0.2 +
-            indicators["macd_down"] * 0.2 +
-            indicators["momentum_falling"] * (indicators["momentum_5"] < 0).astype(float) * 0.15 +
-            indicators["bb_breakout_down"] * 0.15
+            indicators["adx_strong_trend"] * indicators["adx_down_direction"] * 0.3
+            + indicators["ma_down"] * 0.2
+            + indicators["macd_down"] * 0.2
+            + indicators["momentum_falling"]
+            * (indicators["momentum_5"] < 0).astype(float)
+            * 0.15
+            + indicators["bb_breakout_down"] * 0.15
         )
 
         total = scores.sum(axis=1)
@@ -1700,9 +1789,7 @@ class EnhancedTrendDetector:
 
         return scores
 
-    def detect_trend(
-        self, df: pd.DataFrame, use_filter: bool = True
-    ) -> pd.DataFrame:
+    def detect_trend(self, df: pd.DataFrame, use_filter: bool = True) -> pd.DataFrame:
         """
         检测市场趋势。
 
@@ -1737,9 +1824,7 @@ class EnhancedTrendDetector:
 
         return result
 
-    def _apply_state_transition_filter(
-        self, result: pd.DataFrame
-    ) -> pd.DataFrame:
+    def _apply_state_transition_filter(self, result: pd.DataFrame) -> pd.DataFrame:
         """
         应用状态转换过滤机制。
         - 状态转换需达到置信度阈值
@@ -1769,8 +1854,10 @@ class EnhancedTrendDetector:
                 consecutive_count += 1
                 current_confidence = candidate_confidence
             else:
-                if (candidate_confidence >= threshold and
-                    consecutive_count >= confirm_days):
+                if (
+                    candidate_confidence >= threshold
+                    and consecutive_count >= confirm_days
+                ):
                     current_trend = candidate_trend
                     current_confidence = candidate_confidence
                     consecutive_count = 1
@@ -1783,9 +1870,7 @@ class EnhancedTrendDetector:
 
         return filtered
 
-    def get_summary(
-        self, result_df: pd.DataFrame
-    ) -> Dict:
+    def get_summary(self, result_df: pd.DataFrame) -> Dict:
         """
         获取趋势判断结果摘要。
         """
