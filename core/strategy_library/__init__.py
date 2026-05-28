@@ -306,3 +306,49 @@ class StrategyLibrary:
                 }
             )
         return pd.DataFrame(rows)
+
+    def update_default_params(
+        self, strategy_name: str, new_params: Dict[str, Any]
+    ) -> bool:
+        """
+        更新策略的默认参数。
+
+        仅更新 new_params 中提供的键，保留未提及的参数不变。
+        更新后会自动刷新 last_updated 时间戳。
+
+        Args:
+            strategy_name: 策略名称
+            new_params: 需要更新的参数字典
+
+        Returns:
+            是否更新成功
+        """
+        profile = self._profiles.get(strategy_name)
+        if profile is None:
+            return False
+        profile.default_params.update(new_params)
+        profile.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return True
+
+    def export_params_to_yaml(
+        self, strategy_names: Optional[List[str]] = None
+    ) -> Dict:
+        """
+        导出策略默认参数为 YAML 兼容字典。
+
+        可用于生成 config.yaml 中的策略参数段，
+        或与 print_optimization_suggestions 配合输出可复制的参数配置。
+
+        Args:
+            strategy_names: 需要导出的策略名称列表（None 表示全部）
+
+        Returns:
+            YAML 兼容的参数字典
+        """
+        names = strategy_names or list(self._profiles.keys())
+        result = {}
+        for name in names:
+            profile = self._profiles.get(name)
+            if profile is not None:
+                result[name] = dict(profile.default_params)
+        return result

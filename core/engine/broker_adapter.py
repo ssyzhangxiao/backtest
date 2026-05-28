@@ -1013,6 +1013,122 @@ class StrategyExecutorFactory:
 
         return weights
 
+    def create_fusion_executor(
+        self,
+        strategy_instances: Dict[str, Any],
+        risk_manager: Any = None,
+        use_weighted_fusion: bool = True,
+        use_regime_filter: bool = True,
+        signal_threshold: float = 0.5,
+    ) -> Tuple[Any, List]:
+        """
+        创建基于策略类 execute 方法的信号融合执行器。
+
+        与 _calc_single_signal 的简化信号计算不同，此方法直接调用
+        每个策略类的 execute 方法收集信号，确保回测信号与实盘完全一致。
+
+        融合策略（优于简单平均，提升回测质量）：
+          1. 加权融合：基于策略库绩效档案（max_drawdown 倒数权重），
+             历史表现好的策略获得更高权重。
+          2. 环境感知过滤：只纳入当前市场环境下适配的策略，
+             例如趋势市排除震荡策略，震荡市排除趋势策略。
+
+        Args:
+            strategy_instances: {策略名: 策略实例} 映射，策略实例需实现 execute 和
+                                register_indicators 方法
+            risk_manager: 系统风控管理器，若提供则包装融合函数
+            use_weighted_fusion: 是否使用加权融合（False 则等权平均）
+            use_regime_filter: 是否启用环境感知过滤
+            signal_threshold: 融合信号阈值，加权信号超过此绝对值才开仓
+
+        Returns:
+            (executor_fn, indicators_list) 元组
+            - executor_fn: 可传入 pybroker.Strategy.add_execution() 的执行函数
+            - indicators_list: 所有策略的 PyBroker 指标列表
+        """
+        all_indicators = []
+        for name, strategy in strategy_instances.items():
+            try:
+                all_indicators.extend(strategy.register_indicators())
+            except Exception:
+                pass
+
+        strategy_names = list(strategy_instances.keys())
+        if use_weighted_fusion and self.library is not None:
+            weights = self._compute_strategy_weights(strategy_names)
+        else:
+            weights = {name: 1.0 / max(len(strategy_names), 1)
+                       for name in strategy_names}
+
+        strategy_regime_map = {
+            "dual_ma": {"TREND_UP", "TREND_DOWN", "BREAKOUT"},
+            "rsi": {"RANGE_BOUND", "LOW_VOLATILITY"},
+            "vol_breakout": {"HIGH_VOLATILITY", "BREAKOUT"},
+            "term_structure": {"RANGE_BOUND", "LOW_VOLATILITY"},
+            "spread": {"RANGE_BOUND", "LOW_VOLATILITY"},
+        }
+
+        position_size = self._position_size
+        n_strategies = max(len(strategy_names), 1)
+        strategy_fns = {name: strat.execute for name, strat in strategy_instances.items()}
+
+        def fusion_fn(ctx: ExecContext):
+            current_regime = None
+            if use_regime_filter:
+                try:
+                    regime_raw = ctx.indicator("regime")
+                    if regime_raw is not None:
+                        if hasattr(regime_raw, "iloc") and len(regime_raw) > 0:
+                            current_regime = str(regime_raw.iloc[-1]).upper()
+                        elif hasattr(regime_raw, "__getitem__") and len(regime_raw) > 0:
+                            current_regime = str(regime_raw[-1]).upper()
+                except Exception:
+                    pass
+
+            signals = []
+            total_weight = 0.0
+
+            for name, fn in strategy_fns.items():
+                if use_regime_filter and current_regime:
+                    suitable_regimes = strategy_regime_map.get(name, set())
+                    if suitable_regimes and current_regime not in suitable_regimes:
+                        continue
+
+                original_buy = ctx.buy_shares
+                original_sell = ctx.sell_shares
+                try:
+                    fn(ctx)
+                    w = weights.get(name, 0.0)
+                    if ctx.buy_shares is not None:
+                        signals.append(1 * w)
+                        total_weight += w
+                    elif ctx.sell_shares is not None:
+                        signals.append(-1 * w)
+                        total_weight += w
+                finally:
+                    ctx.buy_shares = original_buy
+                    ctx.sell_shares = original_sell
+
+            if signals and total_weight > 0:
+                weighted_signal = sum(signals) / total_weight
+                if weighted_signal > signal_threshold:
+                    size = position_size / n_strategies
+                    ctx.buy_shares = ctx.calc_target_shares(size)
+                elif weighted_signal < -signal_threshold:
+                    has_long = False
+                    try:
+                        pos = ctx.long_pos()
+                        has_long = pos is not None and pos.shares > 0
+                    except Exception:
+                        pass
+                    if has_long:
+                        ctx.sell_all_shares()
+
+        if risk_manager is not None:
+            fusion_fn = risk_manager.wrap_with_risk_control(fusion_fn)
+
+        return fusion_fn, all_indicators
+
 
 # ═══════════════════════════════════════════════════════════════
 # 4. PyBroker 主回测运行器
@@ -1070,6 +1186,7 @@ class PyBrokerBacktestRunner:
         initial_cash: Optional[float] = None,
         use_fallback: bool = False,
         custom_params: Optional[Dict[str, Dict[str, any]]] = None,
+        use_execute_fusion: bool = False,
     ) -> PyBrokerResult:
         """
         执行回测（PyBroker 主引擎优先）。
@@ -1081,6 +1198,9 @@ class PyBrokerBacktestRunner:
             use_fallback: 强制使用自研简化引擎
             custom_params: 自定义策略参数，格式 {"dual_ma": {"short_ma": 5, "long_ma": 20}, ...}
                            用于参数优化时覆盖默认参数
+            use_execute_fusion: 是否使用策略类 execute 方法的信号融合
+                                （True 时调用 create_fusion_executor，基于策略完整逻辑融合；
+                                 False 时使用 create_executor 的简化信号融合）
 
         Returns:
             PyBrokerResult
@@ -1090,6 +1210,7 @@ class PyBrokerBacktestRunner:
 
         cash = initial_cash or self.config.initial_cash
         self._custom_params = custom_params
+        self._use_execute_fusion = use_execute_fusion
 
         if PYBROKER_AVAILABLE and not use_fallback:
             try:
@@ -1385,17 +1506,47 @@ class PyBrokerBacktestRunner:
         primary_strategy = strategies[0] if strategies else "dual_ma"
         # fusion_mode=True → 信号融合（enable_switching=False）
         # fusion_mode=False → 策略切换（enable_switching=True）
-        if self.config.fusion_mode and len(strategies) > 1:
-            enable_switching = False
+        use_exec_fusion = getattr(self, "_use_execute_fusion", False)
+
+        if use_exec_fusion and len(strategies) > 1:
+            from core.strategies import create_strategy
+            strategy_instances = {}
+            for sname in strategies:
+                try:
+                    profile = self.library.get_profile(sname)
+                    params = dict(profile.default_params) if profile else {}
+                    params.update(custom_params.get(sname, {}))
+                    strategy_instances[sname] = create_strategy(sname, **params)
+                except Exception as e:
+                    logger.warning("创建策略实例 %s 失败: %s", sname, e)
+            if strategy_instances:
+                executor, fusion_indicators = self.executor_factory.create_fusion_executor(
+                    strategy_instances,
+                    use_weighted_fusion=True,
+                    use_regime_filter=True,
+                )
+                all_indicators = _indicators + fusion_indicators
+                strategy.add_execution(executor, symbols=symbols, indicators=all_indicators)
+            else:
+                executor = self.executor_factory.create_executor(
+                    primary_strategy,
+                    enable_switching=False,
+                    all_strategy_names=strategies,
+                    custom_params=custom_params,
+                )
+                strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
         else:
-            enable_switching = len(strategies) > 1
-        executor = self.executor_factory.create_executor(
-            primary_strategy,
-            enable_switching=enable_switching,
-            all_strategy_names=strategies if len(strategies) > 1 else None,
-            custom_params=custom_params,
-        )
-        strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
+            if self.config.fusion_mode and len(strategies) > 1:
+                enable_switching = False
+            else:
+                enable_switching = len(strategies) > 1
+            executor = self.executor_factory.create_executor(
+                primary_strategy,
+                enable_switching=enable_switching,
+                all_strategy_names=strategies if len(strategies) > 1 else None,
+                custom_params=custom_params,
+            )
+            strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
 
         # ── 执行回测（PyBroker v1.2: Strategy.backtest()） ──
         pb_result = strategy.backtest(

@@ -5,9 +5,11 @@
 使用系统内置的 PyBrokerBacktestRunner 对每个策略的参数空间进行：
   1. 网格搜索：在全样本内数据上搜索最优参数组合
   2. 滚动窗口验证：用 Walkforward 验证最优参数是否过拟合
-  3. 输出最优参数并更新策略库
+  3. 输出最优参数建议
 
 严格使用系统现有模块，不引入外部工具。
+所有参数空间来自 StrategyLibrary.param_ranges，
+参数覆盖通过 PyBrokerBacktestRunner.run(custom_params=...) 实现。
 """
 
 import warnings
@@ -18,6 +20,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from itertools import product
+import yaml
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -26,57 +29,37 @@ from core.engine.broker_adapter import PyBrokerBacktestRunner, create_hybrid_dat
 from core.config import BacktestConfig
 from core.strategy_library import StrategyLibrary
 
-# ── 配置 ──
-INITIAL_CASH = 1_000_000
-FULL_START = "2016-01-01"
-IN_SAMPLE_END = "2023-12-31"  # 样本内截止
-FULL_END = "2026-05-01"
-SYMBOLS = ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]
-OUTPUT_DIR = "output_backtest_pybroker"
 
-# ── 参数搜索空间（来自 StrategyLibrary.param_ranges） ──
-PARAM_SPACES = {
-    "dual_ma": {
-        "short_ma": [3, 5, 8, 10],
-        "long_ma": [15, 20, 30, 40],
-    },
-    "rsi": {
-        "rsi_period": [10, 14, 20],
-        "oversold": [15.0, 20.0, 25.0, 30.0],
-        "overbought": [70.0, 75.0, 80.0, 85.0],
-    },
-    "vol_breakout": {
-        "atr_period": [14, 20, 26],
-        "band_period": [20, 30, 40],
-        "atr_multiplier": [1.5, 2.0, 2.5],
-    },
-}
+def _load_opt_config(config_path: str = "config.yaml") -> dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    bt = cfg.get("backtest", {})
+    return {
+        "initial_cash": bt.get("initial_cash", 1_000_000),
+        "commission_rate": bt.get("commission_rate", 0.0003),
+        "slippage_rate": bt.get("slippage_rate", 0.0002),
+        "full_start": bt.get("full_start_date", "2016-01-01"),
+        "in_sample_end": bt.get("in_sample_end_date", "2023-12-31"),
+        "full_end": bt.get("full_end_date", "2026-05-01"),
+        "out_sample_start": bt.get("out_sample_start_date", "2024-01-01"),
+        "symbols": cfg.get("symbols", ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]),
+        "output_dir": cfg.get("output", {}).get("output_dir", "output_backtest_pybroker"),
+        "strategy_names": [s["name"] for s in cfg.get("strategies", []) if s.get("name")],
+    }
 
 
-def extract_kpi(result) -> dict:
-    """从回测结果提取关键指标。"""
-    kpi = {}
-    m = result.metrics
-    kpi["total_return_pct"] = m.get("total_return_pct", 0)
-    kpi["sharpe"] = m.get("sharpe", 0)
-    kpi["max_drawdown_pct"] = m.get("max_drawdown_pct", 0)
-    kpi["win_rate"] = m.get("win_rate", 0)
-    kpi["profit_factor"] = m.get("profit_factor", 0)
-    kpi["trade_count"] = m.get("trade_count", 0)
-    kpi["sortino"] = m.get("sortino", 0)
-    return kpi
+def _get_param_spaces(lib: StrategyLibrary, strategy_names: list) -> dict:
+    param_spaces = {}
+    for sname in strategy_names:
+        profile = lib.get_profile(sname)
+        if profile is not None and profile.param_ranges:
+            param_spaces[sname] = dict(profile.param_ranges)
+    return param_spaces
 
 
-def grid_search_single_strategy(strategy_name: str, param_space: dict, ds) -> pd.DataFrame:
-    """
-    对单个策略执行网格搜索。
-
-    对参数空间中的每组参数，修改策略库的 default_params，
-    然后用 PyBrokerBacktestRunner 在样本内数据上回测。
-
-    Returns:
-        结果 DataFrame，按 Sharpe 排序
-    """
+def grid_search_single_strategy(
+    strategy_name: str, param_space: dict, ds, lib: StrategyLibrary, opt_cfg: dict
+) -> pd.DataFrame:
     keys = list(param_space.keys())
     values = list(param_space.values())
     combos = list(product(*values))
@@ -88,45 +71,33 @@ def grid_search_single_strategy(strategy_name: str, param_space: dict, ds) -> pd
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
 
-        # 跳过不合理组合（如 short_ma >= long_ma）
         if strategy_name == "dual_ma" and params.get("short_ma", 0) >= params.get("long_ma", 999):
             continue
         if strategy_name == "rsi" and params.get("oversold", 0) >= params.get("overbought", 100):
             continue
 
         try:
-            # 修改策略库的 default_params
-            lib = StrategyLibrary()
-            profile = lib.get_profile(strategy_name)
-            if profile is None:
-                continue
-
-            # 临时修改默认参数
-            original_params = dict(profile.default_params)
-            profile.default_params.update(params)
-
-            # 创建 runner 并回测（样本内）
             config = BacktestConfig(
-                initial_cash=INITIAL_CASH,
-                commission_rate=0.0003,
-                slippage_rate=0.0002,
+                initial_cash=opt_cfg["initial_cash"],
+                commission_rate=opt_cfg["commission_rate"],
+                slippage_rate=opt_cfg["slippage_rate"],
             )
             runner = PyBrokerBacktestRunner(ds, config)
             runner.register_strategies([strategy_name])
 
-            result = runner.run(FULL_START, IN_SAMPLE_END)
-            kpi = extract_kpi(result)
+            result = runner.run(
+                opt_cfg["full_start"],
+                opt_cfg["in_sample_end"],
+                custom_params={strategy_name: params},
+            )
+            kpi = dict(result.metrics)
             kpi.update(params)
             results.append(kpi)
-
-            # 恢复原始参数
-            profile.default_params = original_params
 
         except Exception as e:
             print(f"    组合 {params} 失败: {e}")
             continue
 
-        # 进度
         if (i + 1) % 5 == 0 or i + 1 == total:
             print(f"    进度: {i+1}/{total}")
 
@@ -138,36 +109,26 @@ def grid_search_single_strategy(strategy_name: str, param_space: dict, ds) -> pd
     return df
 
 
-def rolling_validate(strategy_name: str, best_params: dict, ds) -> dict:
-    """
-    用 Walkforward 滚动窗口验证最优参数。
-
-    在样本内数据上用 Walkforward 验证，确保参数不过拟合。
-    返回各窗口的平均 Sharpe 和收益率。
-    """
+def rolling_validate(
+    strategy_name: str, best_params: dict, ds, lib: StrategyLibrary, opt_cfg: dict
+) -> dict:
     print(f"\n  滚动窗口验证: {strategy_name} | 参数: {best_params}")
-
-    # 修改策略库参数
-    lib = StrategyLibrary()
-    profile = lib.get_profile(strategy_name)
-    if profile is None:
-        return {}
-
-    original_params = dict(profile.default_params)
-    profile.default_params.update(best_params)
 
     try:
         config = BacktestConfig(
-            initial_cash=INITIAL_CASH,
-            commission_rate=0.0003,
-            slippage_rate=0.0002,
+            initial_cash=opt_cfg["initial_cash"],
+            commission_rate=opt_cfg["commission_rate"],
+            slippage_rate=opt_cfg["slippage_rate"],
             wf_train_ratio=0.6,
             wf_step_ratio=0.15,
         )
         runner = PyBrokerBacktestRunner(ds, config)
         runner.register_strategies([strategy_name])
 
-        wf_result = runner.walkforward(FULL_START, IN_SAMPLE_END)
+        wf_result = runner.walkforward(
+            opt_cfg["full_start"],
+            opt_cfg["in_sample_end"],
+        )
 
         window_sharpes = []
         window_returns = []
@@ -196,57 +157,43 @@ def rolling_validate(strategy_name: str, best_params: dict, ds) -> dict:
     except Exception as e:
         print(f"    滚动验证失败: {e}")
         return {}
-    finally:
-        profile.default_params = original_params
 
 
-def out_of_sample_test(strategy_name: str, best_params: dict, ds) -> dict:
-    """
-    样本外测试：用最优参数在样本外数据上回测。
-    """
+def out_of_sample_test(
+    strategy_name: str, best_params: dict, ds, lib: StrategyLibrary, opt_cfg: dict
+) -> dict:
     print(f"\n  样本外测试: {strategy_name}")
-
-    lib = StrategyLibrary()
-    profile = lib.get_profile(strategy_name)
-    if profile is None:
-        return {}
-
-    original_params = dict(profile.default_params)
-    profile.default_params.update(best_params)
 
     try:
         config = BacktestConfig(
-            initial_cash=INITIAL_CASH,
-            commission_rate=0.0003,
-            slippage_rate=0.0002,
+            initial_cash=opt_cfg["initial_cash"],
+            commission_rate=opt_cfg["commission_rate"],
+            slippage_rate=opt_cfg["slippage_rate"],
         )
         runner = PyBrokerBacktestRunner(ds, config)
         runner.register_strategies([strategy_name])
 
-        result = runner.run("2024-01-01", FULL_END)
-        kpi = extract_kpi(result)
+        result = runner.run(
+            opt_cfg.get("out_sample_start", "2024-01-01"),
+            opt_cfg["full_end"],
+            custom_params={strategy_name: best_params},
+        )
+        kpi = dict(result.metrics)
 
-        print(f"    样本外收益: {kpi['total_return_pct']:.2f}%")
-        print(f"    样本外Sharpe: {kpi['sharpe']:.4f}")
-        print(f"    样本外回撤: {kpi['max_drawdown_pct']:.2f}%")
+        print(f"    样本外收益: {kpi.get('total_return_pct', 0):.2f}%")
+        print(f"    样本外Sharpe: {kpi.get('sharpe', 0):.4f}")
+        print(f"    样本外回撤: {kpi.get('max_drawdown_pct', 0):.2f}%")
 
         return kpi
 
     except Exception as e:
         print(f"    样本外测试失败: {e}")
         return {}
-    finally:
-        profile.default_params = original_params
 
 
-def update_strategy_library(best_params_all: dict):
-    """
-    将最优参数更新到策略库（持久化到 __init__.py）。
-    """
-    lib = StrategyLibrary()
-
+def print_optimization_suggestions(best_params_all: dict, lib: StrategyLibrary):
     print("\n" + "=" * 60)
-    print("更新策略库默认参数")
+    print("最优参数建议")
     print("=" * 60)
 
     for sname, params in best_params_all.items():
@@ -254,26 +201,54 @@ def update_strategy_library(best_params_all: dict):
         if profile is None:
             continue
         old_params = dict(profile.default_params)
-        # 仅更新搜索空间中的参数
-        for k, v in params.items():
-            if k in old_params or k in PARAM_SPACES.get(sname, {}):
-                profile.default_params[k] = v
-        print(f"  {sname}: {old_params} → {profile.default_params}")
+        print(f"\n  {sname}:")
+        print(f"    当前默认: {old_params}")
+        print(f"    建议更新: {params}")
+        changed = {k: (old_params.get(k), v) for k, v in params.items() if old_params.get(k) != v}
+        if changed:
+            print(f"    变更项: {changed}")
 
-    # 写入到 __init__.py
-    init_path = os.path.join(os.path.dirname(__file__), "core", "strategy_library", "__init__.py")
-    with open(init_path, "r", encoding="utf-8") as f:
-        content = f.read()
+    print("\n" + "-" * 60)
+    print("参数应用方式（3种，按推荐程度排序）：")
+    print("-" * 60)
 
+    print("\n  方式1（推荐）: 通过 StrategyLibrary.update_default_params() 运行时更新")
+    print("    优点: 即时生效，无需修改源代码，可回滚")
+    print("    示例代码:")
+    print("      from core.strategy_library import StrategyLibrary")
+    print("      lib = StrategyLibrary()")
     for sname, params in best_params_all.items():
-        profile = lib.get_profile(sname)
-        if profile is None:
-            continue
-        # 找到策略注册块中的 default_params 并替换
-        # 这里只打印，实际修改需要精确的字符串替换
-        print(f"  [需手动更新] {sname}: {params}")
+        print(f"      lib.update_default_params('{sname}', {params})")
+    print("      # 更新后所有使用 StrategyLibrary 的回测将自动采用新参数")
 
-    print("\n  注意: 参数已临时生效。如需持久化，请手动更新 core/strategy_library/__init__.py")
+    print("\n  方式2: 更新 config.yaml 策略参数段")
+    print("    优点: 参数与代码分离，版本可控")
+    yaml_params = lib.export_params_to_yaml(list(best_params_all.keys()))
+    for sname in best_params_all:
+        if sname in yaml_params:
+            yaml_params[sname].update(best_params_all[sname])
+    print("    建议将以下内容更新到 config.yaml 的 strategies 段：")
+    for sname, params in best_params_all.items():
+        print(f"\n    - name: \"{sname}\"")
+        print(f"      params:")
+        for k, v in params.items():
+            if isinstance(v, str):
+                print(f"        {k}: \"{v}\"")
+            else:
+                print(f"        {k}: {v}")
+
+    print("\n  方式3: 通过 custom_params 参数覆盖（单次回测）")
+    print("    优点: 不修改任何持久化配置，仅影响当前回测")
+    print("    示例代码:")
+    print("      runner = PyBrokerBacktestRunner(ds, config)")
+    for sname, params in best_params_all.items():
+        print(f"      runner.register_strategies(['{sname}'])")
+        print(f"      result = runner.run(start, end, custom_params={{'{sname}': {params}}})")
+
+    print("\n" + "=" * 60)
+    print("  注意: 方式1和方式2的参数变更在系统重启后不会持久化")
+    print("  如需永久生效，请将方式2的参数更新到 config.yaml")
+    print("=" * 60)
 
 
 def main():
@@ -282,85 +257,88 @@ def main():
     print(f"  开始: {datetime.now()}")
     print("=" * 60)
 
-    # ── 1. 加载数据 ──
-    print("\n[1/4] 加载 TqSdk 数据...")
+    opt_cfg = _load_opt_config()
+    lib = StrategyLibrary()
+
+    print("\n[1/4] 加载数据...")
+    phone = os.getenv("TQSDK_PHONE")
+    password = os.getenv("TQSDK_PASSWORD")
     ds = create_hybrid_data_source(
-        phone="13600198250",
-        password="lg123456789",
-        symbols=SYMBOLS,
+        phone=phone,
+        password=password,
+        symbols=opt_cfg["symbols"],
         data_length=3000,
     )
 
-    # ── 2. 网格搜索 ──
-    print("\n[2/4] 网格搜索（样本内: 2016-01 ~ 2023-12）")
+    strategy_names = opt_cfg["strategy_names"]
+    param_spaces = _get_param_spaces(lib, strategy_names)
+    print(f"\n  参数空间来源: StrategyLibrary.param_ranges")
+    for sname, ps in param_spaces.items():
+        total = 1
+        for v in ps.values():
+            total *= len(v)
+        print(f"    {sname}: {ps} ({total} 组合)")
+
+    print(f"\n[2/4] 网格搜索（样本内: {opt_cfg['full_start']} ~ {opt_cfg['in_sample_end']}）")
     all_grid_results = {}
     best_params_all = {}
 
-    for sname, param_space in PARAM_SPACES.items():
-        grid_df = grid_search_single_strategy(sname, param_space, ds)
+    for sname, param_space in param_spaces.items():
+        grid_df = grid_search_single_strategy(sname, param_space, ds, lib, opt_cfg)
         all_grid_results[sname] = grid_df
 
         if grid_df.empty:
             print(f"  {sname}: 无有效结果")
             continue
 
-        # 保存完整网格搜索结果
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        grid_df.to_csv(os.path.join(OUTPUT_DIR, f"opt_grid_{sname}.csv"), index=False)
+        os.makedirs(opt_cfg["output_dir"], exist_ok=True)
+        grid_df.to_csv(os.path.join(opt_cfg["output_dir"], f"opt_grid_{sname}.csv"), index=False)
 
-        # 输出 Top 5
         print(f"\n  {sname} Top 5 (按Sharpe):")
         top5 = grid_df.head(5)
         for idx, row in top5.iterrows():
             param_str = ", ".join(f"{k}={row[k]}" for k in param_space.keys())
             print(f"    #{idx+1} {param_str} => Sharpe={row['sharpe']:.4f}, Return={row['total_return_pct']:.2f}%, DD={row['max_drawdown_pct']:.2f}%")
 
-        # 取 Top 1 参数
         best = grid_df.iloc[0]
         best_params = {k: best[k] for k in param_space.keys()}
         best_params_all[sname] = best_params
 
-    # ── 3. 滚动窗口验证 ──
     print("\n[3/4] 滚动窗口验证（Walkforward）")
     validation_results = {}
 
     for sname, params in best_params_all.items():
-        val = rolling_validate(sname, params, ds)
+        val = rolling_validate(sname, params, ds, lib, opt_cfg)
         validation_results[sname] = val
 
-    # ── 4. 样本外测试 ──
-    print("\n[4/4] 样本外测试（2024-01 ~ 2026-05）")
+    print(f"\n[4/4] 样本外测试（{opt_cfg.get('out_sample_start', '2024-01-01')} ~ {opt_cfg['full_end']}）")
     oos_results = {}
 
     for sname, params in best_params_all.items():
-        oos = out_of_sample_test(sname, params, ds)
+        oos = out_of_sample_test(sname, params, ds, lib, opt_cfg)
         oos_results[sname] = oos
 
-    # ── 汇总 ──
     print("\n" + "=" * 60)
     print("  优化结果汇总")
     print("=" * 60)
 
     summary = []
-    for sname in PARAM_SPACES:
+    for sname in param_spaces:
         if sname not in best_params_all:
             continue
         row = {
             "strategy": sname,
             "best_params": str(best_params_all[sname]),
         }
-        # 网格搜索 Top1
         grid_df = all_grid_results.get(sname)
         if grid_df is not None and not grid_df.empty:
             top = grid_df.iloc[0]
             row["in_sample_sharpe"] = round(top["sharpe"], 4)
             row["in_sample_return"] = round(top["total_return_pct"], 2)
             row["in_sample_drawdown"] = round(top["max_drawdown_pct"], 2)
-        # 滚动验证
         val = validation_results.get(sname, {})
         row["wf_avg_sharpe"] = round(val.get("avg_sharpe", 0), 4)
         row["wf_positive_ratio"] = round(val.get("positive_sharpe_ratio", 0), 2)
-        # 样本外
         oos = oos_results.get(sname, {})
         row["oos_sharpe"] = round(oos.get("sharpe", 0), 4)
         row["oos_return"] = round(oos.get("total_return_pct", 0), 2)
@@ -373,7 +351,6 @@ def main():
 
     print("\n" + summary_df.to_string(index=False))
 
-    # 判断是否过拟合：样本外Sharpe衰减
     print("\n  过拟合检验:")
     for _, row in summary_df.iterrows():
         sname = row["strategy"]
@@ -386,8 +363,7 @@ def main():
         else:
             print(f"    {sname}: IS Sharpe接近0，无法判断")
 
-    # ── 更新策略库 ──
-    update_strategy_library(best_params_all)
+    print_optimization_suggestions(best_params_all, lib)
 
     print(f"\n  优化完成: {datetime.now()}")
     print(f"  结果目录: {OUTPUT_DIR}/")

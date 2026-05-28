@@ -65,6 +65,39 @@ class MarketRegime(Enum):
     EXHAUSTION_BEAR = "exhaustion_bear"
 
 
+_REGIME_LABEL_MAP: Dict[str, MarketRegime] = {
+    "unknown": MarketRegime.UNKNOWN,
+    "trend": MarketRegime.TREND_UP,
+    "trend_up": MarketRegime.TREND_UP,
+    "trend_down": MarketRegime.TREND_DOWN,
+    "range": MarketRegime.RANGE_BOUND,
+    "range_bound": MarketRegime.RANGE_BOUND,
+    "high_vol": MarketRegime.HIGH_VOLATILITY,
+    "high_volatility": MarketRegime.HIGH_VOLATILITY,
+    "low_vol": MarketRegime.LOW_VOLATILITY,
+    "low_volatility": MarketRegime.LOW_VOLATILITY,
+    "breakout": MarketRegime.BREAKOUT,
+    "exhaustion_bull": MarketRegime.EXHAUSTION_BULL,
+    "exhaustion_bear": MarketRegime.EXHAUSTION_BEAR,
+}
+
+
+def regime_label_to_enum(label: str) -> MarketRegime:
+    """
+    将环境标签字符串转换为 MarketRegime 枚举。
+
+    支持完整名称（如 "trend_up"）和缩写（如 "trend"、"high_vol"），
+    大小写不敏感。无法识别时返回 MarketRegime.RANGE_BOUND。
+
+    Args:
+        label: 环境标签字符串
+
+    Returns:
+        对应的 MarketRegime 枚举值
+    """
+    return _REGIME_LABEL_MAP.get(label.lower(), MarketRegime.RANGE_BOUND)
+
+
 class TrendType(Enum):
     """市场趋势类型。"""
 

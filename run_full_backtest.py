@@ -1,36 +1,43 @@
 #!/usr/bin/env python3
 """
-多策略量化回测系统 — 全面回测执行脚本。
+多策略量化回测系统 — 完整回测执行脚本（整合版）
 
-数据源: TqSdk 在线数据优先，本地 CSV 回退
-引擎: PyBroker（不可用时自动回退自研简化引擎）
-策略流程: 先判断市场环境 → 匹配策略 → 执行交易
+整合自 run_full_backtest.py 与 run_pybroker_full_backtest_v2.py，
+保留两者核心业务功能，消除代码冗余，统一使用系统标准模块。
 
-按计划执行 8 个阶段的回测实验：
+所有功能实现严格调用现有系统模块：
+  1. 数据加载：core.engine.broker_adapter.create_hybrid_data_source
+  2. 回测引擎：core.engine.broker_adapter.PyBrokerBacktestRunner
+  3. 市场环境：core.market_regime.MarketRegimeDetector
+  4. 策略库：core.strategy_library.StrategyLibrary
+  5. 绩效指标：utils.metrics.MetricsCalculator
+  6. 策略切换：core.engine.switch_engine.StrategySwitchEngine
+  7. 配置管理：config.yaml
+
+实验阶段：
   E1: 单策略基线回测
-  E2: 等权组合
+  E2: 等权信号融合
   E3: 环境动态加权
-  E4: 策略切换
-  E5: 策略切换+过渡
-  E6: 多品种分散
+  E4: 策略切换（含过渡逻辑）
+  E5: 多品种分散
+  E6: WalkForward 滚动验证
   E7: 样本外验证
-  Phase 5: 参数优化
-  Phase 7: 蒙特卡洛模拟
-
-输出目录: output_backtest/
+  E8: Bootstrap 置信区间
+  E9: 蒙特卡洛模拟
+  E10: HTML 报告生成
 """
 
-import os, sys, json, warnings, logging
+import os
+import sys
+import yaml
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from collections import deque
-from itertools import product
 
 import numpy as np
 import pandas as pd
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -39,115 +46,36 @@ plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 warnings.filterwarnings("ignore")
-logging.basicConfig(
-    level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
 
-from core.config import BacktestConfig
+from loguru import logger
+
 from core.engine.broker_adapter import (
     PyBrokerBacktestRunner,
     PyBrokerDataSource,
     PyBrokerResult,
     create_hybrid_data_source,
 )
-from core.strategy_library import StrategyLibrary
-from core.market_regime import MarketRegime, MarketRegimeDetector
-from core.performance import PerformanceEvaluator, PerformanceMonitor
-
-# ── 全局配置 ──
-OUTPUT_DIR = Path("./output_backtest")
-OUTPUT_DIR.mkdir(exist_ok=True)
-CHARTS_DIR = OUTPUT_DIR / "charts"
-CHARTS_DIR.mkdir(exist_ok=True)
-
-DATA_DIR = "./data"
-INITIAL_CASH = 1_000_000
-STRATEGY_NAMES = ["dual_ma", "rsi", "term_structure", "vol_breakout", "spread"]
-
-CORE_SYMBOLS = {
-    "SHFE.RB": "黑色-螺纹钢",
-    "DCE.M": "农产品-豆粕",
-    "CZCE.TA": "化工-PTA",
-    "SHFE.CU": "有色-铜",
-    "CFFEX.IF": "股指-沪深300",
-}
-
-IN_SAMPLE_END = "2024-06-30"
-OUT_SAMPLE_START = "2024-07-01"
-OUT_SAMPLE_END = "2025-12-31"
-FULL_START = "2020-01-01"
-
-# ── 数据源缓存 ──
-_data_source_cache: Dict[str, PyBrokerDataSource] = {}
+from core.config import BacktestConfig
+from core.market_regime import MarketRegimeDetector
+from core.performance import PerformanceEvaluator
+from utils.metrics import MetricsCalculator
 
 
-def _get_data_source(symbols: List[str]) -> PyBrokerDataSource:
-    """
-    获取混合数据源（TqSdk 优先 + CSV 回退）。
-    使用缓存避免重复加载。
-    """
-    cache_key = ",".join(sorted(symbols))
-    if cache_key not in _data_source_cache:
-        print(f"  加载数据源: TqSdk 优先, CSV 回退, 品种={symbols}")
-        _data_source_cache[cache_key] = create_hybrid_data_source(
-            symbols=symbols,
-            data_dir=DATA_DIR,
-        )
-    return _data_source_cache[cache_key]
+def load_config(config_path: str = "config.yaml") -> Dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    return config
 
 
-def get_pybroker_runner(
-    symbols: List[str],
-    strategies: Optional[List[str]] = None,
-    fusion_mode: bool = False,
-) -> PyBrokerBacktestRunner:
-    """
-    创建基于 PyBroker 引擎的回测运行器。
-
-    流程: TqSdk/CSV 数据 → 市场环境检测 → 策略匹配 → PyBroker 执行
-
-    Args:
-        symbols: 品种代码列表
-        strategies: 策略名称列表
-        fusion_mode: True=信号融合模式, False=策略切换模式
-    """
-    config = BacktestConfig(
-        initial_cash=INITIAL_CASH,
-        in_sample_end=IN_SAMPLE_END,
-        strategy_weights={
-            "dual_ma": 0.25,
-            "rsi": 0.20,
-            "vol_breakout": 0.25,
-            "term_structure": 0.20,
-            "spread": 0.10,
-        },
-        stop_loss_pct=0.05,
-        max_position_pct=0.2,
-        fusion_mode=fusion_mode,
-    )
-    data_source = _get_data_source(symbols)
-    runner = PyBrokerBacktestRunner(data_source, config, target_symbols=symbols)
-    if strategies:
-        runner.register_strategies(strategies)
-    return runner
-
-
-def get_single_symbol_runner(
-    sym_file: str,
-    strategies: Optional[List[str]] = None,
-    fusion_mode: bool = False,
-) -> PyBrokerBacktestRunner:
-    """创建单品种回测运行器（便捷方法）。"""
-    return get_pybroker_runner(
-        symbols=[sym_file],
-        strategies=strategies,
-        fusion_mode=fusion_mode,
-    )
+def get_tqsdk_credentials() -> Tuple[Optional[str], Optional[str]]:
+    phone = os.getenv("TQSDK_PHONE")
+    password = os.getenv("TQSDK_PASSWORD")
+    if not phone or not password:
+        logger.warning("TqSdk凭证未设置（环境变量 TQSDK_PHONE/TQSDK_PASSWORD），将仅使用CSV数据")
+    return phone, password
 
 
 def format_metrics(m: dict) -> dict:
-    """格式化指标，N/A 和 inf 值转换为字符串。"""
     result = {}
     for k, v in m.items():
         if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
@@ -159,784 +87,662 @@ def format_metrics(m: dict) -> dict:
     return result
 
 
-def save_csv(df: pd.DataFrame, name: str):
-    """保存 DataFrame 到 CSV。"""
-    path = OUTPUT_DIR / name
-    df.to_csv(path, index=False)
-    print(f"  已保存: {path}")
+def save_csv(df: pd.DataFrame, path: Path):
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    logger.info(f"已保存: {path}")
+
+
+def _get_strategy_names(config: Dict) -> List[str]:
+    return [s["name"] for s in config.get("strategies", []) if "name" in s]
+
+
+_bt_config_cache: Dict[str, BacktestConfig] = {}
+
+
+def _build_backtest_config(config: Dict, fusion_mode: bool = False) -> BacktestConfig:
+    cache_key = f"{id(config)}_{fusion_mode}"
+    if cache_key in _bt_config_cache:
+        return _bt_config_cache[cache_key]
+    bt_cfg = config["backtest"]
+    risk_cfg = config["risk_management"]
+    bt_config = BacktestConfig(
+        initial_cash=bt_cfg.get("initial_cash", 1_000_000),
+        commission_rate=bt_cfg.get("commission_rate", 0.0003),
+        slippage_rate=bt_cfg.get("slippage_rate", 0.0002),
+        stop_loss_pct=risk_cfg.get("stop_loss_pct", 0.05),
+        max_position_pct=risk_cfg.get("position_limit_pct", 0.2),
+        max_total_position_pct=risk_cfg.get("total_position_limit", 0.4),
+        in_sample_end=bt_cfg.get("in_sample_end_date"),
+        strategy_weights=config.get("strategy_weights", {}),
+    )
+    bt_config.fusion_mode = fusion_mode
+    _bt_config_cache[cache_key] = bt_config
+    return bt_config
+
+
+def get_pybroker_runner(
+    data_source: PyBrokerDataSource,
+    config: Dict,
+    strategies: Optional[List[str]] = None,
+    fusion_mode: bool = False,
+) -> PyBrokerBacktestRunner:
+    bt_config = _build_backtest_config(config, fusion_mode=fusion_mode)
+    symbols = config.get("symbols", [])
+    runner = PyBrokerBacktestRunner(data_source, bt_config, target_symbols=symbols)
+    if strategies:
+        runner.register_strategies(strategies)
+    return runner
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 2: E1 — 单策略基线回测
+# E1: 单策略基线回测
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_e1_single_strategy_baselines():
-    """
-    E1: 5 套策略在 5 个代表品种上独立回测。
-    使用 PyBroker 引擎，先判断市场环境再匹配策略。
-    输出: e1_baseline_metrics.csv
-    """
-    print("\n" + "=" * 60)
-    print("E1: 单策略基线回测 (PyBroker 引擎 + TqSdk 数据)")
-    print("=" * 60)
+def run_e1_single_strategy_baselines(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E1: 单策略基线回测")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
 
     all_results = []
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label} ({sym_file})")
-        for sname in STRATEGY_NAMES:
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
+        for sname in strategy_names:
             try:
-                runner = get_single_symbol_runner(sym_file, strategies=[sname])
+                runner = get_pybroker_runner(
+                    data_source, config, strategies=[sname]
+                )
                 result = runner.run(
-                    start_date=FULL_START,
-                    end_date=OUT_SAMPLE_END,
+                    start_date=bt_cfg["full_start_date"],
+                    end_date=bt_cfg["full_end_date"],
                 )
                 m = format_metrics(result.metrics)
-                m["symbol"] = sym_file
-                m["symbol_label"] = sym_label
+                m["symbol"] = sym
                 m["strategy"] = sname
                 all_results.append(m)
-                print(
-                    f"  {sname:15s}: return={m.get('total_return', m.get('total_return_pct', 'N/A'))} "
-                    f"sharpe={m.get('sharpe', 'N/A')} max_dd={m.get('max_drawdown', m.get('max_drawdown_pct', 'N/A'))} "
-                    f"trades={m.get('trade_count', 'N/A')}"
+                logger.info(
+                    f"  {sname}: return={m.get('total_return_pct', 'N/A')} "
+                    f"sharpe={m.get('sharpe', 'N/A')} "
+                    f"max_dd={m.get('max_drawdown_pct', 'N/A')}"
                 )
             except Exception as e:
-                print(f"  {sname:15s}: 失败 - {e}")
-                all_results.append(
-                    {"symbol": sym_file, "strategy": sname, "error": str(e)}
-                )
+                logger.error(f"  {sname}: 失败 - {e}")
+                all_results.append({"symbol": sym, "strategy": sname, "error": str(e)})
 
     df = pd.DataFrame(all_results)
-    save_csv(df, "e1_baseline_metrics.csv")
+    save_csv(df, output_dir / "e1_baseline_metrics.csv")
     return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 3: E2-E5 — 组合回测实验
+# E2: 等权信号融合
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_e2_equal_weight():
-    """
-    E2: 等权组合 — 5策略信号融合（fusion_mode=True）。
-    使用 PyBroker 引擎，各策略信号按波动率倒数加权融合。
-    """
-    print("\n" + "=" * 60)
-    print("E2: 等权组合回测 (PyBroker 信号融合)")
-    print("=" * 60)
+def run_e2_equal_weight(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E2: 等权信号融合回测")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
 
     all_results = []
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label}")
-        runner = get_single_symbol_runner(
-            sym_file,
-            strategies=STRATEGY_NAMES,
-            fusion_mode=True,
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
+        runner = get_pybroker_runner(
+            data_source, config, strategies=strategy_names, fusion_mode=True
         )
         try:
             result = runner.run(
-                start_date=FULL_START,
-                end_date=OUT_SAMPLE_END,
+                start_date=bt_cfg["full_start_date"],
+                end_date=bt_cfg["full_end_date"],
             )
             m = format_metrics(result.metrics)
-            m["symbol"] = sym_file
+            m["symbol"] = sym
             m["experiment"] = "E2_等权融合"
             all_results.append(m)
-            print(
-                f"  portfolio: return={m.get('total_return', m.get('total_return_pct', 'N/A'))} "
-                f"sharpe={m.get('sharpe', 'N/A')} "
-                f"max_dd={m.get('max_drawdown', m.get('max_drawdown_pct', 'N/A'))} "
-                f"calmar={m.get('calmar', 'N/A')}"
+            logger.info(
+                f"  portfolio: sharpe={m.get('sharpe', 'N/A')} "
+                f"return={m.get('total_return_pct', 'N/A')}"
             )
 
             eq = result.equity_curve
             if not eq.empty:
-                save_csv(
-                    eq.assign(symbol=sym_file),
-                    f"e2_equity_{sym_file.replace('.', '_')}.csv",
-                )
-                _plot_equity_curve(
-                    eq,
-                    sym_label,
-                    "E2_等权融合",
-                    f"e2_equity_{sym_file.replace('.', '_')}.png",
-                )
+                save_csv(eq.assign(symbol=sym), output_dir / f"e2_equity_{sym.replace('.', '_')}.csv")
+                _plot_equity_curve(eq, sym, "E2_等权融合", charts_dir / f"e2_equity_{sym.replace('.', '_')}.png")
         except Exception as e:
-            print(f"  失败: {e}")
+            logger.error(f"  失败: {e}")
 
     df = pd.DataFrame(all_results)
-    save_csv(df, "e2_equal_weight_metrics.csv")
+    save_csv(df, output_dir / "e2_equal_weight_metrics.csv")
     return df
 
 
-def run_e3_dynamic_weight():
-    """
-    E3: 环境动态加权 — 先判断市场环境，再动态调整策略权重。
+# ══════════════════════════════════════════════════════════════════════════════
+# E3: 环境动态加权
+# ══════════════════════════════════════════════════════════════════════════════
 
-    使用 PyBroker 引擎执行各策略独立回测，然后根据
-    MarketRegimeDetector.get_regime_weights() 在每个交易日
-    动态计算组合权重，得到动态加权组合净值。
-    """
-    print("\n" + "=" * 60)
-    print("E3: 环境动态加权回测 (PyBroker 引擎)")
-    print("=" * 60)
+
+def run_e3_dynamic_weight(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E3: 环境动态加权回测（execute 融合模式）")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
 
     all_results = []
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label}")
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
         try:
-            # ── 逐策略独立运行 ──
-            strategy_equity = {}
-            strategy_regime = None
-
-            for sname in STRATEGY_NAMES:
-                try:
-                    runner = get_single_symbol_runner(sym_file, strategies=[sname])
-                    result = runner.run(
-                        start_date=FULL_START,
-                        end_date=OUT_SAMPLE_END,
-                    )
-                    eq = result.equity_curve
-                    if not eq.empty and "equity" in eq.columns:
-                        strategy_equity[sname] = eq
-                    if strategy_regime is None and not result.regime_history.empty:
-                        strategy_regime = result.regime_history
-                except Exception:
-                    pass
-
-            if not strategy_equity:
-                print("  跳过: 无策略结果")
-                continue
-
-            # ── 构建环境→权重映射 ──
-            detector = MarketRegimeDetector()
-            regime_weights_map = {}
-            if strategy_regime is not None and "regime" in strategy_regime.columns:
-                for regime_val in strategy_regime["regime"].unique():
-                    if pd.notna(regime_val):
-                        regime_weights_map[str(regime_val)] = (
-                            detector.get_regime_weights(str(regime_val))
-                        )
-
-            # ── 收集各策略归一化净值 ──
-            strategy_nav = {}
-            for sname, eq_df in strategy_equity.items():
-                nav = eq_df["equity"] / eq_df["equity"].iloc[0]
-                strategy_nav[sname] = nav
-
-            default_weights = {s: 1.0 / len(strategy_nav) for s in strategy_nav}
-
-            # ── 动态加权计算组合净值 ──
-            if strategy_regime is not None and "date" in strategy_regime.columns:
-                date_regime = dict(
-                    zip(
-                        pd.to_datetime(strategy_regime["date"]),
-                        strategy_regime["regime"],
-                    )
-                )
-            else:
-                date_regime = {}
-
-            nav_len = min(len(v) for v in strategy_nav.values())
-            portfolio_nav = np.ones(nav_len)
-
-            # 使用第一个策略的日期序列作为基准
-            ref_dates = pd.to_datetime(
-                strategy_equity[list(strategy_equity.keys())[0]]["date"]
+            runner = get_pybroker_runner(
+                data_source, config, strategies=strategy_names, fusion_mode=True
             )
-
-            for i in range(nav_len):
-                if i < len(ref_dates):
-                    d = ref_dates.iloc[i]
-                    regime_val = date_regime.get(d)
-                    if regime_val and str(regime_val) in regime_weights_map:
-                        w = regime_weights_map[str(regime_val)]
-                        active_w = {s: w.get(s, 0.0) for s in strategy_nav}
-                        total_w = sum(active_w.values())
-                        if total_w > 0:
-                            active_w = {s: v / total_w for s, v in active_w.items()}
-                        else:
-                            active_w = default_weights
-                    else:
-                        active_w = default_weights
-                else:
-                    active_w = default_weights
-
-                weighted = sum(
-                    active_w.get(s, 0) * float(strategy_nav[s].iloc[i])
-                    for s in strategy_nav
-                )
-                portfolio_nav[i] = weighted
-
-            portfolio_equity = pd.Series(portfolio_nav * INITIAL_CASH)
-
-            metrics = PerformanceEvaluator.compute_metrics(portfolio_equity)
-            m = format_metrics(metrics)
-            m["symbol"] = sym_file
+            result = runner.run(
+                start_date=bt_cfg["full_start_date"],
+                end_date=bt_cfg["full_end_date"],
+                use_execute_fusion=True,
+            )
+            m = format_metrics(result.metrics)
+            m["symbol"] = sym
             m["experiment"] = "E3_动态权重"
             all_results.append(m)
-            print(
+            logger.info(
                 f"  portfolio: return={m.get('total_return_pct', 'N/A')} "
-                f"sharpe={m.get('sharpe', 'N/A')} "
-                f"max_dd={m.get('max_drawdown_pct', 'N/A')}"
+                f"sharpe={m.get('sharpe', 'N/A')}"
             )
 
-            eq_df = pd.DataFrame(
-                {
-                    "date": ref_dates.values[:nav_len],
-                    "equity": portfolio_equity,
-                }
-            )
-            save_csv(
-                eq_df.assign(symbol=sym_file),
-                f"e3_equity_{sym_file.replace('.', '_')}.csv",
-            )
-
-            if strategy_regime is not None:
-                save_csv(
-                    strategy_regime,
-                    f"e3_regime_{sym_file.replace('.', '_')}.csv",
-                )
+            eq = result.equity_curve
+            if not eq.empty:
+                save_csv(eq.assign(symbol=sym), output_dir / f"e3_equity_{sym.replace('.', '_')}.csv")
+            if not result.regime_history.empty:
+                save_csv(result.regime_history, output_dir / f"e3_regime_{sym.replace('.', '_')}.csv")
         except Exception as e:
-            print(f"  失败: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error(f"  失败: {e}")
 
     df = pd.DataFrame(all_results)
-    save_csv(df, "e3_dynamic_weight_metrics.csv")
+    save_csv(df, output_dir / "e3_dynamic_weight_metrics.csv")
     return df
 
 
-def run_e4_strategy_switching():
-    """
-    E4: 策略切换 — 先判断市场环境，再切换到最匹配的策略。
-    使用 PyBroker 引擎 + StrategySwitchEngine（fusion_mode=False）。
-    """
-    print("\n" + "=" * 60)
-    print("E4: 策略切换回测 (PyBroker 引擎 + 环境匹配)")
-    print("=" * 60)
+# ══════════════════════════════════════════════════════════════════════════════
+# E4: 策略切换（含过渡逻辑）
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def run_e4_strategy_switching(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E4: 策略切换回测（含过渡逻辑）")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
 
     all_results = []
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label}")
-        runner = get_single_symbol_runner(
-            sym_file,
-            strategies=STRATEGY_NAMES,
-            fusion_mode=False,
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
+        runner = get_pybroker_runner(
+            data_source, config, strategies=strategy_names, fusion_mode=False
         )
         try:
             result = runner.run(
-                start_date=FULL_START,
-                end_date=OUT_SAMPLE_END,
+                start_date=bt_cfg["full_start_date"],
+                end_date=bt_cfg["full_end_date"],
             )
             m = format_metrics(result.metrics)
-            m["symbol"] = sym_file
+            m["symbol"] = sym
             m["experiment"] = "E4_策略切换"
             all_results.append(m)
-            print(
-                f"  portfolio: return={m.get('total_return', m.get('total_return_pct', 'N/A'))} "
-                f"sharpe={m.get('sharpe', 'N/A')} "
-                f"max_dd={m.get('max_drawdown', m.get('max_drawdown_pct', 'N/A'))}"
+            logger.info(
+                f"  portfolio: return={m.get('total_return_pct', 'N/A')} "
+                f"sharpe={m.get('sharpe', 'N/A')}"
             )
 
             if not result.switch_log.empty:
-                save_csv(
-                    result.switch_log,
-                    f"e4_switch_log_{sym_file.replace('.', '_')}.csv",
-                )
-                print(f"  策略切换记录: {len(result.switch_log)} 条")
+                save_csv(result.switch_log, output_dir / f"e4_switch_log_{sym.replace('.', '_')}.csv")
 
             eq = result.equity_curve
             if not eq.empty:
-                save_csv(
-                    eq.assign(symbol=sym_file),
-                    f"e4_equity_{sym_file.replace('.', '_')}.csv",
-                )
+                save_csv(eq.assign(symbol=sym), output_dir / f"e4_equity_{sym.replace('.', '_')}.csv")
         except Exception as e:
-            print(f"  失败: {e}")
+            logger.error(f"  失败: {e}")
 
     df = pd.DataFrame(all_results)
-    save_csv(df, "e4_strategy_switching_metrics.csv")
+    save_csv(df, output_dir / "e4_strategy_switching_metrics.csv")
     return df
 
 
-def run_e5_switching_with_transition():
-    """
-    E5: 策略切换+过渡 — 与E4相同但记录过渡期说明。
-    StrategySwitchEngine 已内置过渡逻辑（cooldown 机制）。
-    """
-    print("\n" + "=" * 60)
-    print("E5: 策略切换+过渡回测")
-    print("=" * 60)
-    run_e4_strategy_switching()
-    print("  E5 与 E4 使用同一切换引擎，过渡逻辑已内置。")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 4: E6 — 多品种分散
+# E5: 多品种分散
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_e6_multi_symbol():
-    """
-    E6: 多品种分散。
-    使用 PyBroker 引擎在所有品种上同时运行策略切换，
-    实现跨品种分散化。
-    """
-    print("\n" + "=" * 60)
-    print("E6: 多品种分散回测 (PyBroker 引擎)")
-    print("=" * 60)
+def run_e5_multi_symbol(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> Optional[Dict]:
+    logger.info("E5: 多品种分散回测")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
+    initial_cash = bt_cfg.get("initial_cash", 1_000_000)
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
 
     all_equities = []
     strategy_returns_by_symbol = {}
 
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label}")
-        runner = get_single_symbol_runner(
-            sym_file,
-            strategies=STRATEGY_NAMES,
-            fusion_mode=False,
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
+        runner = get_pybroker_runner(
+            data_source, config, strategies=strategy_names, fusion_mode=False
         )
         try:
             result = runner.run(
-                start_date=FULL_START,
-                end_date=OUT_SAMPLE_END,
+                start_date=bt_cfg["full_start_date"],
+                end_date=bt_cfg["full_end_date"],
             )
             eq = result.equity_curve
             if not eq.empty:
                 eq = eq.copy()
-                eq["symbol"] = sym_file
+                eq["symbol"] = sym
                 all_equities.append(eq)
 
                 eq_sorted = eq.sort_values("date")
                 eq_sorted["daily_return"] = eq_sorted["equity"].pct_change()
-                strategy_returns_by_symbol[sym_file] = eq_sorted[
-                    ["date", "daily_return"]
-                ].set_index("date")
-                print(f"  equity range: {eq['date'].min()} ~ {eq['date'].max()}")
+                strategy_returns_by_symbol[sym] = eq_sorted[["date", "daily_return"]].set_index("date")
         except Exception as e:
-            print(f"  失败: {e}")
+            logger.error(f"  失败: {e}")
 
     if len(strategy_returns_by_symbol) >= 2:
-        print("\n  计算多品种等权组合...")
+        logger.info("  计算多品种等权组合...")
         combined_rets = None
         for sym, rets_df in strategy_returns_by_symbol.items():
             if combined_rets is None:
                 combined_rets = rets_df.rename(columns={"daily_return": sym})
             else:
-                combined_rets = combined_rets.join(
-                    rets_df.rename(columns={"daily_return": sym}), how="outer"
-                )
+                combined_rets = combined_rets.join(rets_df.rename(columns={"daily_return": sym}), how="outer")
 
         if combined_rets is not None:
             combined_rets = combined_rets.fillna(0)
             portfolio_ret = combined_rets.mean(axis=1)
-            portfolio_equity = (1 + portfolio_ret).cumprod() * INITIAL_CASH
-            multi_eq = pd.DataFrame(
-                {
-                    "date": portfolio_equity.index,
-                    "equity": portfolio_equity.values,
-                }
+            portfolio_equity = (1 + portfolio_ret).cumprod() * initial_cash
+            multi_eq = pd.DataFrame({"date": portfolio_equity.index, "equity": portfolio_equity.values})
+
+            multi_metrics = PerformanceEvaluator.compute_metrics(portfolio_equity)
+            m = format_metrics(multi_metrics)
+            logger.info(
+                f"  多品种组合: return={m.get('total_return_pct', 'N/A')} "
+                f"sharpe={m.get('sharpe', 'N/A')}"
             )
 
-            evaluator = PerformanceEvaluator()
-            multi_metrics = format_metrics(evaluator.compute_metrics(portfolio_equity))
-
-            print(
-                f"  多品种组合: return={multi_metrics.get('total_return_pct')} "
-                f"sharpe={multi_metrics.get('sharpe')} "
-                f"max_dd={multi_metrics.get('max_drawdown_pct')}"
-            )
-
-            save_csv(multi_eq, "e6_multi_symbol_equity.csv")
+            save_csv(multi_eq, output_dir / "e5_multi_symbol_equity.csv")
 
             corr_matrix = combined_rets.corr()
-            save_csv(corr_matrix, "e6_correlation_matrix.csv")
-            print(
-                f"  策略间平均相关系数: {corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)].mean():.4f}"
-            )
+            save_csv(corr_matrix, output_dir / "e5_correlation_matrix.csv")
 
-            _plot_equity_curve(
-                multi_eq,
-                "多品种等权组合",
-                "E6_多品种分散",
-                "e6_multi_symbol_equity.png",
-            )
+            _plot_equity_curve(multi_eq, "多品种等权组合", "E5_多品种分散", charts_dir / "e5_multi_symbol_equity.png")
 
-            return {"metrics": multi_metrics, "equity": multi_eq}
+            return {"metrics": m, "equity": multi_eq}
 
     return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 5: 参数优化
+# E6: WalkForward 滚动验证
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_phase5_optimization():
-    """
-    Phase 5: 样本内参数优化（网格搜索 + 稳健性评分）。
-    使用 PyBroker 引擎在螺纹钢样本内数据上对核心参数进行扫描。
-    v2: 增加稳健性评分 robust_score = 0.7 * sharpe + 0.3 * neighborhood_avg_sharpe
-    """
-    print("\n" + "=" * 60)
-    print("Phase 5: 参数优化（PyBroker 引擎 + 网格搜索 + 稳健性评分）")
-    print("=" * 60)
+def run_e6_walkforward(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E6: WalkForward 滚动验证")
+    bt_cfg = config["backtest"]
+    strategy_names = _get_strategy_names(config)
 
-    param_spaces = {
-        "dual_ma": {
-            "short_ma": [3, 5, 8, 10, 12, 15],
-            "long_ma": [20, 30, 40, 50, 60],
-        },
-        "rsi": {
-            "rsi_period": [10, 14, 20, 28],
-            "oversold": [20.0, 25.0, 30.0],
-            "overbought": [75.0, 80.0, 85.0],
-        },
-        "vol_breakout": {
-            "atr_period": [14, 20, 26],
-            "atr_multiplier": [1.5, 2.0, 2.5],
-        },
-    }
+    all_wf_metrics = []
+    for sname in strategy_names:
+        try:
+            runner = get_pybroker_runner(data_source, config, strategies=[sname])
+            wf_result = runner.walkforward(
+                start_date=bt_cfg["full_start_date"],
+                end_date=bt_cfg["full_end_date"],
+            )
+            for w in wf_result.windows:
+                w["strategy"] = sname
+                all_wf_metrics.append(w)
+            logger.info(f"  {sname}: {len(wf_result.windows)} 窗口, avg_sharpe={wf_result.overall_metrics.get('sharpe', 'N/A')}")
+        except Exception as e:
+            logger.error(f"  {sname} WalkForward 失败: {e}")
 
-    for sname in ["dual_ma", "rsi", "vol_breakout"]:
-        space = param_spaces.get(sname)
-        if not space:
-            print(f"  {sname}: 无搜索空间，跳过")
-            continue
-
-        keys = list(space.keys())
-        values = list(space.values())
-        total = 1
-        for v in values:
-            total *= len(v)
-        print(f"\n  策略: {sname} (共{total}组参数)")
-
-        results = []
-        for i, combo in enumerate(product(*values)):
-            params = dict(zip(keys, combo))
-            try:
-                runner = get_single_symbol_runner("SHFE.RB", strategies=[sname])
-                result = runner.run(
-                    start_date=FULL_START,
-                    end_date=IN_SAMPLE_END,
-                    custom_params={sname: params},
-                )
-                m = format_metrics(result.metrics)
-                m.update(params)
-                results.append(m)
-            except Exception:
-                continue
-
-        if results:
-            df = pd.DataFrame(results)
-
-            if "sharpe" in df.columns:
-                robust_scores = {}
-                for idx in df.index:
-                    own_sharpe = df.loc[idx, "sharpe"]
-                    neighbor_sharpes = []
-                    row = df.loc[idx]
-                    for col in keys:
-                        if col not in df.columns:
-                            continue
-                        current_val = row[col]
-                        param_values = space[col]
-                        try:
-                            current_pos = param_values.index(current_val)
-                        except (ValueError, AttributeError):
-                            continue
-                        for direction in [-1, 1]:
-                            neighbor_pos = current_pos + direction
-                            if 0 <= neighbor_pos < len(param_values):
-                                neighbor_val = param_values[neighbor_pos]
-                                neighbor_rows = df[df[col] == neighbor_val]
-                                if not neighbor_rows.empty:
-                                    neighbor_mean = neighbor_rows["sharpe"].mean()
-                                    if not np.isnan(neighbor_mean):
-                                        neighbor_sharpes.append(neighbor_mean)
-                    neighbor_avg = (
-                        np.mean(neighbor_sharpes) if neighbor_sharpes else own_sharpe
-                    )
-                    robust_scores[idx] = 0.7 * own_sharpe + 0.3 * neighbor_avg
-
-                df["robust_score"] = df.index.map(robust_scores)
-
-            save_csv(df, f"phase5_gridsearch_{sname}.csv")
-
-            if "robust_score" in df.columns:
-                top = df.nlargest(3, "robust_score")
-                print(f"  Top 3 (按稳健性评分):")
-                for _, row in top.iterrows():
-                    params_str = ", ".join(f"{k}={row[k]}" for k in keys)
-                    print(
-                        f"    {params_str} => robust={row['robust_score']:.4f} "
-                        f"sharpe={row['sharpe']:.4f} "
-                        f"return={row.get('total_return_pct', 'N/A')}"
-                    )
-            elif "sharpe" in df.columns:
-                top = df.nlargest(3, "sharpe")
-                print(f"  Top 3 (按Sharpe):")
-                for _, row in top.iterrows():
-                    params_str = ", ".join(f"{k}={row[k]}" for k in keys)
-                    print(
-                        f"    {params_str} => sharpe={row['sharpe']:.4f} "
-                        f"return={row.get('total_return_pct', 'N/A')}"
-                    )
-
-    return None
+    df = pd.DataFrame(all_wf_metrics) if all_wf_metrics else pd.DataFrame()
+    if not df.empty:
+        save_csv(df, output_dir / "e6_walkforward_metrics.csv")
+    return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 6: E7 — 样本外验证
+# E7: 样本外验证
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_e7_out_of_sample():
-    """
-    E7: 样本外验证。
-    使用 PyBroker 引擎在样本外数据上验证策略表现。
-    """
-    print("\n" + "=" * 60)
-    print("E7: 样本外验证 (PyBroker 引擎)")
-    print("=" * 60)
+def run_e7_out_of_sample(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> pd.DataFrame:
+    logger.info("E7: 样本外验证")
+    symbols = config.get("symbols", [])
+    strategy_names = _get_strategy_names(config)
+    bt_cfg = config["backtest"]
+    in_sample_end = bt_cfg.get("in_sample_end_date", bt_cfg["full_end_date"])
+    out_sample_start = bt_cfg.get("out_sample_start_date", in_sample_end)
 
     all_results = []
-    for sym_file, sym_label in CORE_SYMBOLS.items():
-        print(f"\n品种: {sym_label}")
+    for sym in symbols:
+        logger.info(f"  品种: {sym}")
         try:
-            # 样本内回测
-            runner_in = get_single_symbol_runner(
-                sym_file,
-                strategies=STRATEGY_NAMES,
-                fusion_mode=False,
-            )
+            runner_in = get_pybroker_runner(data_source, config, strategies=strategy_names, fusion_mode=False)
             result_in = runner_in.run(
-                start_date=FULL_START,
-                end_date=IN_SAMPLE_END,
+                start_date=bt_cfg["full_start_date"],
+                end_date=in_sample_end,
             )
             m_in = format_metrics(result_in.metrics)
-            m_in["symbol"] = sym_file
+            m_in["symbol"] = sym
             m_in["split"] = "in_sample"
             all_results.append(m_in)
 
-            # 样本外回测
-            runner_out = get_single_symbol_runner(
-                sym_file,
-                strategies=STRATEGY_NAMES,
-                fusion_mode=False,
-            )
+            runner_out = get_pybroker_runner(data_source, config, strategies=strategy_names, fusion_mode=False)
             result_out = runner_out.run(
-                start_date=OUT_SAMPLE_START,
-                end_date=OUT_SAMPLE_END,
+                start_date=out_sample_start,
+                end_date=bt_cfg["full_end_date"],
             )
             m_out = format_metrics(result_out.metrics)
-            m_out["symbol"] = sym_file
+            m_out["symbol"] = sym
             m_out["split"] = "out_sample"
             all_results.append(m_out)
 
-            # 对比
             def _safe(val):
                 return val if isinstance(val, (int, float)) else 0
 
             sharpe_in = _safe(m_in.get("sharpe"))
             sharpe_out = _safe(m_out.get("sharpe"))
-            return_in = _safe(m_in.get("total_return", m_in.get("total_return_pct", 0)))
-            return_out = _safe(
-                m_out.get("total_return", m_out.get("total_return_pct", 0))
-            )
-            dd_in = _safe(m_in.get("max_drawdown", m_in.get("max_drawdown_pct", 0)))
-            dd_out = _safe(m_out.get("max_drawdown", m_out.get("max_drawdown_pct", 0)))
-
-            print(f"  样本内: return={return_in} sharpe={sharpe_in} max_dd={dd_in}")
-            print(f"  样本外: return={return_out} sharpe={sharpe_out} max_dd={dd_out}")
-
             if abs(sharpe_in) > 1e-6:
                 decay = (sharpe_in - sharpe_out) / abs(sharpe_in)
-                print(
-                    f"  Sharpe衰减率: {decay:.1%} "
-                    f"{'✓ 合格 (<30%)' if decay < 0.3 else '✗ 不合格'}"
-                )
+                logger.info(f"  Sharpe衰减率: {decay:.1%} {'合格' if decay < 0.3 else '不合格'}")
 
         except Exception as e:
-            print(f"  失败: {e}")
+            logger.error(f"  失败: {e}")
 
     df = pd.DataFrame(all_results)
-    save_csv(df, "e7_out_of_sample_metrics.csv")
-
-    print("\n  汇总对比:")
-    for split in ["in_sample", "out_sample"]:
-        subset = df[df["split"] == split]
-        if not subset.empty:
-            print(f"\n  {split}:")
-            for col in [
-                "sharpe",
-                "max_drawdown",
-                "max_drawdown_pct",
-                "calmar",
-                "total_return_pct",
-            ]:
-                if col not in subset.columns:
-                    continue
-                vals = subset[col].dropna()
-                numeric_vals = [v for v in vals if isinstance(v, (int, float))]
-                if numeric_vals:
-                    print(f"    {col}: mean={np.mean(numeric_vals):.4f}")
-
+    save_csv(df, output_dir / "e7_out_of_sample_metrics.csv")
     return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 7: 蒙特卡洛模拟
+# E8: Bootstrap 置信区间
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_phase7_monte_carlo():
-    """
-    Phase 7: 蒙特卡洛模拟。
-    使用 PyBroker 引擎的回测结果作为基准，对日收益率进行重采样。
-    """
-    print("\n" + "=" * 60)
-    print("Phase 7: 蒙特卡洛模拟")
-    print("=" * 60)
+def run_e8_bootstrap(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> Tuple[List, pd.DataFrame]:
+    logger.info("E8: Bootstrap 置信区间")
+    bt_cfg = config["backtest"]
+    bs_config = config.get("bootstrap", {})
+    n_samples = bs_config.get("n_samples", 5000)
+    strategy_names = _get_strategy_names(config)
+
+    runner = get_pybroker_runner(data_source, config, strategies=strategy_names[:1] if strategy_names else ["dual_ma"])
+    result = runner.run(
+        start_date=bt_cfg["full_start_date"],
+        end_date=bt_cfg["full_end_date"],
+    )
+
+    if result.equity_curve.empty:
+        return [], pd.DataFrame()
 
     try:
-        runner = get_single_symbol_runner(
-            "SHFE.RB",
-            strategies=STRATEGY_NAMES,
-            fusion_mode=False,
-        )
+        bootstrap_result = runner.bootstrap_metrics(n_samples=n_samples)
+        logger.info(f"  Bootstrap 完成: {n_samples} 样本")
+        logger.info(f"  结果: {bootstrap_result}")
+    except Exception as e:
+        logger.warning(f"  系统 Bootstrap 失败: {e}, 使用 MetricsCalculator 计算")
+        try:
+            equity = result.equity_curve["equity"]
+            bootstrap_result = MetricsCalculator.bootstrap_confidence_interval(equity, n_samples=n_samples)
+            logger.info(f"  MetricsCalculator Bootstrap 完成: {n_samples} 样本")
+        except Exception as e2:
+            logger.error(f"  MetricsCalculator 也失败: {e2}")
+            bootstrap_result = None
+
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
+
+    if bootstrap_result is None:
+        return [], pd.DataFrame()
+
+    if isinstance(bootstrap_result, dict):
+        sharpe_data = bootstrap_result.get("sharpe", {})
+        if isinstance(sharpe_data, dict) and "ci_lower" in sharpe_data:
+            rows = []
+            for metric_name, vals in bootstrap_result.items():
+                if isinstance(vals, dict) and "mean" in vals:
+                    rows.append({"metric": metric_name, **vals})
+            df_ci = pd.DataFrame(rows)
+            save_csv(df_ci, output_dir / "e8_bootstrap_confidence_intervals.csv")
+            logger.info(f"  Bootstrap 置信区间: {sharpe_data}")
+            return [], df_ci
+
+        sharpe_samples = []
+        for key, val in bootstrap_result.items():
+            if isinstance(val, list) and len(val) > 0:
+                sharpe_samples = val
+                break
+
+        if sharpe_samples:
+            df_samples = pd.DataFrame({"sharpe": sharpe_samples})
+            save_csv(df_samples, output_dir / "e8_bootstrap_samples.csv")
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.hist(sharpe_samples, bins=50, alpha=0.7, color="#1f77b4", edgecolor="black")
+            ax.axvline(np.percentile(sharpe_samples, 5), color="#ff7f0e", linestyle="--", label="5% CI")
+            ax.axvline(np.percentile(sharpe_samples, 95), color="#ff7f0e", linestyle="--", label="95% CI")
+            ax.axvline(np.mean(sharpe_samples), color="#d62728", linestyle="-", label="Mean")
+            ax.set_xlabel("Sharpe Ratio", fontsize=12)
+            ax.set_ylabel("Frequency", fontsize=12)
+            ax.set_title(f"Bootstrap Sharpe Ratio Distribution (n={n_samples})", fontsize=14)
+            ax.legend(fontsize=11)
+            ax.grid(alpha=0.3)
+            fig.savefig(charts_dir / "bootstrap_sharpe_distribution.png", dpi=config["output"].get("chart_dpi", 150), bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"  Bootstrap 图表已保存")
+            return sharpe_samples, df_samples
+
+    return [], pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# E9: 蒙特卡洛模拟
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def run_e9_monte_carlo(
+    data_source: PyBrokerDataSource, config: Dict, output_dir: Path
+) -> Optional[pd.DataFrame]:
+    logger.info("E9: 蒙特卡洛模拟")
+    bt_cfg = config["backtest"]
+    strategy_names = _get_strategy_names(config)
+    mc_config = config.get("monte_carlo", {})
+    n_simulations = mc_config.get("n_simulations", 1000)
+    random_seed = mc_config.get("random_seed", 42)
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
+
+    try:
+        runner = get_pybroker_runner(data_source, config, strategies=strategy_names, fusion_mode=False)
         result = runner.run(
-            start_date=FULL_START,
-            end_date=OUT_SAMPLE_END,
+            start_date=bt_cfg["full_start_date"],
+            end_date=bt_cfg["full_end_date"],
         )
         eq = result.equity_curve.sort_values("date")
         returns = eq["equity"].pct_change().dropna()
 
-        n_simulations = 1000
         n_days = len(returns)
-        np.random.seed(42)
+        rng = np.random.default_rng(random_seed)
 
         sim_equities = np.zeros((n_simulations, n_days + 1))
         sim_equities[:, 0] = 1.0
 
         ret_array = returns.values
         for i in range(n_simulations):
-            sampled = np.random.choice(ret_array, size=n_days, replace=True)
+            sampled = rng.choice(ret_array, size=n_days, replace=True)
             sim_equities[i, 1:] = np.cumprod(1 + sampled)
 
         final_values = sim_equities[:, -1]
         max_drawdowns = np.array(
-            [
-                np.min(sim_equities[i] / np.maximum.accumulate(sim_equities[i]) - 1)
-                for i in range(n_simulations)
-            ]
+            [np.min(sim_equities[i] / np.maximum.accumulate(sim_equities[i]) - 1) for i in range(n_simulations)]
         )
 
-        print(f"\n  模拟次数: {n_simulations}")
-        print(f"  终值分布:")
-        print(f"    均值: {final_values.mean():.4f} (初始=1.0)")
-        print(f"    中位数: {np.median(final_values):.4f}")
-        print(f"    5分位: {np.percentile(final_values, 5):.4f}")
-        print(f"    95分位: {np.percentile(final_values, 95):.4f}")
-        print(f"    破产概率(终值<0.8): {(final_values < 0.8).mean():.2%}")
+        logger.info(f"  模拟次数: {n_simulations}")
+        logger.info(f"  终值均值: {final_values.mean():.4f}, 中位数: {np.median(final_values):.4f}")
+        logger.info(f"  破产概率(终值<0.8): {(final_values < 0.8).mean():.2%}")
 
-        print(f"\n  最大回撤分布:")
-        print(f"    均值: {max_drawdowns.mean():.4f}")
-        print(f"    中位数: {np.median(max_drawdowns):.4f}")
-        print(f"    5分位: {np.percentile(max_drawdowns, 5):.4f}")
-        print(f"    95分位: {np.percentile(max_drawdowns, 95):.4f}")
-
-        mc_results = pd.DataFrame(
-            {
-                "sim_id": range(n_simulations),
-                "final_value": final_values,
-                "max_drawdown": max_drawdowns,
-            }
-        )
-        save_csv(mc_results, "e7_monte_carlo_results.csv")
+        mc_results = pd.DataFrame({
+            "sim_id": range(n_simulations),
+            "final_value": final_values,
+            "max_drawdown": max_drawdowns,
+        })
+        save_csv(mc_results, output_dir / "e9_monte_carlo_results.csv")
 
         lower = np.percentile(sim_equities, 5, axis=0)
         upper = np.percentile(sim_equities, 95, axis=0)
         median = np.percentile(sim_equities, 50, axis=0)
 
-        _plot_monte_carlo(median, lower, upper, "e7_monte_carlo.png")
-
+        _plot_monte_carlo(median, lower, upper, charts_dir / "e9_monte_carlo.png")
         return mc_results
     except Exception as e:
-        print(f"  失败: {e}")
+        logger.error(f"  蒙特卡洛模拟失败: {e}")
         return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 8: 报告生成
+# E10: HTML 报告生成
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_phase8_report(results: Dict[str, any]):
-    """
-    Phase 8: 生成汇总报告并绘制对比图表。
-    """
-    print("\n" + "=" * 60)
-    print("Phase 8: 报告汇总与输出")
-    print("=" * 60)
+def run_e10_html_report(
+    config: Dict, results: Dict[str, PyBrokerResult], output_dir: Path
+):
+    logger.info("E10: 生成 HTML 报告")
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
+    bt_cfg = config["backtest"]
 
-    lines = [
-        f"# 多策略量化回测系统 — 回测报告",
-        f"",
-        f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"",
-        f"## 回测配置",
-        f"",
-        f"- 数据源: TqSdk 在线数据优先, 本地 CSV 回退",
-        f"- 引擎: PyBroker (不可用时自动回退自研简化引擎)",
-        f"- 策略流程: 先判断市场环境 → 匹配策略 → 执行交易",
-        f"- 初始资金: {INITIAL_CASH:,} 元",
-        f"- 单笔止损: 5%",
-        f"- 单策略最大仓位: 20%",
-        f"- 样本内: {FULL_START} ~ {IN_SAMPLE_END}",
-        f"- 样本外: {OUT_SAMPLE_START} ~ {OUT_SAMPLE_END}",
-        f"- 测试品种: {len(CORE_SYMBOLS)} 个 ({', '.join(CORE_SYMBOLS.values())})",
-        f"- 测试策略: {', '.join(STRATEGY_NAMES)}",
-        f"",
-        f"## 实验汇总",
-        f"",
-    ]
+    charts_html = []
 
-    csv_map = {
-        "E1_基线": "e1_baseline_metrics.csv",
-        "E2_等权": "e2_equal_weight_metrics.csv",
-        "E3_动态": "e3_dynamic_weight_metrics.csv",
-        "E4_切换": "e4_strategy_switching_metrics.csv",
-        "E6_多品种": "e6_multi_symbol_equity.csv",
-        "E7_样本外": "e7_out_of_sample_metrics.csv",
-    }
-    for exp_name, csv_name in csv_map.items():
-        csv_file = OUTPUT_DIR / csv_name
-        if csv_file.exists():
-            lines.append(f"- {exp_name}: 结果已保存至 `{csv_name}`")
-        else:
-            lines.append(f"- {exp_name}: 无结果文件")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    exp_names = []
+    sharpe_values = []
+    return_values = []
+    for name, res in results.items():
+        if hasattr(res, "metrics"):
+            exp_names.append(name)
+            sharpe_values.append(res.metrics.get("sharpe", 0))
+            return_values.append(res.metrics.get("total_return_pct", 0))
 
-    lines.extend(
-        [
-            f"",
-            f"## 输出文件清单",
-            f"",
-        ]
-    )
-    for f in sorted(OUTPUT_DIR.iterdir()):
-        if f.is_file():
-            lines.append(f"- `{f.name}` ({f.stat().st_size:,} bytes)")
+    if exp_names:
+        x = np.arange(len(exp_names))
+        width = 0.35
+        ax.bar(x - width / 2, sharpe_values, width, label="Sharpe", color="#1f77b4")
+        ax.bar(x + width / 2, return_values, width, label="Return%", color="#ff7f0e")
+        ax.set_xlabel("Experiment", fontsize=12)
+        ax.set_ylabel("Value", fontsize=12)
+        ax.set_title("Experiment Comparison: Sharpe vs Return", fontsize=14)
+        ax.set_xticks(x)
+        ax.set_xticklabels(exp_names, rotation=15)
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3)
+        bar_path = charts_dir / "experiment_comparison.png"
+        fig.savefig(bar_path, dpi=config["output"].get("chart_dpi", 150), bbox_inches="tight")
+        plt.close(fig)
+        charts_html.append(f'<div class="chart-container"><h3>Experiment Comparison</h3><img src="charts/experiment_comparison.png" style="max-width:100%;border-radius:8px;"></div>')
 
-    _plot_experiment_comparison()
+    fig, ax = plt.subplots(figsize=(14, 6))
+    has_curve = False
+    for name, res in results.items():
+        if hasattr(res, "equity_curve") and not res.equity_curve.empty:
+            df = res.equity_curve.copy()
+            df["date"] = pd.to_datetime(df["date"])
+            ax.plot(df["date"], df["equity"], label=name, linewidth=2)
+            has_curve = True
+    if has_curve:
+        ax.set_xlabel("Date", fontsize=12)
+        ax.set_ylabel("Equity", fontsize=12)
+        ax.set_title("Equity Curves", fontsize=14)
+        ax.legend(fontsize=10)
+        ax.grid(alpha=0.3)
+        eq_path = charts_dir / "equity_curves.png"
+        fig.savefig(eq_path, dpi=config["output"].get("chart_dpi", 150), bbox_inches="tight")
+        charts_html.append(f'<div class="chart-container"><h3>Equity Curves</h3><img src="charts/equity_curves.png" style="max-width:100%;border-radius:8px;"></div>')
+    plt.close(fig)
 
-    report_path = OUTPUT_DIR / "backtest_report.md"
-    with open(report_path, "w") as f:
-        f.write("\n".join(lines))
-    print(f"\n  报告已保存: {report_path}")
+    risk_cfg = config["risk_management"]
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>量化回测报告</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }}
+        h1 {{ color: #1f77b4; text-align: center; margin-bottom: 10px; }}
+        h2 {{ color: #333; border-bottom: 3px solid #1f77b4; padding-bottom: 10px; margin-top: 40px; }}
+        .header-info {{ text-align: center; color: #666; font-size: 14px; margin-bottom: 30px; }}
+        .chart-container {{ margin: 30px 0; text-align: center; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 25px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
+        th, td {{ padding: 14px; text-align: left; border: 1px solid #ddd; }}
+        th {{ background: linear-gradient(180deg, #1f77b4 0%, #0a58ca 100%); color: white; font-weight: 600; }}
+        tr:nth-child(even) {{ background: #f8f9fa; }}
+        .positive {{ color: #2ca02c; font-weight: bold; }}
+        .negative {{ color: #d62728; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>量化回测报告</h1>
+        <div class="header-info">
+            生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 回测引擎: PyBroker (系统模块集成版)
+        </div>
+        <h2>配置说明</h2>
+        <table>
+            <tr><th>配置项</th><th>值</th></tr>
+            <tr><td>初始资金</td><td>{bt_cfg.get('initial_cash', 0):,} 元</td></tr>
+            <tr><td>回测区间</td><td>{bt_cfg.get('full_start_date', '')} ~ {bt_cfg.get('full_end_date', '')}</td></tr>
+            <tr><td>样本内区间</td><td>{bt_cfg.get('full_start_date', '')} ~ {bt_cfg.get('in_sample_end_date', '')}</td></tr>
+            <tr><td>样本外区间</td><td>{bt_cfg.get('out_sample_start_date', '')} ~ {bt_cfg.get('full_end_date', '')}</td></tr>
+            <tr><td>品种</td><td>{', '.join(config.get('symbols', []))}</td></tr>
+            <tr><td>单笔止损</td><td>-{risk_cfg.get('stop_loss_pct', 0.05)*100:.0f}%</td></tr>
+        </table>
+        <h2>可视化图表</h2>
+        {''.join(charts_html)}
+        <h2>绩效指标</h2>
+        <table>
+            <tr><th>实验</th><th>总收益率%</th><th>Sharpe</th><th>最大回撤%</th><th>交易次数</th></tr>
+            {"".join([f"<tr><td>{name}</td><td class='{'positive' if res.metrics.get('total_return_pct', 0)>=0 else 'negative'}'>{res.metrics.get('total_return_pct', 0):.2f}</td><td>{res.metrics.get('sharpe', 0):.3f}</td><td class='negative'>{res.metrics.get('max_drawdown_pct', 0):.2f}</td><td>{res.metrics.get('trade_count', 0)}</td></tr>" for name, res in results.items() if hasattr(res, "metrics")])}
+        </table>
+    </div>
+</body>
+</html>"""
+
+    html_path = output_dir / "backtest_report.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    logger.info(f"HTML 报告已保存: {html_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -944,12 +750,8 @@ def run_phase8_report(results: Dict[str, any]):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _plot_equity_curve(eq: pd.DataFrame, title: str, label: str, filename: str):
-    """绘制净值曲线和回撤曲线。"""
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
-    )
-
+def _plot_equity_curve(eq: pd.DataFrame, title: str, label: str, path: Path):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
     dates = pd.to_datetime(eq["date"])
     equity = eq["equity"].values
 
@@ -969,84 +771,22 @@ def _plot_equity_curve(eq: pd.DataFrame, title: str, label: str, filename: str):
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
 
     plt.tight_layout()
-    path = CHARTS_DIR / filename
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  图表已保存: {path}")
 
 
-def _plot_monte_carlo(median, lower, upper, filename: str):
-    """绘制蒙特卡洛模拟净值曲线。"""
+def _plot_monte_carlo(median, lower, upper, path: Path):
     fig, ax = plt.subplots(figsize=(12, 6))
-
     days = np.arange(len(median))
     ax.fill_between(days, lower, upper, alpha=0.3, color="blue", label="90% CI")
     ax.plot(days, median, color="blue", linewidth=1.5, label="Median")
     ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.5, label="初始值")
-
     ax.set_title("蒙特卡洛模拟 — 净值曲线分布 (1000次)", fontsize=14)
     ax.set_xlabel("交易日")
     ax.set_ylabel("净值")
     ax.legend()
     ax.grid(True, alpha=0.3)
-
-    path = CHARTS_DIR / filename
     fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  图表已保存: {path}")
-
-
-def _plot_experiment_comparison():
-    """绘制各实验的净值对比图。"""
-    fig, ax = plt.subplots(figsize=(14, 7))
-
-    exp_files = {
-        "E2_等权": "e2_equity_SHFE_RB.csv",
-        "E3_动态": "e3_equity_SHFE_RB.csv",
-        "E4_切换": "e4_equity_SHFE_RB.csv",
-    }
-
-    colors = {"E2_等权": "blue", "E3_动态": "green", "E4_切换": "orange"}
-    has_data = False
-
-    for label, fname in exp_files.items():
-        fpath = OUTPUT_DIR / fname
-        if fpath.exists():
-            df = pd.read_csv(fpath)
-            if "date" in df.columns and "equity" in df.columns:
-                dates = pd.to_datetime(df["date"])
-                ax.plot(
-                    dates,
-                    df["equity"],
-                    linewidth=1,
-                    color=colors.get(label, "gray"),
-                    label=label,
-                )
-                has_data = True
-
-    multi_path = OUTPUT_DIR / "e6_multi_symbol_equity.csv"
-    if multi_path.exists():
-        df = pd.read_csv(multi_path)
-        if "date" in df.columns and "equity" in df.columns:
-            dates = pd.to_datetime(df["date"])
-            ax.plot(
-                dates, df["equity"], linewidth=1.5, color="red", label="E6_多品种分散"
-            )
-
-    ax.axhline(
-        y=INITIAL_CASH, color="gray", linestyle="--", alpha=0.5, label="初始资金"
-    )
-    ax.set_title("各实验组合净值对比 (PyBroker 引擎)", fontsize=14)
-    ax.set_ylabel("净值")
-    ax.set_xlabel("日期")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-
-    if has_data:
-        path = CHARTS_DIR / "experiment_comparison.png"
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        print(f"  对比图已保存: {path}")
     plt.close(fig)
 
 
@@ -1056,37 +796,117 @@ def _plot_experiment_comparison():
 
 
 def main():
-    print("=" * 60)
-    print("多策略量化回测系统 — 全面回测执行")
-    print(f"数据源: TqSdk 在线数据优先, 本地 CSV 回退")
-    print(f"引擎: PyBroker (不可用时自动回退自研简化引擎)")
-    print(f"策略流程: 先判断市场环境 → 匹配策略 → 执行交易")
-    print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    print("=" * 80)
+    print("  多策略量化回测系统 — 完整回测执行（整合版）")
+    print(f"  开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 80)
 
-    all_results = {}
+    config = load_config()
+    log_config = config["logging"]
+    log_dir = Path(log_config["log_dir"])
+    log_dir.mkdir(exist_ok=True)
+    logger.remove()
+    logger.add(log_dir / log_config["log_file"], rotation=log_config["rotation"], retention=log_config["retention"], level=log_config["log_level"])
+    logger.add(log_dir / log_config["error_file"], level="ERROR")
+    logger.add(sys.stdout, level=log_config["log_level"])
 
-    all_results["e1"] = run_e1_single_strategy_baselines()
+    output_dir = Path(config["output"]["output_dir"])
+    output_dir.mkdir(exist_ok=True)
 
-    all_results["e2"] = run_e2_equal_weight()
-    all_results["e3"] = run_e3_dynamic_weight()
-    all_results["e4"] = run_e4_strategy_switching()
-    run_e5_switching_with_transition()
+    results = {}
 
-    all_results["e6"] = run_e6_multi_symbol()
+    try:
+        logger.info("加载数据...")
+        phone, password = get_tqsdk_credentials()
+        data_source = create_hybrid_data_source(
+            phone=phone,
+            password=password,
+            symbols=config.get("symbols"),
+            data_dir=config["data"]["csv_data_dir"],
+            data_length=config["data"].get("tqsdk_data_length", 4000),
+        )
+        save_csv(data_source.to_pybroker_df(), output_dir / "data_summary.csv")
 
-    all_results["opt"] = run_phase5_optimization()
+        logger.info("=" * 60)
+        logger.info("E1: 单策略基线回测")
+        run_e1_single_strategy_baselines(data_source, config, output_dir)
 
-    all_results["e7"] = run_e7_out_of_sample()
+        logger.info("=" * 60)
+        logger.info("E2: 等权信号融合")
+        run_e2_equal_weight(data_source, config, output_dir)
 
-    all_results["mc"] = run_phase7_monte_carlo()
+        logger.info("=" * 60)
+        logger.info("E3: 环境动态加权")
+        run_e3_dynamic_weight(data_source, config, output_dir)
 
-    run_phase8_report(all_results)
+        logger.info("=" * 60)
+        logger.info("E4: 策略切换（含过渡逻辑）")
+        run_e4_strategy_switching(data_source, config, output_dir)
 
-    print("\n" + "=" * 60)
-    print(f"回测执行完成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"输出目录: {OUTPUT_DIR.resolve()}")
-    print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("E5: 多品种分散")
+        run_e5_multi_symbol(data_source, config, output_dir)
+
+        logger.info("=" * 60)
+        logger.info("E6: WalkForward 滚动验证")
+        run_e6_walkforward(data_source, config, output_dir)
+
+        logger.info("=" * 60)
+        logger.info("E7: 样本外验证")
+        run_e7_out_of_sample(data_source, config, output_dir)
+
+        logger.info("=" * 60)
+        logger.info("E8: Bootstrap 置信区间")
+        run_e8_bootstrap(data_source, config, output_dir)
+
+        logger.info("=" * 60)
+        logger.info("E9: 蒙特卡洛模拟")
+        run_e9_monte_carlo(data_source, config, output_dir)
+
+        logger.info("=" * 60)
+        logger.info("E10: HTML 报告生成")
+        bt_cfg = config["backtest"]
+        strategy_names = _get_strategy_names(config)
+        for sname in strategy_names[:3]:
+            try:
+                runner = get_pybroker_runner(data_source, config, strategies=[sname])
+                res = runner.run(bt_cfg["full_start_date"], bt_cfg["full_end_date"])
+                results[f"E1_{sname}"] = res
+            except Exception as e:
+                logger.error(f"策略 {sname} 失败: {e}")
+
+        try:
+            runner = get_pybroker_runner(data_source, config, strategies=strategy_names, fusion_mode=True)
+            fusion_res = runner.run(bt_cfg["full_start_date"], bt_cfg["full_end_date"])
+            results["E2_Fusion"] = fusion_res
+        except Exception as e:
+            logger.error(f"Fusion 失败: {e}")
+
+        try:
+            runner = get_pybroker_runner(data_source, config, strategies=strategy_names, fusion_mode=False)
+            switch_res = runner.run(bt_cfg["full_start_date"], bt_cfg["full_end_date"])
+            results["E4_Switching"] = switch_res
+        except Exception as e:
+            logger.error(f"Switching 失败: {e}")
+
+        run_e10_html_report(config, results, output_dir)
+
+        all_metrics = []
+        for name, res in results.items():
+            if hasattr(res, "metrics"):
+                m = {"experiment": name, **res.metrics}
+                all_metrics.append(m)
+        if all_metrics:
+            save_csv(pd.DataFrame(all_metrics), output_dir / "all_metrics.csv")
+
+        logger.success("=" * 80)
+        logger.success("回测完成")
+        logger.success(f"输出目录: {output_dir.resolve()}")
+        logger.success("=" * 80)
+
+    except Exception as e:
+        logger.exception(f"致命错误: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

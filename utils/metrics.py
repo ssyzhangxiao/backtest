@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List
 
+from core.performance import PerformanceEvaluator
+
 
 class MetricsCalculator:
     """
@@ -70,6 +72,9 @@ class MetricsCalculator:
         """
         计算额外的绩效指标。
 
+        核心指标（Sharpe/Sortino/Calmar/回撤等）委托给 PerformanceEvaluator.compute_metrics，
+        确保与系统其他模块的计算结果一致。仅补充交易维度指标。
+
         Args:
             portfolio_df: PyBroker portfolio DataFrame
             trades_df: PyBroker trades DataFrame
@@ -80,62 +85,17 @@ class MetricsCalculator:
         metrics = {}
 
         if portfolio_df is not None and not portfolio_df.empty:
-            # 尝试多种可能的净值列名
             equity_col = None
             for col in ['equity', 'market_value', 'port_value', 'total_equity']:
                 if col in portfolio_df.columns:
                     equity_col = col
                     break
-            
+
             if equity_col:
                 equity = portfolio_df[equity_col]
-                returns = equity.pct_change().dropna()
-
-                if len(returns) > 0:
-                    annual_factor = 252
-                    metrics['annual_return_pct'] = (
-                        (1 + returns).prod() ** (annual_factor / len(returns)) - 1
-                    ) * 100
-
-                    metrics['annual_volatility_pct'] = returns.std() * np.sqrt(annual_factor) * 100
-
-                    risk_free = 0.02 / annual_factor
-                    excess = returns - risk_free
-                    if returns.std() > 0:
-                        metrics['sharpe_ratio'] = (
-                            excess.mean() / returns.std() * np.sqrt(annual_factor)
-                        )
-                    else:
-                        metrics['sharpe_ratio'] = 0.0
-
-                    downside = returns[returns < 0]
-                    if len(downside) > 0 and downside.std() > 0:
-                        metrics['sortino_ratio'] = (
-                            excess.mean() / downside.std() * np.sqrt(annual_factor)
-                        )
-                    else:
-                        metrics['sortino_ratio'] = 0.0
-
-                    peak = equity.cummax()
-                    drawdown = (equity - peak) / peak
-                    metrics['max_drawdown_pct'] = drawdown.min() * 100
-
-                    in_drawdown = drawdown < 0
-                    if in_drawdown.any():
-                        dd_groups = (~in_drawdown).cumsum()
-                        dd_durations = in_drawdown.groupby(dd_groups).sum()
-                        metrics['max_drawdown_duration_days'] = int(dd_durations.max())
-                    else:
-                        metrics['max_drawdown_duration_days'] = 0
-
-                    metrics['calmar_ratio'] = (
-                        metrics['annual_return_pct'] / abs(metrics['max_drawdown_pct'])
-                        if metrics['max_drawdown_pct'] != 0 else 0.0
-                    )
-
-                    positive_days = (returns > 0).sum()
-                    total_days = len(returns)
-                    metrics['daily_win_rate'] = positive_days / total_days * 100 if total_days > 0 else 0
+                if len(equity) >= 2:
+                    pe_metrics = PerformanceEvaluator.compute_metrics(equity)
+                    metrics.update(pe_metrics)
 
         if trades_df is not None and not trades_df.empty:
             if 'pnl' in trades_df.columns:
@@ -258,3 +218,134 @@ class MetricsCalculator:
                 stats['avg_rollover_cost'] = rollover_dates['rollover_cost'].mean()
 
         return stats
+
+    @staticmethod
+    def compute_from_equity_curve(
+        portfolio_df: pd.DataFrame,
+        trades_df: Optional[pd.DataFrame] = None,
+    ) -> Dict:
+        """
+        从净值曲线和交易记录计算完整绩效指标。
+
+        所有核心指标委托给 PerformanceEvaluator.compute_metrics，
+        确保与系统其他模块的计算结果一致。
+        仅补充 total_pnl 等衍生字段和键名兼容映射。
+
+        Args:
+            portfolio_df: PyBroker portfolio DataFrame（需含 equity 列和日期索引）
+            trades_df: PyBroker trades DataFrame
+
+        Returns:
+            完整绩效指标字典
+        """
+        if portfolio_df is None or portfolio_df.empty:
+            return {
+                "total_return_pct": 0.0,
+                "annual_return_pct": 0.0,
+                "sharpe": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "calmar": 0.0,
+                "calmar_ratio": 0.0,
+                "trade_count": 0,
+                "total_pnl": 0.0,
+                "win_rate": 0.0,
+                "sortino": 0.0,
+                "sortino_ratio": 0.0,
+            }
+
+        equity_col = None
+        for col in ['equity', 'market_value', 'port_value', 'total_equity']:
+            if col in portfolio_df.columns:
+                equity_col = col
+                break
+
+        if equity_col is None:
+            return {
+                "total_return_pct": 0.0,
+                "total_pnl": 0.0,
+                "sharpe": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "calmar": 0.0,
+                "calmar_ratio": 0.0,
+            }
+
+        equity = portfolio_df[equity_col].astype(float)
+        if len(equity) < 2 or equity.iloc[0] <= 0:
+            return {
+                "total_return_pct": 0.0,
+                "total_pnl": 0.0,
+                "sharpe": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "calmar": 0.0,
+                "calmar_ratio": 0.0,
+            }
+
+        pe_metrics = PerformanceEvaluator.compute_metrics(equity, trades=trades_df)
+        metrics = dict(pe_metrics)
+
+        metrics["total_pnl"] = float(equity.iloc[-1] - equity.iloc[0])
+
+        metrics.setdefault("sharpe", metrics.get("sharpe", 0.0))
+        metrics["sharpe_ratio"] = metrics.get("sharpe", 0.0)
+        metrics.setdefault("sortino", metrics.get("sortino", 0.0))
+        metrics["sortino_ratio"] = metrics.get("sortino", 0.0)
+        metrics.setdefault("calmar", metrics.get("calmar", 0.0))
+        metrics["calmar_ratio"] = metrics.get("calmar", 0.0)
+        metrics.setdefault("trade_count", len(trades_df) if trades_df is not None else 0)
+        metrics.setdefault("win_rate", 0.0)
+
+        return metrics
+
+    @staticmethod
+    def bootstrap_confidence_interval(
+        equity: pd.Series,
+        n_samples: int = 5000,
+        confidence_level: float = 0.90,
+        random_seed: int = 42,
+    ) -> Dict:
+        """
+        对净值曲线进行 Bootstrap 重采样，计算绩效指标的置信区间。
+
+        Args:
+            equity: 净值序列
+            n_samples: 重采样次数
+            confidence_level: 置信水平（默认 0.90）
+            random_seed: 随机种子
+
+        Returns:
+            {metric_name: {mean, std, ci_lower, ci_upper}}
+        """
+        returns = equity.pct_change().dropna()
+        if len(returns) < 10:
+            return {"error": "样本太少，无法 bootstrap"}
+
+        ret_array = returns.values
+        rng = np.random.default_rng(random_seed)
+
+        metric_keys = ["sharpe", "total_return_pct", "max_drawdown_pct", "calmar"]
+        samples: Dict[str, List[float]] = {k: [] for k in metric_keys}
+
+        for _ in range(n_samples):
+            idx = rng.choice(len(ret_array), size=len(ret_array), replace=True)
+            sampled = ret_array[idx]
+            sampled_equity = pd.Series(np.concatenate([[1.0], np.cumprod(1 + sampled)]))
+
+            m = PerformanceEvaluator.compute_metrics(sampled_equity)
+            for k in metric_keys:
+                samples[k].append(m.get(k, 0.0))
+
+        alpha = (1 - confidence_level) / 2
+        result = {}
+        for k in metric_keys:
+            arr = np.array(samples[k])
+            result[k] = {
+                "mean": round(float(np.mean(arr)), 4),
+                "std": round(float(np.std(arr)), 4),
+                "ci_lower": round(float(np.percentile(arr, alpha * 100)), 4),
+                "ci_upper": round(float(np.percentile(arr, (1 - alpha) * 100)), 4),
+            }
+
+        return result

@@ -657,6 +657,22 @@ class StrategySwitchEngine:
         """获取当前活跃策略。"""
         return self._current_strategy
 
+    def reset(self, initial_strategy: Optional[str] = None):
+        """
+        重置引擎状态，用于新一轮回测。
+
+        Args:
+            initial_strategy: 重置后的初始策略名称，若为None则清空
+        """
+        self._decision_log = []
+        self._last_switch_index = None
+        self._last_switch_date = None
+        self._current_strategy = initial_strategy
+        self._low_sharpe_streak = 0
+        self._annual_switch_count = 0
+        self._annual_switch_year = None
+        self._auto_fusion_mode = False
+
     def set_initial_strategy(self, strategy_name: str, regime: MarketRegime):
         """
         设置初始策略。
