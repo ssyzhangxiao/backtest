@@ -3,7 +3,7 @@ import pandas as pd
 import pybroker
 from typing import Optional
 
-from core.config import _PYBROKER_COLUMNS
+from core.config import PYBROKER_EXTRA_COLUMNS
 
 _PYBROKER_COLUMNS_REGISTERED = False
 
@@ -40,15 +40,16 @@ def load_tqsdk_cached(
 
 @st.cache_data(show_spinner=False)
 def compute_env_cached(pybroker_df: pd.DataFrame):
-    from core.environment import EnvironmentAdapter
-    env_adapter = EnvironmentAdapter()
-    return env_adapter.compute_for_pybroker(pybroker_df)
+    """使用 MarketRegimeDetector 计算市场环境（替代已废弃的 EnvironmentAdapter）。"""
+    from core.market_regime import MarketRegimeDetector
+    detector = MarketRegimeDetector()
+    return detector.detect(pybroker_df)
 
 
 def register_pybroker_columns():
     global _PYBROKER_COLUMNS_REGISTERED
     if not _PYBROKER_COLUMNS_REGISTERED:
-        pybroker.register_columns(*_PYBROKER_COLUMNS)
+        pybroker.register_columns(*PYBROKER_EXTRA_COLUMNS)
         _PYBROKER_COLUMNS_REGISTERED = True
 
 

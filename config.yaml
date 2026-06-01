@@ -1,68 +1,84 @@
 # =============================================================================
-# 量化回测系统配置文件
+# 量化回测系统配置文件（CTA + Alpha101 多因子策略）
 # =============================================================================
-# 所有参数统一在此配置，代码中通过load_config()读取
+# 所有参数统一在此配置，代码中通过 BacktestConfig.from_yaml() 读取
 
 # =============================================================================
 # 回测参数
 # =============================================================================
 backtest:
-  initial_cash: 1000000
-  commission_rate: 0.0003
-  slippage_rate: 0.0002
+  initial_capital: 1000000
+  commission: 0.0001            # 双边手续费率（降低交易成本）
+  slippage: 0.0001              # 滑点费率（降低滑点假设）
   full_start_date: "2016-01-01"
-  full_end_date: "2026-05-01"
-  # 样本内外划分：前7年训练，后3年验证
+  full_end_date: "2025-05-31"
   in_sample_end_date: "2023-01-01"
   out_sample_start_date: "2023-01-01"
+  rebalance_freq: 3             # 调仓周期：每3个交易日
+  stop_loss_pct: 0.03           # 单品种止损-3%强制平仓（收紧止损）
+  max_position_pct: 0.15        # 单品种最大仓位占比（降低集中度）
+  max_total_position_pct: 0.60  # 总仓位上限
+  min_position_pct: 0.0         # 最小仓位比例
+  entry_threshold: 0.15         # 开仓阈值（最优值）
+  top_n_symbols: 0              # 品种轮动：0=不筛选
+  use_cross_section: false      # 关闭横截面标准化
+  use_rank_score: false         # 关闭排名叠加
+  use_rolling_ic: true          # 启用滚动IC动态权重
 
 # =============================================================================
-# 品种配置
+# 品种配置（扩展至10+品种，覆盖黑色、化工、有色、农产品、能源）
 # =============================================================================
 symbols:
   - "SHFE.RB"   # 螺纹钢
   - "DCE.M"     # 豆粕
+  - "CZCE.MA"   # 甲醇（郑商所）
   - "CZCE.TA"   # PTA
+  - "SHFE.AU"   # 黄金
+  - "DCE.I"     # 铁矿石
+  - "INE.SC"   # 原油
   - "SHFE.CU"   # 铜
-  - "CFFEX.IF"  # 沪深300
+  - "DCE.J"     # 焦炭
+  - "CZCE.CF"   # 棉花
 
 # =============================================================================
-# 策略配置
+# 因子权重配置（平衡型：CTA侧50% + Alpha101侧50%，内部等权）
+# =============================================================================
+factor_weights:
+  ts_momentum: 0.25
+  roll_yield: 0.25
+  alpha019: 0.25
+  alpha032: 0.25
+
+# =============================================================================
+# 策略参数配置（4个因子策略：CTA侧 + Alpha101侧）
 # =============================================================================
 strategies:
-  - name: "dual_ma"
+  - name: "ts_momentum"
     params:
-      short_ma: 10
-      long_ma: 30
-      adx_threshold: 25
+      window: 20
       position_size: 0.2
 
-  - name: "rsi"
+  - name: "roll_yield"
     params:
-      rsi_period: 20
-      oversold: 25.0
-      overbought: 80.0
-      trending_overbought: 60.0
-      trending_oversold: 40.0
-      adx_threshold: 25.0
+      lookback: 20
+      entry_threshold: 2.0
+      exit_threshold: 0.5
       position_size: 0.2
 
-  - name: "vol_breakout"
+  - name: "alpha019"
     params:
-      atr_period: 20
-      breakout_multiplier: 2.0
+      short_window: 5
+      long_window: 120
       position_size: 0.2
 
-  - name: "term_structure"
+  - name: "alpha032"
     params:
-      position_size: 0.2
-
-  - name: "spread"
-    params:
+      ma_window: 5
+      corr_window: 120
       position_size: 0.2
 
 # =============================================================================
-# 市场环境检测配置
+# 市场环境检测配置（仅辅助分析，不参与策略决策）
 # =============================================================================
 market_regime:
   volatility_window: 20
@@ -72,42 +88,24 @@ market_regime:
   vol_low_percentile: 0.3
 
 # =============================================================================
-# 策略权重配置（用于信号融合和动态加权）
-# =============================================================================
-strategy_weights:
-  dual_ma: 0.25
-  rsi: 0.20
-  vol_breakout: 0.25
-  term_structure: 0.20
-  spread: 0.10
-
-# =============================================================================
-# 策略切换配置
-# =============================================================================
-strategy_switching:
-  enabled: true
-  cool_down_days: 20
-  regime_map:
-    trend: "dual_ma"
-    range: "rsi"
-    high_vol: "vol_breakout"
-
-# =============================================================================
 # 风控配置
 # =============================================================================
 risk_management:
-  stop_loss_pct: 0.05       # 单笔止损-5%
-  max_drawdown_pct: 0.25    # 最大回撤-25%清盘
-  position_limit_pct: 0.40  # 单品种最大仓位40%
-  total_position_limit: 0.8  # 总仓位80%
+  stop_loss_pct: 0.03           # 单品种止损-3%强制平仓（收紧止损）
+  max_drawdown_pct: 0.20        # 最大回撤-20%清盘（收紧）
+  position_limit_pct: 0.15      # 单品种保证金占比15%
+  total_position_limit: 0.8     # 总仓位80%
+  max_positions: 10             # 最大持仓品种数（扩展品种后增加）
+  commission_filter_pct: 0.0    # 手续费过滤：关闭（不再过滤低收益信号）
+  limit_up_down_protection: true # 涨跌停保护：触及不开新仓
 
 # =============================================================================
 # Walk-Forward配置
 # =============================================================================
 walk_forward:
-  train_years: 2
-  test_years: 1
-  step_years: 1
+  train_bars: 252               # 训练窗口（交易日）
+  test_bars: 63                 # 测试窗口（交易日）
+  step_bars: 21                 # 步进长度（交易日）
   parallel: true
   max_workers: 4
 
@@ -129,6 +127,8 @@ monte_carlo:
 # 数据加载配置
 # =============================================================================
 data:
+  tqsdk_phone: "13600198250"
+  tqsdk_password: "lg123456789"
   tqsdk_data_length: 4000
   csv_data_dir: "./data"
   csv_backup_enabled: true

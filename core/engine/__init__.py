@@ -1,14 +1,15 @@
 """
 引擎模块。
 
-提供核心回测引擎和策略切换引擎。
+提供核心回测引擎和因子打分调仓引擎。
 """
 
 from core.engine.switch_engine import (
+    FactorScoringEngine,
     StrategySwitchEngine,
-    SwitchConfig,
-    SwitchDecision,
-    SwitchReason,
+    ScoringConfig,
+    RebalanceDecision,
+    RebalanceReason,
 )
 from core.engine.runner import (
     BacktestRunner,
@@ -16,14 +17,23 @@ from core.engine.runner import (
     StrategyResult,
     PortfolioResult,
 )
+from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
+from core.engine.factor_decay import FactorDecayMonitor, FactorDecayConfig, DecayStatus, DecayAlert
 
 __all__ = [
+    "FactorScoringEngine",
     "StrategySwitchEngine",
-    "SwitchConfig",
-    "SwitchDecision",
-    "SwitchReason",
+    "ScoringConfig",
+    "RebalanceDecision",
+    "RebalanceReason",
     "BacktestRunner",
     "BacktestConfig",
     "StrategyResult",
     "PortfolioResult",
+    "RollingICWeightEngine",
+    "RollingICConfig",
+    "FactorDecayMonitor",
+    "FactorDecayConfig",
+    "DecayStatus",
+    "DecayAlert",
 ]

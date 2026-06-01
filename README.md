@@ -1,286 +1,187 @@
-# 量化回测系统 v2.0 - 使用说明
+# 量化回测系统 v3.0 — CTA + Alpha101 多因子策略
 
-## 🚀 概述
+## 概述
 
-按照8项要求全面优化后的回测系统，主要特性：
+基于 CTA 因子 + Alpha101 因子组合的多因子期货量化回测系统。
 
-1. ✅ **安全配置**：TqSdk凭证从环境变量读取，所有参数外置到`config.yaml`
-2. ✅ **缺失模块补齐**：重写`create_hybrid_data_source`（TqSdk→CSV兜底），实现`PyBrokerBacktestRunner`
-3. ✅ **策略切换**：重写`MarketRegimeDetector`，实现3状态判断（趋势/震荡/高波），策略映射确保切换次数>0
-4. ✅ **风控加固**：固定止损-5%，最大回撤-25%清盘
-5. ✅ **WalkForward并行**：使用`concurrent.futures`并行执行各窗口
-6. ✅ **Bootstrap增强**：5000样本，绘制Sharpe比率分布图
-7. ✅ **HTML报告**：生成带图表（净值、回撤、柱状图）的可视化报告
-8. ✅ **错误处理**：`loguru`日志记录，单个品种失败不崩溃
+核心特性：
+- **4因子策略**：时间序列动量、展期收益、Alpha#019、Alpha#032
+- **信号融合**：多策略加权信号合成，纯因子打分调仓
+- **环境模块降级**：市场环境检测保留为辅助分析工具，主流程不再依赖环境判断
+- **完整回测链**：WalkForward、Bootstrap、蒙特卡洛、样本外验证
 
 ---
 
-## 📦 快速开始
+## 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-pip install pandas numpy matplotlib pybroker pyyaml loguru
+pip install -r requirements.txt
 ```
 
-### 2. 设置TqSdk凭证（可选）
+### 2. 配置参数
 
-```bash
-# macOS/Linux
-export TQSDK_PHONE="your_phone"
-export TQSDK_PASSWORD="your_password"
-
-# Windows
-set TQSDK_PHONE=your_phone
-set TQSDK_PASSWORD=your_password
-```
-
-如果未设置，系统会自动使用本地CSV数据。
-
-### 3. 准备数据
-
-在`./data/`目录下放置CSV文件，格式：
-- 文件名：`交易所.品种.csv`，如`SHFE.RB.csv`
-- 列名：`date/datetime, open, high, low, close, volume`
-
-### 4. 配置参数
-
-编辑`config.yaml`，根据需要调整回测参数：
+编辑 `config.yaml`，核心配置：
 
 ```yaml
 backtest:
-  initial_cash: 1000000          # 初始资金
-  full_start_date: "2016-01-01"
-  full_end_date: "2026-05-01"
+  initial_cash: 1000000
+  rebalance_freq: 3               # 每3个交易日调仓
+  commission: 0.0003
+  slippage: 0.0002
+  stop_loss_pct: 0.05
 
-strategy_switching:
-  cool_down_days: 20             # 切换冷却期
-  regime_map:
-    trend: "dual_ma"
-    range: "rsi"
-    high_vol: "vol_breakout"
+factor_weights:
+  ts_momentum: 0.25
+  roll_yield: 0.25
+  alpha019: 0.25
+  alpha032: 0.25
 
-risk_management:
-  stop_loss_pct: 0.05            # 单笔止损-5%
-  max_drawdown_pct: 0.25         # 最大回撤-25%清盘
-
-bootstrap:
-  n_samples: 5000                # Bootstrap样本数
+symbols:
+  - "SHFE.RB"   # 螺纹钢
+  - "DCE.M"     # 豆粕
+  - "DCE.MA"    # 甲醇
+  - "CZCE.TA"   # PTA
 ```
 
-### 5. 运行回测
+### 3. 运行回测
 
 ```bash
-python run_pybroker_full_backtest_v2.py
+# 完整回测（10个实验）
+python run_full_backtest.py
+
+# 参数优化
+python run_parameter_optimization.py
+
+# 验证（WalkForward + 样本外 + 蒙特卡洛）
+python run_validation.py
+
+# Streamlit 界面
+streamlit run app.py
 ```
 
 ---
 
-## 📁 文件说明
+## 项目结构
 
-### 新增文件
-
-| 文件 | 说明 |
-|------|------|
-| `config.yaml` | 所有参数配置文件 |
-| `run_pybroker_full_backtest_v2.py` | 优化版主回测文件 |
-| `V2_README.md` | 本文档 |
-
-### 核心模块（v2文件内）
-
-| 模块 | 类/函数 | 说明 |
-|------|---------|------|
-| 配置加载 | `load_config()` | 从YAML加载配置 |
-| 数据源 | `HybridDataSource` | TqSdk优先，CSV兜底 |
-| 市场环境 | `MarketRegimeDetector` | 3状态分类：trend/range/high_vol |
-| 策略 | `create_strategy_functions()` | dual_ma/rsi/vol_breakout |
-| 风控 | `RiskManager` | 固定止损+最大回撤清盘 |
-| 回测运行器 | `PyBrokerBacktestRunner` | 单策略/融合/切换 |
-| WalkForward | `run_walkforward_parallel()` | 并行窗口优化 |
-| Bootstrap | `run_bootstrap()` | 5000样本+Sharpe分布图 |
-| 报告 | `generate_html_report()` | 可视化HTML报告 |
-
----
-
-## 📊 输出文件
-
-运行完成后，`./output_backtest_pybroker/`目录下：
-
-| 文件 | 说明 |
-|------|------|
-| `data_summary.csv` | 数据摘要 |
-| `e1_equity_*.csv` | 单策略净值曲线 |
-| `e1_trades_*.csv` | 单策略交易记录 |
-| `e2_equity_fusion.csv` | 信号融合净值 |
-| `e4_equity_switching.csv` | 策略切换净值 |
-| `e4_switch_log.csv` | 策略切换日志 |
-| `e5_walkforward.csv` | Walkforward窗口结果 |
-| `e8_bootstrap_samples.csv` | Bootstrap样本 |
-| `bootstrap_sharpe_distribution.png` | Sharpe分布图 |
-| `experiment_comparison.png` | 实验对比图 |
-| `equity_curves.png` | 净值曲线对比 |
-| `all_metrics.csv` | 所有实验指标汇总 |
-| `backtest_report.html` | **可视化HTML报告** |
-
----
-
-## 🎯 使用示例
-
-### 示例1：调整参数后回测
-
-```yaml
-# config.yaml
-backtest:
-  initial_cash: 2000000
-
-strategies:
-  - name: "dual_ma"
-    params:
-      short_ma: 5
-      long_ma: 20
 ```
-
-```bash
-python run_pybroker_full_backtest_v2.py
-```
-
-### 示例2：查看HTML报告
-
-用浏览器打开：
-```
-./output_backtest_pybroker/backtest_report.html
-```
-
-报告包含三个标签页：
-- 📌 概览：配置说明+核心改进
-- 📈 图表：实验对比+净值曲线
-- 📋 指标：绩效指标表格
-
-### 示例3：查看日志
-
-```bash
-# 主日志
-tail -f ./logs/backtest.log
-
-# 错误日志
-tail -f ./logs/error.log
+backtest/
+├── config.yaml                  # 统一配置文件
+├── run_full_backtest.py         # 完整回测脚本（E1-E10实验）
+├── run_parameter_optimization.py # 参数优化脚本
+├── run_validation.py            # 验证脚本（WalkForward/样本外/蒙特卡洛）
+├── app.py                       # Streamlit Web 界面
+├── core/
+│   ├── __init__.py              # 核心模块导出
+│   ├── config.py                # BacktestConfig 配置类
+│   ├── data_loader.py           # 数据加载与展期处理
+│   ├── environment.py           # 环境适配器
+│   ├── optimizer.py             # 参数优化器
+│   ├── portfolio.py             # 组合管理
+│   ├── report_builder.py        # 报告生成
+│   ├── risk_controller.py       # 风控逻辑（纯逻辑类）
+│   ├── risk_manager.py          # 风控兼容层（→ RiskManagerAdapter）
+│   ├── strategy_registry.py     # 策略注册表 + 策略库
+│   ├── rollover.py              # 展期管理
+│   ├── market_regime/           # 市场环境检测（辅助分析工具）
+│   ├── strategies/              # 策略实现
+│   │   ├── base.py              # 策略基类
+│   │   ├── ts_momentum.py       # 时间序列动量策略
+│   │   ├── roll_yield.py        # 展期收益策略
+│   │   ├── alpha019.py          # Alpha#019 策略
+│   │   └── alpha032.py          # Alpha#032 策略
+│   ├── engine/                  # 回测引擎
+│   │   ├── broker_adapter.py    # PyBroker 适配器（聚合导入层）
+│   │   ├── pybroker_data_source.py  # PyBroker 数据源
+│   │   ├── regime_indicator.py  # 环境指标
+│   │   ├── strategy_executor.py # 策略执行器 + 风控适配
+│   │   ├── backtest_runner.py   # PyBroker 回测运行器
+│   │   ├── runner.py            # 自研回测引擎
+│   │   └── switch_engine.py     # 因子打分调仓引擎
+│   └── performance/             # 绩效评估
+├── components/                  # Streamlit 组件
+├── pages/                       # Streamlit 页面
+├── utils/                       # 工具函数
+├── examples/                    # 示例脚本
+└── data/                        # 数据目录
 ```
 
 ---
 
-## 🔧 关键配置项说明
+## 策略说明
 
-### 市场环境分类
+### CTA 侧（50%权重）
 
-```yaml
-market_regime:
-  volatility_window: 20        # 波动率窗口
-  adx_period: 14               # ADX周期
-  trend_threshold: 25          # 趋势阈值（ADX>25认为有趋势）
-  vol_high_percentile: 0.7     # 高波阈值（70%分位数）
-  vol_low_percentile: 0.3      # 低波阈值（30%分位数）
+| 策略 | 因子 | 信号逻辑 | 默认参数 |
+|------|------|---------|---------|
+| ts_momentum | 时间序列动量 | N日累计收益率>0做多，<0做空 | window=20 |
+| roll_yield | 展期收益 | 价差偏离均线超阈值反向开仓 | lookback=20, entry=2.0% |
+
+### Alpha101 侧（50%权重）
+
+| 策略 | 因子 | 信号逻辑 | 默认参数 |
+|------|------|---------|---------|
+| alpha019 | Alpha#019 | 短期价格变化符号×长期累计收益排名 | short=7, long=250 |
+| alpha032 | Alpha#032 | 均线偏离+VWAP相关性 | ma=7, corr=230 |
+
+### 权重分配
+
+平衡型：CTA侧 50%（各25%）+ Alpha101侧 50%（各25%），固定权重。
+
+---
+
+## 风控机制
+
+| 规则 | 参数 | 说明 |
+|------|------|------|
+| 单品种止损 | 5% | 亏损达5%强制平仓，当日不再开仓 |
+| 手续费过滤 | 0.1% | 预期收益低于双边成本0.1%则跳过 |
+| 涨跌停保护 | 开启 | 触及涨跌停不开新仓 |
+| 最大持仓数 | 6 | 多+空合计不超过6个品种 |
+| 保证金占比 | 10% | 每品种分配总资金10%作为保证金 |
+| 最大回撤清盘 | 25% | 组合回撤超25%全部清仓 |
+
+---
+
+## 回测流程
+
 ```
-
-### 策略切换
-
-```yaml
-strategy_switching:
-  enabled: true
-  cool_down_days: 20           # 冷却期：防止频繁切换
-  regime_map:
-    trend: "dual_ma"           # 趋势市用双均线
-    range: "rsi"               # 震荡市用RSI
-    high_vol: "vol_breakout"   # 高波市用波动率突破
-```
-
-### WalkForward并行
-
-```yaml
-walk_forward:
-  train_years: 2
-  test_years: 1
-  step_years: 1
-  parallel: true               # 开启并行
-  max_workers: 4               # 最大进程数
+数据加载（TqSdk优先 → CSV兜底）
+    ↓
+策略实例化（4因子策略注册指标）
+    ↓
+信号融合（加权合成 → 纯因子打分调仓）
+    ↓
+风控过滤（止损/手续费/涨跌停/持仓限制）
+    ↓
+绩效评估（Sharpe/最大回撤/胜率/盈亏比）
+    ↓
+稳健性验证（WalkForward/Bootstrap/蒙特卡洛）
 ```
 
 ---
 
-## 📈 回测流程
+## 修改记录
 
-```
-Phase 1: 数据加载
-    └─> TqSdk优先 -> 失败则CSV兜底
-
-Phase 2: 单策略基线
-    └─> dual_ma / rsi / vol_breakout 独立回测
-
-Phase 3: 信号融合
-    └─> 多策略等权信号融合
-
-Phase 4: 策略切换
-    └─> 3状态分类 -> 策略映射 -> 冷却期控制
-
-Phase 5: WalkForward并行
-    └─> 多进程并行执行时间窗口
-
-Phase 6: 样本内外验证
-    └─> in_sample / out_sample 分开验证
-
-Phase 7: Bootstrap
-    └─> 5000样本 -> Sharpe分布直方图
-
-Phase 8: HTML报告
-    └─> 图表+指标完整报告
-```
-
----
-
-## 🛡️ 风控机制
-
-1. **单笔止损**：任意单品种亏损-5%强制平仓
-2. **最大回撤清盘**：组合最大回撤超-25%全部清仓，停止交易
-3. **仓位控制**：配置文件中可设置`position_limit_pct`
-
----
-
-## 📝 修改记录
-
-### v2.0 (2026-05-28)
+### v3.0 (2026-05-31)
 
 | 项 | 说明 |
 |----|------|
-| 安全配置 | TqSdk凭证从环境变量读取，config.yaml外置参数 |
-| 数据加载 | HybridDataSource：TqSdk优先，CSV兜底 |
-| 策略切换 | MarketRegimeDetector 3状态 + 策略映射 |
-| 风控 | RiskManager：-5%止损，-25%清盘 |
-| WalkForward | concurrent.futures并行执行 |
-| Bootstrap | 5000样本 + Sharpe分布图 |
-| 报告 | 可视化HTML，带图表 |
-| 日志 | loguru记录，错误不崩溃 |
+| 策略重构 | 拆分为4个独立策略：ts_momentum/roll_yield/alpha019/alpha032 |
+| 信号融合 | 默认启用融合模式，纯因子打分调仓 |
+| 环境降级 | 环境检测保留为辅助工具，主流程不再依赖环境判断 |
+| 品种池 | RB/M/MA/TA（流动性>5万手，保证金<5000元） |
+| 调仓周期 | 每3个交易日 |
+| 风控增强 | 新增手续费过滤、涨跌停保护、最大持仓数限制 |
+| 代码清理 | 移除旧策略（dual_ma/rsi/vol_breakout/spread），清理冗余引用 |
 
----
+### v3.1 (2026-06-01)
 
-## ❓ 常见问题
-
-### Q: TqSdk连接失败怎么办？
-
-A: 系统会自动fallback到本地CSV，无需担心。只要`./data/`目录下有数据即可运行。
-
-### Q: 单个品种报错会导致整个回测停止吗？
-
-A: 不会。`try-except`包裹了每个品种，单个失败会记录到`./logs/error.log`，其他继续。
-
-### Q: 如何调整策略参数？
-
-A: 编辑`config.yaml`中的`strategies.params`即可，无需改代码。
-
-### Q: Bootstrap样本数能改吗？
-
-A: 可以，在`config.yaml`的`bootstrap.n_samples`调整（建议至少1000）。
-
----
-
-## 📄 License
-
-MIT License
+| 项 | 说明 |
+|----|------|
+| 配置清理 | 删除 fusion_mode、regime_filter_enabled、strategy_switching 等废弃字段 |
+| 策略注册合并 | 删除 core/strategies/registry.py 和 core/strategy_library/，合并为 core/strategy_registry.py |
+| 风控统一 | 删除 RiskManager，保留 RiskController（纯逻辑）+ RiskManagerAdapter（PyBroker适配） |
+| 引擎拆分 | broker_adapter.py 拆分为 pybroker_data_source/regime_indicator/strategy_executor/backtest_runner |
+| 测试更新 | 删除过时测试（rebalance_frequency），更新配置测试 |

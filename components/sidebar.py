@@ -10,79 +10,91 @@ def render_strategy_config() -> dict:
     selected_strategies = st.sidebar.multiselect(
         "选择策略",
         list(STRATEGY_REGISTRY.keys()),
-        default=["dual_ma"],
+        default=["ts_momentum"],
         format_func=lambda x: {
-            "dual_ma": "📈 双均线趋势",
-            "rsi": "📉 RSI反转",
-            "spread": "🔄 跨期套利",
+            "ts_momentum": "📈 时序动量",
+            "roll_yield": "🔄 展期收益",
+            "alpha019": "📉 Alpha019",
+            "alpha032": "📊 Alpha032",
         }.get(x, x),
     )
 
     strategy_params = {}
 
-    if "dual_ma" in selected_strategies:
-        st.sidebar.subheader("双均线参数")
+    if "ts_momentum" in selected_strategies:
+        st.sidebar.subheader("时序动量参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "dual_ma"
-        strategy_params["dual_ma"] = {
-            "short_ma": st.sidebar.slider(
-                "短期均线周期", 3, 15,
-                int(_applied.get("short_ma", 5)) if _is_applied else 5,
-                key="dual_short"
-            ),
-            "long_ma": st.sidebar.slider(
-                "长期均线周期", 10, 60,
-                int(_applied.get("long_ma", 20)) if _is_applied else 20,
-                key="dual_long"
-            ),
-            "adx_threshold": st.sidebar.slider(
-                "ADX趋势阈值", 15.0, 40.0, 25.0, 0.5, key="dual_adx"
+        _is_applied = st.session_state.get("optimized_strategy") == "ts_momentum"
+        strategy_params["ts_momentum"] = {
+            "window": st.sidebar.slider(
+                "动量窗口", 5, 60,
+                int(_applied.get("window", 20)) if _is_applied else 20,
+                key="tsm_window"
             ),
             "position_size": st.sidebar.slider(
-                "仓位比例", 0.05, 0.5, 0.3, 0.05, key="dual_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="tsm_pos"
             ),
         }
 
-    if "rsi" in selected_strategies:
-        st.sidebar.subheader("RSI参数")
+    if "roll_yield" in selected_strategies:
+        st.sidebar.subheader("展期收益参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "rsi"
-        strategy_params["rsi"] = {
-            "rsi_period": st.sidebar.slider(
-                "RSI周期", 5, 30,
-                int(_applied.get("rsi_period", 14)) if _is_applied else 14,
-                key="rsi_period"
+        _is_applied = st.session_state.get("optimized_strategy") == "roll_yield"
+        strategy_params["roll_yield"] = {
+            "lookback": st.sidebar.slider(
+                "回看窗口", 5, 60,
+                int(_applied.get("lookback", 20)) if _is_applied else 20,
+                key="ry_lookback"
             ),
-            "oversold": st.sidebar.slider(
-                "超卖阈值", 15.0, 35.0, 30.0, 1.0, key="rsi_oversold"
+            "entry_threshold": st.sidebar.slider(
+                "入场阈值(%)", 0.5, 5.0, 2.0, 0.5, key="ry_entry"
             ),
-            "overbought": st.sidebar.slider(
-                "超买阈值", 65.0, 85.0, 70.0, 1.0, key="rsi_overbought"
-            ),
-            "adx_threshold": st.sidebar.slider(
-                "ADX震荡市阈值", 15.0, 40.0, 25.0, 0.5, key="rsi_adx"
+            "exit_threshold": st.sidebar.slider(
+                "出场阈值(%)", 0.1, 2.0, 0.5, 0.1, key="ry_exit"
             ),
             "position_size": st.sidebar.slider(
-                "RSI仓位比例", 0.05, 0.5, 0.2, 0.05, key="rsi_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="ry_pos"
             ),
         }
 
-    if "spread" in selected_strategies:
-        st.sidebar.subheader("跨期套利参数")
-        near_symbol = st.sidebar.text_input("近月合约代码", value="RB2401", key="spread_near")
-        far_symbol = st.sidebar.text_input("远月合约代码", value="RB2405", key="spread_far")
-        strategy_params["spread"] = {
-            "spread_ma_period": st.sidebar.slider(
-                "价差均线周期", 5, 40, 20, key="spread_ma"
+    if "alpha019" in selected_strategies:
+        st.sidebar.subheader("Alpha019参数")
+        _applied = st.session_state.get("applied_optimized_params", {})
+        _is_applied = st.session_state.get("optimized_strategy") == "alpha019"
+        strategy_params["alpha019"] = {
+            "short_window": st.sidebar.slider(
+                "短期窗口", 3, 20,
+                int(_applied.get("short_window", 7)) if _is_applied else 7,
+                key="a019_short"
             ),
-            "spread_entry_threshold": st.sidebar.slider(
-                "入场阈值(标准差)", 1.0, 4.0, 2.0, 0.5, key="spread_thresh"
+            "long_window": st.sidebar.slider(
+                "长期窗口", 60, 360,
+                int(_applied.get("long_window", 250)) if _is_applied else 250,
+                key="a019_long"
             ),
             "position_size": st.sidebar.slider(
-                "套利仓位比例", 0.05, 0.3, 0.15, 0.05, key="spread_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="a019_pos"
             ),
-            "near_symbol": near_symbol,
-            "far_symbol": far_symbol,
+        }
+
+    if "alpha032" in selected_strategies:
+        st.sidebar.subheader("Alpha032参数")
+        _applied = st.session_state.get("applied_optimized_params", {})
+        _is_applied = st.session_state.get("optimized_strategy") == "alpha032"
+        strategy_params["alpha032"] = {
+            "ma_window": st.sidebar.slider(
+                "均线窗口", 3, 20,
+                int(_applied.get("ma_window", 7)) if _is_applied else 7,
+                key="a032_ma"
+            ),
+            "corr_window": st.sidebar.slider(
+                "相关性窗口", 60, 360,
+                int(_applied.get("corr_window", 230)) if _is_applied else 230,
+                key="a032_corr"
+            ),
+            "position_size": st.sidebar.slider(
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="a032_pos"
+            ),
         }
 
     st.sidebar.divider()

@@ -20,7 +20,7 @@ def render_optimization(config: dict):
         return
 
     strat_name = (
-        config["selected_strategies"][0] if config["selected_strategies"] else "dual_ma"
+        config["selected_strategies"][0] if config["selected_strategies"] else "ts_momentum"
     )
     strat_class = STRATEGY_REGISTRY.get(strat_name)
 
@@ -32,35 +32,65 @@ def render_optimization(config: dict):
 
     col1, col2 = st.columns(2)
     with col1:
-        if strat_name == "dual_ma":
-            short_ma_values = st.multiselect(
-                "短期均线周期", options=[3, 5, 7, 10, 12, 15],
-                default=[5, 10], key="opt_short"
+        if strat_name == "ts_momentum":
+            window_values = st.multiselect(
+                "动量窗口", options=[5, 10, 15, 20, 30, 40, 60],
+                default=[10, 20], key="opt_tsm_window"
             )
-            long_ma_values = st.multiselect(
-                "长期均线周期", options=[15, 20, 25, 30, 40, 50],
-                default=[20, 30], key="opt_long"
+            if not window_values:
+                st.warning("请至少选择一个参数值")
+                return
+            param_grid = {"window": window_values}
+        elif strat_name == "roll_yield":
+            lookback_values = st.multiselect(
+                "回看窗口", options=[5, 10, 15, 20, 30, 40, 60],
+                default=[10, 20], key="opt_ry_lookback"
             )
-            if not short_ma_values or not long_ma_values:
+            entry_values = st.multiselect(
+                "入场阈值(%)", options=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+                default=[1.5, 2.0], key="opt_ry_entry"
+            )
+            if not lookback_values or not entry_values:
                 st.warning("请至少选择一个参数值")
                 return
             param_grid = {
-                "short_ma": short_ma_values,
-                "long_ma": long_ma_values,
+                "lookback": lookback_values,
+                "entry_threshold": entry_values,
             }
-        elif strat_name == "rsi":
-            rsi_period_values = st.multiselect(
-                "RSI周期", options=[5, 7, 10, 14, 21, 28],
-                default=[10, 14, 21], key="opt_rsi"
+        elif strat_name == "alpha019":
+            short_values = st.multiselect(
+                "短期窗口", options=[3, 5, 7, 10, 14],
+                default=[5, 7], key="opt_a019_short"
             )
-            if not rsi_period_values:
+            long_values = st.multiselect(
+                "长期窗口", options=[120, 180, 250, 300, 360],
+                default=[180, 250], key="opt_a019_long"
+            )
+            if not short_values or not long_values:
                 st.warning("请至少选择一个参数值")
                 return
             param_grid = {
-                "rsi_period": rsi_period_values,
+                "short_window": short_values,
+                "long_window": long_values,
+            }
+        elif strat_name == "alpha032":
+            ma_values = st.multiselect(
+                "均线窗口", options=[3, 5, 7, 10, 14],
+                default=[5, 7], key="opt_a032_ma"
+            )
+            corr_values = st.multiselect(
+                "相关性窗口", options=[120, 180, 230, 300, 360],
+                default=[180, 230], key="opt_a032_corr"
+            )
+            if not ma_values or not corr_values:
+                st.warning("请至少选择一个参数值")
+                return
+            param_grid = {
+                "ma_window": ma_values,
+                "corr_window": corr_values,
             }
         else:
-            st.info("跨期套利策略暂不支持参数优化")
+            st.info("该策略暂不支持参数优化")
             return
 
     with col2:

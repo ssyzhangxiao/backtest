@@ -7,7 +7,7 @@ from pybroker import Strategy, StrategyConfig
 from pybroker.common import FeeMode
 
 from core.rollover import RolloverManager, RolloverMode
-from core.risk_manager import RiskManager
+from core.engine.strategy_executor import RiskManagerAdapter
 from core.portfolio import PortfolioManager
 from core.strategies import create_strategy
 
@@ -53,7 +53,7 @@ def run_backtest(config: dict):
     end_date = str(df["date"].max().date())
     strategy = Strategy(df, start_date, end_date, pybroker_config)
 
-    risk_manager = RiskManager(**config["risk_params"])
+    risk_manager = RiskManagerAdapter(**config["risk_params"])
 
     try:
         rollover_mode = RolloverMode(config["rollover_mode"])

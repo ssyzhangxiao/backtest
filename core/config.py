@@ -1,20 +1,20 @@
 """
 回测系统统一配置。
 
-从 core/engine/runner.py 中提取并扩展，供 PyBroker 主引擎和自研验证引擎共用。
+供 PyBroker 主引擎和自研验证引擎共用。
+因子打分调仓模式：多因子综合得分决定持仓方向和仓位。
 """
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+import yaml
 
 
-# ── 路径常量 ──
 DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
 )
 
-# ── PyBroker 附加列 ──
 PYBROKER_EXTRA_COLUMNS = (
     "open_interest",
     "is_dominant",
@@ -26,27 +26,16 @@ PYBROKER_EXTRA_COLUMNS = (
     "rollover_to",
     "rollover_cost",
     "product",
-    "env_atr",
-    "env_adx",
-    "env_plus_di",
-    "env_minus_di",
-    "env_market_regime",
-    "env_trend_score",
-    "env_compression_score",
-    "env_momentum_score",
-    "env_liquidity_score",
-    "env_bearish_exhaustion",
-    "env_bullish_exhaustion",
-    "env_weight_trend",
-    "env_weight_reversal",
-    "env_weight_spread",
 )
 
-# 向后兼容别名
-_PYBROKER_COLUMNS = PYBROKER_EXTRA_COLUMNS
-
-# ── 初始资金 ──
 INITIAL_CASH = 1_000_000
+
+DEFAULT_FACTOR_WEIGHTS: Dict[str, float] = {
+    "ts_momentum": 0.25,
+    "roll_yield": 0.25,
+    "alpha019": 0.25,
+    "alpha032": 0.25,
+}
 
 
 def get_default_stress_events() -> list:
@@ -65,46 +54,90 @@ class BacktestConfig:
 
     # ── 基础参数 ──
     initial_cash: float = INITIAL_CASH
-    commission_rate: float = 0.0003
-    slippage_rate: float = 0.0002
+    commission_rate: float = 0.0001
+    slippage_rate: float = 0.0001
 
     # ── 样本内/外分割 ──
     in_sample_end: Optional[str] = None
 
-    # ── 策略权重 ──
-    strategy_weights: Dict[str, float] = field(default_factory=dict)
+    # ── 因子打分调仓 ──
+    rebalance_days: int = 3
+    factor_weights: Dict[str, float] = field(default_factory=lambda: DEFAULT_FACTOR_WEIGHTS.copy())
+    entry_threshold: float = 0.05
+    score_scale: float = 1.0
+    stop_loss_cooldown: int = 1
 
     # ── 风控 ──
-    stop_loss_pct: float = 0.05
-    max_position_pct: float = 0.2
+    stop_loss_pct: float = 0.03
+    max_position_pct: float = 0.15
     max_total_position_pct: float = 0.6
+    min_position_pct: float = 0.0
 
-    # ── PyBroker 相关（新增） ──
-    # Bootstrap 评估：对绩效指标进行重采样，计算置信区间
+    # ── 横截面标准化与排名叠加 ──
+    use_cross_section: bool = True
+    use_rank_score: bool = True
+    use_rolling_ic: bool = True
+    top_n_symbols: int = 5
+
+    # ── PyBroker 相关 ──
     pybroker_bootstrap_samples: int = 10000
-
-    # 买入/卖出延迟：BarNumber 延迟，模拟次日成交
     pybroker_buy_delay: int = 1
     pybroker_sell_delay: int = 1
 
-    # ── Walkforward 向前滚动分析（新增） ──
-    # 训练集占比（用于参数调优）
+    # ── Walkforward 向前滚动分析 ──
+    wf_train_bars: int = 252
+    wf_test_bars: int = 63
+    wf_step_bars: int = 21
     wf_train_ratio: float = 0.6
-    # 每次前进步长占比
     wf_step_ratio: float = 0.1
 
-    # ── 交叉验证（新增） ──
-    # 是否在 PyBroker 运行后自动用自研引擎交叉验证
+    # ── 交叉验证 ──
     cross_validate: bool = False
 
-    # ── 组合再平衡（新增） ──
-    # none: 无再平衡，权重随各策略净值变化自然漂移
-    # daily: 每日收盘再平衡
-    # weekly: 每周最后一个交易日再平衡（使用 Friday，或周内最后一天）
-    # monthly: 每月最后一个交易日再平衡
-    rebalance_frequency: str = "none"
+    @classmethod
+    def from_yaml(cls, path: str = "config.yaml") -> "BacktestConfig":
+        """
+        从 YAML 文件加载配置。
 
-    # ── 多策略模式（新增） ──
-    # True: 信号融合模式（多策略加权信号，不切换）
-    # False: 策略切换模式（市场环境→策略匹配切换）
-    fusion_mode: bool = False
+        YAML 结构示例:
+          backtest:
+            start_date: "2020-01-01"
+            end_date: "2023-12-31"
+            initial_capital: 1000000
+            rebalance_freq: 3
+            commission: 0.0002
+            slippage: 0.001
+          factor_weights:
+            ts_momentum: 0.25
+            roll_yield: 0.25
+            alpha019: 0.25
+            alpha032: 0.25
+
+        Args:
+            path: YAML 文件路径
+
+        Returns:
+            BacktestConfig 实例
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+
+        bt = raw.get("backtest", {})
+        fw = raw.get("factor_weights", {})
+
+        return cls(
+            initial_cash=float(bt.get("initial_capital", INITIAL_CASH)),
+            commission_rate=float(bt.get("commission", 0.0001)),
+            slippage_rate=float(bt.get("slippage", 0.0001)),
+            rebalance_days=int(bt.get("rebalance_freq", 3)),
+            factor_weights=fw if fw else DEFAULT_FACTOR_WEIGHTS.copy(),
+            entry_threshold=float(bt.get("entry_threshold", 0.05)),
+            stop_loss_pct=float(bt.get("stop_loss_pct", 0.03)),
+            max_position_pct=float(bt.get("max_position_pct", 0.15)),
+            max_total_position_pct=float(bt.get("max_total_position_pct", 0.6)),
+            min_position_pct=float(bt.get("min_position_pct", 0.0)),
+            use_cross_section=bool(bt.get("use_cross_section", True)),
+            use_rank_score=bool(bt.get("use_rank_score", True)),
+            use_rolling_ic=bool(bt.get("use_rolling_ic", True)),
+            top_n_symbols=int(bt.get("top_n_symbols", 5)),
+        )

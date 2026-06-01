@@ -4,9 +4,26 @@ import streamlit as st
 from core.config import DATA_DIR
 from utils.session_state import load_data_cached, load_tqsdk_cached, compute_env_cached
 
-# TqSdk 默认账号
-_DEFAULT_PHONE = "13600198250"
-_DEFAULT_PASSWORD = "lg123456789"
+
+def _get_tqsdk_defaults():
+    """从config.yaml读取TqSdk凭证，回退到环境变量。"""
+    import os
+    phone = os.environ.get("TQSDK_PHONE", "")
+    password = os.environ.get("TQSDK_PASSWORD", "")
+    if not phone or not password:
+        try:
+            import yaml
+            with open("config.yaml", "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+            data_cfg = cfg.get("data", {})
+            phone = phone or data_cfg.get("tqsdk_phone", "")
+            password = password or data_cfg.get("tqsdk_password", "")
+        except Exception:
+            pass
+    return phone, password
+
+
+_DEFAULT_PHONE, _DEFAULT_PASSWORD = _get_tqsdk_defaults()
 
 # 品种分组（用于 TqSdk 模式下的多选）
 _SYMBOL_GROUPS = {

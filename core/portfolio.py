@@ -1,18 +1,17 @@
 """
 组合管理模块。
 
-管理多策略组合，根据市场环境动态调整策略权重，
-协调多个 PyBroker 策略的执行。
-
+管理多策略组合，根据因子打分调仓模式协调策略执行。
 PyBroker 原生支持通过 strategy.add_execution() 添加多个执行函数，
-每个执行函数可以对应不同的策略。本模块在此基础上增加：
-- 环境动态权重调整
+本模块在此基础上增加：
+- 因子权重管理
 - 多策略资金分配
 - 组合级别的绩效汇总
 """
 
 from typing import Dict, List, Optional, Callable
-from .environment import EnvironmentAdapter
+
+from core.config import DEFAULT_FACTOR_WEIGHTS
 
 
 class PortfolioManager:
@@ -20,29 +19,21 @@ class PortfolioManager:
     多策略组合管理器。
 
     负责将多个策略注册到 PyBroker 的 Strategy 中，
-    并根据市场环境动态调整各策略的仓位权重。
+    并根据因子权重分配各策略的仓位。
 
     Attributes:
         strategies: 已注册的策略实例字典 {名称: 实例}
         weights: 策略权重字典 {名称: 权重}
-        env_adapter: 环境适配器实例
         total_allocation: 总仓位上限（占总权益比例）
     """
 
-    DEFAULT_WEIGHTS = {
-        "dual_ma": 0.4,
-        "rsi": 0.3,
-        "spread": 0.3,
-    }
-
     def __init__(
         self,
-        env_adapter: Optional[EnvironmentAdapter] = None,
         total_allocation: float = 0.8,
+        factor_weights: Optional[Dict[str, float]] = None,
     ):
         self.strategies: Dict[str, object] = {}
-        self.weights: Dict[str, float] = self.DEFAULT_WEIGHTS.copy()
-        self.env_adapter = env_adapter or EnvironmentAdapter()
+        self.weights: Dict[str, float] = factor_weights or DEFAULT_FACTOR_WEIGHTS.copy()
         self.total_allocation = total_allocation
 
     def add_strategy(self, name: str, strategy: object, weight: Optional[float] = None):
@@ -57,8 +48,8 @@ class PortfolioManager:
         self.strategies[name] = strategy
         if weight is not None:
             self.weights[name] = weight
-        elif name in self.DEFAULT_WEIGHTS:
-            self.weights[name] = self.DEFAULT_WEIGHTS[name]
+        elif name in DEFAULT_FACTOR_WEIGHTS:
+            self.weights[name] = DEFAULT_FACTOR_WEIGHTS[name]
         else:
             self.weights[name] = 1.0
         self.set_weights(self.weights)
@@ -81,31 +72,23 @@ class PortfolioManager:
 
         权重会被归一化，使总和为1。
         过滤掉不在 self.strategies 中的策略键。
+        权重必须是非负数。
 
         Args:
             weights: 策略权重字典
+
+        Raises:
+            ValueError: 如果存在负数权重
         """
+        negative = {k: v for k, v in weights.items() if v < 0}
+        if negative:
+            raise ValueError(f"策略权重不能为负数: {negative}")
         filtered = {k: v for k, v in weights.items() if k in self.strategies}
         total = sum(filtered.values())
         if total > 0:
             self.weights = {k: v / total for k, v in filtered.items()}
         else:
             self.weights = filtered
-
-    def update_weights_by_regime(self, regime: str):
-        """
-        根据市场状态更新策略权重。
-
-        Args:
-            regime: 市场状态，'trend' 或 'range'
-        """
-        regime_weights = self.env_adapter.get_regime_weights(regime)
-        mapping = {"trend": "dual_ma", "reversal": "rsi", "spread": "spread"}
-        new_weights = {}
-        for regime_key, strategy_name in mapping.items():
-            if strategy_name in self.strategies:
-                new_weights[strategy_name] = regime_weights.get(regime_key, 0.33)
-        self.set_weights(new_weights)
 
     def get_adjusted_position_size(self, strategy_name: str, base_size: float) -> float:
         """
@@ -118,7 +101,7 @@ class PortfolioManager:
         Returns:
             调整后的仓位比例
         """
-        weight = self.weights.get(strategy_name, 0.33)
+        weight = self.weights.get(strategy_name, 0.25)
         return base_size * weight * self.total_allocation
 
     def register_all_to_pybroker(

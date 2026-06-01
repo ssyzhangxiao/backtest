@@ -5,7 +5,7 @@
 提供完整的回测流程。
 
 ⚠️ 自研回测引擎标记为 validate_only 模式。
-   推荐使用 PyBroker 主引擎（core/engine/broker_adapter.py），
+   推荐使用 PyBroker 主引擎（core/engine/backtest_runner.py），
    自研引擎主要用于交叉验证和边缘场景测试。
 
 组合净值计算假设：
@@ -19,7 +19,7 @@
 
     runner = BacktestRunner(data_dir="./data")
     results = runner.run(
-        strategies=["dual_ma", "rsi", "vol_breakout"],
+        strategies=["ts_momentum", "roll_yield", "alpha019"],
         start_date="2023-01-01",
         end_date="2024-12-31",
     )
@@ -40,8 +40,8 @@ import numpy as np
 from core.config import BacktestConfig
 from core.data_loader import DataLoader
 from core.market_regime import MarketRegimeDetector, MarketRegime
-from core.strategy_library import StrategyLibrary
-from core.engine.switch_engine import StrategySwitchEngine, SwitchConfig
+from core.strategy_registry import StrategyLibrary
+from core.engine.switch_engine import FactorScoringEngine, ScoringConfig
 from core.performance import PerformanceEvaluator, PerformanceMonitor
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class BacktestRunner:
         self.data_loader = DataLoader(data_dir=data_dir, data_source="csv")
         self.regime_detector = MarketRegimeDetector()
         self.strategy_library = StrategyLibrary()
-        self.switch_engine = StrategySwitchEngine(self.strategy_library)
+        self.switch_engine = FactorScoringEngine(self.strategy_library)
         self.evaluator = PerformanceEvaluator()
         self.monitor = PerformanceMonitor()
 
@@ -136,11 +136,8 @@ class BacktestRunner:
         """
         判断给定策略在当前市场环境下是否应该交易。
 
-        环境自适应规则：
-          - dual_ma: RANGE_BOUND（震荡市）时趋势策略容易反复穿越均线，强制不交易。
-          - rsi: RANGE_BOUND 时允许交易（超买超卖在震荡市更有效）。
-          - vol_breakout: HIGH_VOLATILITY（高波动）时允许，LOW_VOLATILITY 时限制。
-          - term_structure: 对环境不敏感，始终允许。
+        默认关闭环境过滤（纯因子打分调仓），
+        当前系统已移除 regime_filter_enabled，始终返回 True。
 
         Args:
             regime: 市场环境标签字符串（如 "RANGE_BOUND"），None 时默认允许。
@@ -150,25 +147,35 @@ class BacktestRunner:
             是否应生成交易信号。
         """
         if regime is None:
-            return True  # 无环境信息时不做过滤
+            return True
+
+        # 因子打分调仓模式：不依赖环境过滤
+        return True
 
         regime_upper = (
             regime.upper() if isinstance(regime, str) else str(regime).upper()
         )
 
-        if strategy_name == "dual_ma":
-            # 震荡市趋势策略效果差 → 禁止交易
+        if strategy_name == "ts_momentum":
             if regime_upper in ("RANGE_BOUND",):
                 return False
             return True
 
-        elif strategy_name == "vol_breakout":
-            # 极低波动时突破信号不可靠 → 禁止交易
+        elif strategy_name == "roll_yield":
+            if regime_upper in ("TREND_UP", "TREND_DOWN"):
+                return False
+            return True
+
+        elif strategy_name == "alpha019":
+            if regime_upper in ("HIGH_VOLATILITY",):
+                return False
+            return True
+
+        elif strategy_name == "alpha032":
             if regime_upper in ("LOW_VOLATILITY",):
                 return False
             return True
 
-        # 其他策略（rsi, term_structure, spread）不做环境过滤
         return True
 
     # ------------------------------------------------------------------
@@ -231,7 +238,7 @@ class BacktestRunner:
 
         # 绩效预警
         last_date = str(data["date"].iloc[-1]) if "date" in data.columns else ""
-        alerts = self.monitor.evaluate(strategy_name, metrics, last_date)
+        self.monitor.evaluate(strategy_name, metrics, last_date)
 
         return StrategyResult(
             strategy_name=strategy_name,
@@ -274,89 +281,45 @@ class BacktestRunner:
         low = data["low"]
 
         # ── 步骤1：计算原始信号 ──
-        if strategy_name == "dual_ma":
-            short_ma = close.rolling(window=params.get("short_ma", 5)).mean()
-            long_ma = close.rolling(window=params.get("long_ma", 20)).mean()
+        if strategy_name == "ts_momentum":
+            window = params.get("window", 20)
+            ret = close.pct_change(periods=window)
             result["signal"] = np.where(
-                short_ma > long_ma, 1, np.where(short_ma < long_ma, -1, 0)
+                ret > 0, 1, np.where(ret < 0, -1, 0)
             )
 
-        elif strategy_name == "rsi":
-            delta = close.diff()
-            rsi_period = params.get("rsi_period", 14)
-            gain = (
-                delta.where(delta > 0, 0.0)
-                .ewm(alpha=1 / rsi_period, adjust=False)
-                .mean()
-            )
-            loss = (
-                (-delta.where(delta < 0, 0.0))
-                .ewm(alpha=1 / rsi_period, adjust=False)
-                .mean()
-            )
-            rs = np.where(loss > 0, gain / loss, 100.0)
-            rsi = 100 - 100 / (1 + rs)
-            oversold = params.get("oversold", 30.0)
-            overbought = params.get("overbought", 70.0)
-            # 改进信号逻辑：超买超卖反转 + 中线趋势跟踪
-            # RSI < oversold → 强做多(1), RSI > overbought → 强做空(-1)
-            # RSI 在 40-60 区间 → 趋势跟踪（>50 做多，<50 做空）
-            result["signal"] = np.where(
-                rsi < oversold,
-                1,
-                np.where(rsi > overbought, -1, np.where(rsi > 50, 1, -1)),
-            )
-
-        elif strategy_name == "term_structure":
+        elif strategy_name == "roll_yield":
             lookback = params.get("lookback", 20)
             entry_th = params.get("entry_threshold", 2.0)
             exit_th = params.get("exit_threshold", 0.5)
-            sma = close.rolling(window=lookback).mean()
-            spread = (close - sma) / sma * 100
+            ma = close.rolling(window=lookback).mean()
+            spread_pct = (close - ma) / ma * 100
             result["signal"] = np.where(
-                spread < -entry_th,
+                spread_pct < -entry_th,
                 1,
                 np.where(
-                    spread > entry_th, -1, np.where(spread.abs() < exit_th, 0, None)
+                    spread_pct > entry_th, -1, np.where(spread_pct.abs() < exit_th, 0, None)
                 ),
             )
             result["signal"] = (
                 result["signal"].ffill().fillna(0).infer_objects(copy=False)
             )
 
-        elif strategy_name == "vol_breakout":
-            atr_period = params.get("atr_period", 26)
-            band_period = params.get("band_period", 30)
-            mult = params.get("atr_multiplier", 2.0)
-            tr = pd.concat(
-                [
-                    high - low,
-                    (high - close.shift(1)).abs(),
-                    (low - close.shift(1)).abs(),
-                ],
-                axis=1,
-            ).max(axis=1)
-            atr = tr.rolling(window=atr_period).mean()
-            center = close.rolling(window=band_period).mean()
-            upper = center + mult * atr
-            lower = center - mult * atr
+        elif strategy_name == "alpha019":
+            short_window = params.get("short_window", 7)
+            delta_n = close.diff(short_window)
+            sign_component = -np.sign(delta_n)
             result["signal"] = np.where(
-                close > upper,
-                1,
-                np.where(
-                    close < lower,
-                    -1,
-                    np.where(
-                        (close > lower) & (close < upper) & (close > center), 0, None
-                    ),
-                ),
-            )
-            result["signal"] = (
-                result["signal"].ffill().fillna(0).infer_objects(copy=False)
+                sign_component > 0, 1, np.where(sign_component < 0, -1, 0)
             )
 
-        elif strategy_name == "spread":
-            result["signal"] = 0  # 跨期套利需要多合约数据，简化处理
+        elif strategy_name == "alpha032":
+            ma_window = params.get("ma_window", 7)
+            ma_val = close.rolling(window=ma_window).mean()
+            deviation = ma_val - close
+            result["signal"] = np.where(
+                deviation > 0, 1, np.where(deviation < 0, -1, 0)
+            )
 
         # ── 步骤2：环境自适应过滤 ──
         # 利用 regime_df 中的环境标签，对不适合交易的环境将信号清零
@@ -389,7 +352,7 @@ class BacktestRunner:
 
         修复项：
           - 空头/多头止损成本统一：P&L 不含成本，成本独立通过现金变动扣除。
-          - 集成 StrategySwitchEngine：每日调用 decide()，传入实时滚动 Sharpe。
+          - 集成 FactorScoringEngine：每日调用 decide()，传入实时滚动 Sharpe。
           - 添加滑点和佣金扣除。
 
         盈亏计算原则：
@@ -398,7 +361,7 @@ class BacktestRunner:
           - 记录中的 pnl 为净盈亏（基础P&L - 平仓成本）
         """
         position_size = params.get("position_size", 0.2)
-        stop_loss_pct = params.get("trailing_stop_pct", 0.05) or 0.05
+        stop_loss_pct = params.get("trailing_stop_pct", 0.02) or 0.02
         cfg = self.config
         commission = cfg.commission_rate
         slippage = cfg.slippage_rate
@@ -411,11 +374,11 @@ class BacktestRunner:
         equity_list = []
         trade_records = []
 
-        # ── 滚动 Sharpe 跟踪（用于策略切换引擎） ──
-        switch_cfg = SwitchConfig()
-        lookback = switch_cfg.performance_lookback  # 默认20
+        # ── 滚动 Sharpe 跟踪 ──
+        scoring_cfg = ScoringConfig()
+        lookback = 20
         daily_returns: deque = deque(maxlen=lookback)
-        prev_equity = cash  # 前一日权益
+        prev_equity = cash
 
         # ── 策略切换引擎状态 ──
         active_strategy = strategy_name or None  # 由 switch_engine 管理
@@ -429,13 +392,17 @@ class BacktestRunner:
         )
 
         # ── 预计算所有策略的信号（用于策略切换时即时替换） ──
+        # 各策略使用各自的默认参数，而非当前策略的 params
         strategy_signal_cache: Dict[str, pd.DataFrame] = {}
         if has_regime and switch_engine is not None:
             for sname in self.strategy_library.list_all():
                 sname = sname.name
                 try:
+                    profile = self.strategy_library.get_profile(sname)
+                    s_params = dict(profile.default_params) if profile and profile.default_params else {}
+                    s_params.update(params.get(sname, {}))
                     strategy_signal_cache[sname] = self._generate_signals(
-                        sname, data, params, regime_df
+                        sname, data, s_params, regime_df
                     )
                 except Exception as e:
                     logger.debug("策略 %s 信号生成失败: %s", sname, e)
@@ -507,10 +474,21 @@ class BacktestRunner:
                 if i < len(alt_signals):
                     signal = int(alt_signals["signal"].iloc[i])
 
-            # ── 止损检查 ──
+            # ── 止损检查（ATR 动态 + 固定止损） ──
+            effective_stop = stop_loss_pct
+            if i >= 14 and "high" in df.columns and "low" in df.columns:
+                hw = df["high"].iloc[i-13:i+1]
+                lw = df["low"].iloc[i-13:i+1]
+                cs = df["close"].shift(1).iloc[i-13:i+1]
+                tr = pd.concat([(hw-lw).astype(float), (hw-cs).abs(), (lw-cs).abs()], axis=1).max(axis=1)
+                atr_val = tr.mean()
+                if close > 0:
+                    atr_stop = 2.0 * atr_val / close
+                    effective_stop = max(stop_loss_pct, atr_stop)
+
             # v3 修复：统一 P&L 计算模式
             #   基础 P&L 不含成本，成本通过 cash 变动独立体现
-            if position == 1 and close < entry_price * (1 - stop_loss_pct):
+            if position == 1 and close < entry_price * (1 - effective_stop):
                 # 多头止损
                 base_pnl = shares * (close - entry_price)
                 exit_cost = shares * close * cost_rate
@@ -530,7 +508,7 @@ class BacktestRunner:
                 position = 0
                 shares = 0
 
-            elif position == -1 and close > entry_price * (1 + stop_loss_pct):
+            elif position == -1 and close > entry_price * (1 + effective_stop):
                 # 空头止损
                 base_pnl = shares * (entry_price - close)
                 exit_cost = shares * close * cost_rate
@@ -686,7 +664,7 @@ class BacktestRunner:
         warnings.warn(
             "Using legacy backtest engine (validate_only mode). "
             "PyBroker is recommended as the primary engine. "
-            "See core/broker_adapter.py for usage.",
+            "See core/engine/backtest_runner.py for usage.",
             FutureWarning,
             stacklevel=2,
         )
@@ -718,7 +696,7 @@ class BacktestRunner:
             strategy_results[name] = result
 
         # 计算组合净值
-        weights = self.config.strategy_weights
+        weights = self.config.factor_weights
         if not weights:
             weights = {name: 1.0 / len(strategies) for name in strategies}
 
@@ -873,7 +851,6 @@ class BacktestRunner:
         # 初始化：每个策略分配 initial_cash * weight
         strategy_cash: Dict[str, float] = {}
         strategy_shares_pct: Dict[str, float] = {}
-        total_cash = self.config.initial_cash
         for name in eq_curves:
             alloc = self.config.initial_cash * weights.get(name, 0)
             strategy_cash[name] = alloc
@@ -882,7 +859,6 @@ class BacktestRunner:
             strategy_shares_pct[name] = alloc / first_eq if first_eq > 0 else 0
 
         portfolio_data = []
-        prev_date_idx = -1
 
         for date_idx, date in enumerate(all_dates):
             # 计算组合总权益
@@ -923,13 +899,13 @@ class BacktestRunner:
 
         lines = [
             "# 组合交易策略系统 - 回测报告",
-            f"",
+            "",
             f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"",
-            f"## 组合绩效",
-            f"",
-            f"| 指标 | 值 |",
-            f"|------|-----|",
+            "",
+            "## 组合绩效",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
         ]
 
         for key, val in result.portfolio_metrics.items():

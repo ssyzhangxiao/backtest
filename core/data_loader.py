@@ -100,7 +100,10 @@ _DAILY_SECONDS = 86400  # 86400 秒 = 1 天，用于 TqSdk K 线日线周期
 _MAX_CONTRACTS_PER_PRODUCT = 20  # 每个品种最多下载的合约数
 
 
-class DataLoader:
+from core.data_provider import DataProvider
+
+
+class DataLoader(DataProvider):
     """
     统一数据加载器。
 
@@ -129,12 +132,12 @@ class DataLoader:
         load_errors: 加载失败的文件及错误信息列表
     """
 
-    PYBROKER_COLUMNS = [
+    PYBROKER_COLUMNS = (
         "date", "symbol", "open", "high", "low", "close",
         "volume", "open_interest",
         "is_dominant", "dominant_symbol", "prev_dominant_symbol",
         "rollover_flag", "product",
-    ]
+    )
 
     CONTRACT_REQUIRED_COLUMNS = [
         "date",
@@ -161,8 +164,8 @@ class DataLoader:
         self,
         data_source: str = "tqsdk",
         data_dir: Optional[str] = None,
-        phone: Optional[str] = "13600198250",
-        password: Optional[str] = "lg123456789",
+        phone: Optional[str] = None,
+        password: Optional[str] = None,
         symbols: Optional[List[str]] = None,
         data_length: int = 2000,
         enable_cache: bool = True,
@@ -236,11 +239,11 @@ class DataLoader:
 
         try:
             with open(cache_path, "rb") as f:
-                data = pickle.load(f)
-            print(f"  [缓存] 加载 {symbol} 数据成功")
+                data = pickle.load(f, restrict=False)
+            _logger.info("缓存加载成功: %s", symbol)
             return data
         except Exception as e:
-            warnings.warn(f"缓存加载失败: {e}")
+            _logger.warning("缓存加载失败: %s, 错误: %s", symbol, e)
             return None
 
     def _save_to_cache(self, symbol: str, data: pd.DataFrame):
@@ -251,28 +254,40 @@ class DataLoader:
         cache_path = self._get_cache_path(symbol)
         try:
             with open(cache_path, "wb") as f:
-                pickle.dump(data, f)
-            print(f"  [缓存] 保存 {symbol} 数据成功")
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            _logger.info("缓存保存成功: %s", symbol)
         except Exception as e:
-            warnings.warn(f"缓存保存失败: {e}")
+            _logger.warning("缓存保存失败: %s, 错误: %s", symbol, e)
 
     def _create_api(self):
         """创建 TqSdk API 连接（带重连机制）"""
         from tqsdk import TqApi, TqAuth
 
+        if not self._phone or not self._password:
+            raise ValueError("TqSdk 认证信息缺失：请提供 phone 和 password")
+
         for attempt in range(self._max_reconnect_attempts + 1):
             try:
-                print(f"  [连接] 尝试连接 TqSdk ({attempt + 1}/{self._max_reconnect_attempts + 1})...")
+                _logger.info(
+                    "连接 TqSdk (%d/%d)...",
+                    attempt + 1, self._max_reconnect_attempts + 1,
+                )
                 self._api = TqApi(auth=TqAuth(self._phone, self._password))
-                print("  [连接] TqSdk 连接成功")
+                _logger.info("TqSdk 连接成功")
                 return
+            except PermissionError as e:
+                raise PermissionError(
+                    f"TqSdk 认证失败，请检查账号密码: {e}"
+                ) from e
             except Exception as e:
                 if attempt < self._max_reconnect_attempts:
                     delay = self._reconnect_delay_seconds * (2 ** attempt)
-                    print(f"  [连接] 连接失败: {e}，{delay} 秒后重试...")
+                    _logger.warning("连接失败: %s, %.1f 秒后重试...", e, delay)
                     time.sleep(delay)
                 else:
-                    raise RuntimeError(f"连接 TqSdk 失败（尝试 {self._max_reconnect_attempts + 1} 次）: {e}") from e
+                    raise RuntimeError(
+                        f"连接 TqSdk 失败（尝试 {self._max_reconnect_attempts + 1} 次）: {e}"
+                    ) from e
 
     def _close_api(self):
         """关闭 API 连接"""
@@ -280,9 +295,9 @@ class DataLoader:
             try:
                 self._api.close()
                 self._api = None
-                print("  [连接] TqSdk 连接已关闭")
+                _logger.info("TqSdk 连接已关闭")
             except Exception as e:
-                warnings.warn(f"关闭连接失败: {e}")
+                _logger.warning("关闭连接失败: %s", e)
 
     @staticmethod
     def _parse_contract_month(symbol: str) -> Tuple[int, int]:
@@ -291,7 +306,10 @@ class DataLoader:
         if m:
             yy = int(m.group(1))
             mm = int(m.group(2))
-            year = 2000 + yy if yy < 50 else 1900 + yy
+            # 动态阈值：以当前年份+10为界，避免固定 50 在 2050 年后出错
+            current_yy = pd.Timestamp.now().year % 100
+            cutoff = (current_yy + 10) % 100
+            year = 2000 + yy if yy <= cutoff else 1900 + yy
             return year, mm
         return 2099, 13
 
@@ -317,7 +335,7 @@ class DataLoader:
 
         # 按到期月份排序，取最近的 N 个合约
         sorted_contracts = sorted(quotes, key=self._parse_contract_month)[:_MAX_CONTRACTS_PER_PRODUCT]
-        print(f"  {product_symbol}: 找到 {len(sorted_contracts)} 个合约")
+        _logger.info("%s: 找到 %d 个合约", product_symbol, len(sorted_contracts))
 
         contract_dfs = []
         for ins_id in sorted_contracts:
@@ -358,7 +376,7 @@ class DataLoader:
             raise RuntimeError(f"{product_symbol} 没有可用数据")
 
         product_df = pd.concat(contract_dfs, ignore_index=True)
-        print(f"  {product_symbol}: 加载 {len(product_df)} 条记录")
+        _logger.info("%s: 加载 %d 条记录", product_symbol, len(product_df))
         return product_df
 
     def load_from_tqsdk(self, show_progress: bool = True):
@@ -368,12 +386,12 @@ class DataLoader:
         if not self._phone or not self._password:
             raise ValueError(
                 "load_from_tqsdk() 需要提供 phone 和 password，"
-                "请先设置 TqSdk 账号"
+                "请在初始化 DataLoader 时传入"
             )
 
-        print("=" * 60)
-        print("  TqSdk 数据加载")
-        print("=" * 60)
+        _logger.info("=" * 60)
+        _logger.info("TqSdk 数据加载")
+        _logger.info("=" * 60)
 
         all_dfs = []
         self.load_errors = []
@@ -428,7 +446,7 @@ class DataLoader:
                 )
             )
 
-        print(f"\n  [汇总] 共加载 {len(self.all_contracts)} 行数据")
+        _logger.info("汇总: 共加载 %d 行数据", len(self.all_contracts))
         return self.all_contracts
 
     # ------------------------------------------------------------------
@@ -506,57 +524,51 @@ class DataLoader:
             _logger.warning("加载 CSV 文件失败: %s", e)
             return None
 
-    def load_csv_files(self, file_pattern: str = "*.csv") -> pd.DataFrame:
+    def _try_load_csv_file(self, filepath: str) -> Optional[pd.DataFrame]:
         """
-        读取目录下所有匹配的CSV文件并合并。
+        尝试加载单个CSV文件并转为标准格式。
+
+        根据检测到的格式（contract/product）自动处理，
+        加载失败将错误记录到 self.load_errors。
+
+        Returns:
+            标准格式的 DataFrame，加载失败返回 None
         """
-        if not self.data_dir or not os.path.isdir(self.data_dir):
-            raise FileNotFoundError(f"数据目录不存在: {self.data_dir}")
+        try:
+            df = pd.read_csv(filepath)
+            if df.empty:
+                self.load_errors.append({"file": filepath, "error": "文件为空"})
+                return None
 
-        pattern = os.path.join(self.data_dir, file_pattern)
-        files = sorted(glob.glob(pattern))
+            fmt = self._detect_format_from_df(df)
+            if self.data_mode is None:
+                self.data_mode = fmt
 
-        if not files:
-            raise FileNotFoundError(
-                f"未找到匹配 '{file_pattern}' 的CSV文件: {self.data_dir}"
-            )
+            if fmt == "contract":
+                missing = set(self.CONTRACT_REQUIRED_COLUMNS) - set(df.columns)
+                if missing:
+                    self.load_errors.append(
+                        {"file": filepath, "error": f"缺少必要列: {missing}"}
+                    )
+                    return None
+                return df
+            else:
+                loaded = self._load_product_csv(filepath, df)
+                if loaded is not None and not loaded.empty:
+                    return loaded
+                self.load_errors.append(
+                    {"file": filepath, "error": "品种格式转换失败"}
+                )
+                return None
+        except Exception as e:
+            self.load_errors.append({"file": filepath, "error": str(e)})
+            return None
 
-        self.load_errors = []
-        first_format = None
-        dfs = []
-
-        for f in files:
-            try:
-                df = pd.read_csv(f)
-                if df.empty:
-                    self.load_errors.append({"file": f, "error": "文件为空"})
-                    continue
-
-                fmt = self._detect_format_from_df(df)
-                if first_format is None:
-                    first_format = fmt
-                    self.data_mode = first_format
-
-                if fmt == "contract":
-                    missing = set(self.CONTRACT_REQUIRED_COLUMNS) - set(df.columns)
-                    if missing:
-                        self.load_errors.append(
-                            {"file": f, "error": f"缺少必要列: {missing}"}
-                        )
-                        continue
-                    dfs.append(df)
-                else:
-                    loaded = self._load_product_csv(f, df)
-                    if loaded is not None and not loaded.empty:
-                        dfs.append(loaded)
-                    else:
-                        self.load_errors.append(
-                            {"file": f, "error": "品种格式转换失败"}
-                        )
-            except Exception as e:
-                self.load_errors.append({"file": f, "error": str(e)})
-                continue
-
+    def _finalize_loaded_dfs(self, dfs: list, file_count: int) -> pd.DataFrame:
+        """
+        对已加载的 DataFrame 列表进行后处理：
+        合并、日期转换、排序、添加 product 列、赋值 self.all_contracts。
+        """
         if not dfs:
             error_summary = "\n".join(
                 f"  - {e['file']}: {e['error']}" for e in self.load_errors
@@ -565,7 +577,7 @@ class DataLoader:
 
         if self.load_errors:
             warnings.warn(
-                f"部分文件加载失败 ({len(self.load_errors)}/{len(files)}): "
+                f"部分文件加载失败 ({len(self.load_errors)}/{file_count}): "
                 + "; ".join(f"{e['file']}: {e['error']}" for e in self.load_errors)
             )
 
@@ -588,6 +600,32 @@ class DataLoader:
         self.all_contracts = combined
         return combined
 
+    def load_csv_files(self, file_pattern: str = "*.csv") -> pd.DataFrame:
+        """
+        读取目录下所有匹配的CSV文件并合并。
+        """
+        if not self.data_dir or not os.path.isdir(self.data_dir):
+            raise FileNotFoundError(f"数据目录不存在: {self.data_dir}")
+
+        pattern = os.path.join(self.data_dir, file_pattern)
+        files = sorted(glob.glob(pattern))
+
+        if not files:
+            raise FileNotFoundError(
+                f"未找到匹配 '{file_pattern}' 的CSV文件: {self.data_dir}"
+            )
+
+        self.load_errors = []
+        self.data_mode = None
+        dfs = []
+
+        for f in files:
+            loaded = self._try_load_csv_file(f)
+            if loaded is not None:
+                dfs.append(loaded)
+
+        return self._finalize_loaded_dfs(dfs, len(files))
+
     def load_csv_files_by_paths(self, file_paths: list) -> pd.DataFrame:
         """
         按指定文件路径加载 CSV 文件（仅加载目标品种）。
@@ -596,50 +634,15 @@ class DataLoader:
             file_paths: CSV 文件路径列表
         """
         self.load_errors = []
-        first_format = None
+        self.data_mode = None
         dfs = []
 
         for f in file_paths:
-            try:
-                df = pd.read_csv(f)
-                if df.empty:
-                    self.load_errors.append({"file": f, "error": "文件为空"})
-                    continue
+            loaded = self._try_load_csv_file(f)
+            if loaded is not None:
+                dfs.append(loaded)
 
-                fmt = self._detect_format_from_df(df)
-                if first_format is None:
-                    first_format = fmt
-                    self.data_mode = first_format
-
-                if fmt == "contract":
-                    dfs.append(df)
-                else:
-                    loaded = self._load_product_csv(f, df)
-                    if loaded is not None and not loaded.empty:
-                        dfs.append(loaded)
-            except Exception as e:
-                self.load_errors.append({"file": f, "error": str(e)})
-                continue
-
-        if not dfs:
-            raise ValueError("没有成功加载任何CSV文件")
-
-        combined = pd.concat(dfs, ignore_index=True)
-        combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
-        invalid_dates = combined["date"].isna()
-        if invalid_dates.any():
-            combined = combined[~invalid_dates]
-
-        combined = combined.sort_values(["date", "symbol"]).reset_index(drop=True)
-
-        if self.data_mode == "product":
-            combined["product"] = combined["symbol"]
-        else:
-            product_extracted = combined["symbol"].str.extract(r"^([A-Za-z]+)")[0]
-            combined["product"] = product_extracted.fillna(combined["symbol"])
-
-        self.all_contracts = combined
-        return combined
+        return self._finalize_loaded_dfs(dfs, len(file_paths))
 
     # ------------------------------------------------------------------
     # 统一加载方法
@@ -858,11 +861,6 @@ class DataLoader:
         df["spread"] = df["close"] - df["far_close"]
 
         self.full_df = df
-        # 更新 PYBROKER_COLUMNS
-        for col in ["far_symbol", "far_close", "spread"]:
-            if col not in self.PYBROKER_COLUMNS:
-                self.PYBROKER_COLUMNS.append(col)
-
         return df
 
     # ------------------------------------------------------------------
@@ -895,6 +893,10 @@ class DataLoader:
                 dominant_df.drop(columns=["exchange"], inplace=True)
 
         available = [c for c in self.PYBROKER_COLUMNS if c in dominant_df.columns]
+        # 如果有 spread 相关列也一并输出
+        for col in ("far_symbol", "far_close", "spread"):
+            if col in dominant_df.columns and col not in available:
+                available.append(col)
         result = dominant_df[available].copy()
         return result.sort_values(["date", "symbol"]).reset_index(drop=True)
 
@@ -977,3 +979,44 @@ class DataLoader:
 
     def __exit__(self, *args):
         self.close()
+
+    # ── DataProvider 接口实现 ──
+
+    def get_bars(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        timeframe: str = "1d",
+    ) -> pd.DataFrame:
+        """DataProvider 接口：获取K线数据。"""
+        df = self.get_pybroker_df()
+        mask = (df["symbol"] == symbol) & (df["date"] >= start_date) & (df["date"] <= end_date)
+        return df.loc[mask].reset_index(drop=True)
+
+    def get_universe(
+        self,
+        date: Optional[str] = None,
+        min_volume: float = 50000,
+        max_margin: float = 5000,
+    ) -> List[str]:
+        """DataProvider 接口：获取品种池。"""
+        df = self.get_pybroker_df()
+        if date:
+            df = df[df["date"] <= date]
+        symbols = df["symbol"].unique().tolist()
+        return symbols
+
+    def validate_data(
+        self,
+        df: pd.DataFrame,
+        min_rows: int = 100,
+        max_missing: float = 0.05,
+    ) -> bool:
+        """DataProvider 接口：校验数据质量。"""
+        if len(df) < min_rows:
+            raise ValueError(f"数据行数不足: {len(df)} < {min_rows}")
+        missing_rate = df.isnull().sum().sum() / (len(df) * len(df.columns))
+        if missing_rate > max_missing:
+            raise ValueError(f"缺失率过高: {missing_rate:.2%} > {max_missing:.2%}")
+        return True

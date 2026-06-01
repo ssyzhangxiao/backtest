@@ -15,11 +15,13 @@ PyBroker 主引擎回测示例。
   - 本地模式: data/ 目录下存在 CSV 期货数据文件
 """
 
-from core.engine.broker_adapter import (
+from core.engine.pybroker_data_source import (
     PyBrokerDataSource,
     create_hybrid_data_source,
-    RegimeIndicator,
-    StrategyExecutorFactory,
+)
+from core.engine.regime_indicator import RegimeIndicator
+from core.engine.strategy_executor import StrategyExecutorFactory
+from core.engine.backtest_runner import (
     PyBrokerBacktestRunner,
     WalkforwardResult,
 )
@@ -27,8 +29,8 @@ from core.config import BacktestConfig
 from core.data_loader import DataLoader
 from core.engine.runner import BacktestRunner
 from core.market_regime import MarketRegimeDetector
-from core.strategy_library import StrategyLibrary
-from core.engine.switch_engine import StrategySwitchEngine
+from core.strategy_registry import StrategyLibrary
+from core.engine.switch_engine import FactorScoringEngine
 
 
 def main():
@@ -83,7 +85,7 @@ def main():
 
     # ── 3. 创建 PyBroker 主引擎 ──
     runner = PyBrokerBacktestRunner(data_source, config)
-    runner.register_strategies(["dual_ma", "rsi", "vol_breakout"])
+    runner.register_strategies(["ts_momentum", "roll_yield", "alpha019", "alpha032"])
 
     # ── 4. 运行回测 ──
     print("\n--- 运行回测 ---")
@@ -126,7 +128,7 @@ def main():
             legacy_runner = BacktestRunner("./data", config)
             legacy_runner.load_data("*.csv")
             legacy_result = legacy_runner.run(
-                strategies=["dual_ma"],
+                strategies=["ts_momentum"],
                 start_date="2023-01-01",
                 end_date="2024-12-31",
             )

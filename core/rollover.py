@@ -316,8 +316,6 @@ class RolloverManager:
 
         dominant_per_date = df.groupby('date')['dominant_symbol'].first()
 
-        pending_rollover: Dict[str, pd.Timestamp] = {}
-
         for date_val, dominant in dominant_per_date.items():
             if dominant not in expiry_map:
                 continue
@@ -325,7 +323,6 @@ class RolloverManager:
             days_to_expiry = (expiry_map[dominant] - pd.Timestamp(date_val)).days
 
             if days_to_expiry <= 0:
-                pending_rollover.pop(dominant, None)
                 continue
 
             product = df.loc[df['symbol'] == dominant, 'product'].iloc[0]
@@ -360,9 +357,6 @@ class RolloverManager:
                 df.loc[mask_old, 'rollover_from'] = dominant
                 df.loc[mask_old, 'rollover_to'] = next_contract
                 df.loc[mask_old, 'rollover_cost'] = cost
-                pending_rollover.pop(dominant, None)
-            else:
-                pending_rollover[dominant] = pd.Timestamp(date_val)
 
         return df
 

@@ -43,12 +43,16 @@ v3 核心改进:
 """
 
 import warnings
+import logging
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
+
+_logger = logging.getLogger(__name__)
 
 
 class MarketRegime(Enum):
@@ -252,6 +256,45 @@ IC_INDICATORS = [
 EQUAL_WEIGHT = 1.0 / len(IC_INDICATORS)
 
 
+def _compute_true_range(high, low, close):
+    """计算真实波幅（模块级公共函数，供多处复用）。"""
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    if len(tr) > 0:
+        tr.iloc[0] = tr1.iloc[0]
+    return tr
+
+
+def _compute_adx_components(high, low, close, period):
+    """
+    计算ADX组件（模块级公共函数，供 MarketRegimeDetector 和 EnhancedTrendDetector 复用）。
+
+    Returns:
+        (adx, plus_di, minus_di)
+    """
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr = _compute_true_range(high, low, close)
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    atr_safe = atr.replace(0, np.nan)
+    plus_di = 100 * (
+        plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+    )
+    minus_di = 100 * (
+        minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
+    )
+    dx_denom = (plus_di + minus_di).abs()
+    dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
+    dx = pd.Series(dx, index=high.index)
+    adx = dx.rolling(window=period, min_periods=period).mean()
+    return adx, plus_di, minus_di
+
+
 class MarketRegimeDetector:
     """
     市场环境识别引擎（v3 - 无前视偏差）。
@@ -284,15 +327,8 @@ class MarketRegimeDetector:
     def _true_range(
         self, high: pd.Series, low: pd.Series, close: pd.Series
     ) -> pd.Series:
-        """计算真实波幅。"""
-        prev_close = close.shift(1)
-        tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        if len(tr) > 0:
-            tr.iloc[0] = tr1.iloc[0]
-        return tr
+        """计算真实波幅（委托模块级函数）。"""
+        return _compute_true_range(high, low, close)
 
     def compute_atr(
         self,
@@ -309,26 +345,8 @@ class MarketRegimeDetector:
     def compute_adx(
         self, high: pd.Series, low: pd.Series, close: pd.Series
     ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """计算ADX、+DI、-DI。"""
-        period = self.config.adx_period
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-        tr = self._true_range(high, low, close)
-        atr = tr.rolling(window=period, min_periods=period).mean()
-        atr_safe = atr.replace(0, np.nan)
-        plus_di = 100 * (
-            plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-        )
-        minus_di = 100 * (
-            minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-        )
-        dx_denom = (plus_di + minus_di).abs()
-        dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
-        dx = pd.Series(dx, index=high.index)
-        adx = dx.rolling(window=period, min_periods=period).mean()
-        return adx, plus_di, minus_di
+        """计算ADX、+DI、-DI（委托模块级函数）。"""
+        return _compute_adx_components(high, low, close, self.config.adx_period)
 
     def compute_rsi(self, close: pd.Series, period: Optional[int] = None) -> pd.Series:
         """计算RSI。"""
@@ -438,6 +456,7 @@ class MarketRegimeDetector:
             series: 输入序列
             lag: 是否使用shift(1)避免使用当前值。默认True，
                  严格避免当前点参与计算min/max导致的轻微泄露。
+                 启用时分子可能超出[0,1]，末尾会clip到[0,1]。
         """
         w = self.config.normalize_window
         src = series.shift(1) if lag else series
@@ -445,6 +464,7 @@ class MarketRegimeDetector:
         rolling_max = src.rolling(window=w, min_periods=1).max()
         denom = rolling_max - rolling_min
         normalized = np.where(denom > 0, (series - rolling_min) / denom, 0.5)
+        normalized = np.clip(normalized, 0.0, 1.0)
         return pd.Series(normalized, index=series.index).fillna(0.5)
 
     # ----------------------------------------------------------------
@@ -476,7 +496,7 @@ class MarketRegimeDetector:
         if "volume" in result.columns:
             volume = result["volume"]
         else:
-            warnings.warn("volume列缺失，volume_strength将设为1.0")
+            _logger.debug("volume列缺失，volume_strength将设为1.0")
             volume = pd.Series(np.ones(len(result)), index=result.index)
             result["_volume_missing"] = True
 
@@ -517,7 +537,7 @@ class MarketRegimeDetector:
         if "open_interest" in result.columns:
             result["oi_change"] = self.compute_oi_change(result["open_interest"])
         else:
-            warnings.warn("open_interest列缺失，oi_change将设为0.0")
+            _logger.debug("open_interest列缺失，oi_change将设为0.0")
             result["oi_change"] = 0.0
             result["_oi_missing"] = True
 
@@ -733,6 +753,88 @@ class MarketRegimeDetector:
     # 环境分类
     # ----------------------------------------------------------------
 
+    @staticmethod
+    def _compute_regime_raw_scores(
+        n,
+        adx_norm, dir_arr, vol_arr, comp_arr, rsi_arr, bb_arr,
+        cons_arr, bearish_arr, bullish_arr, acc_arr,
+        w_adx, w_vol, w_comp, w_rsi, w_bb, w_cons, w_acc, w_div,
+        adx_trend_arr, rsi_ob_arr, rsi_os_arr,
+        vol_high_arr, vol_low_arr, bb_upper_arr, bb_lower_arr,
+    ):
+        """
+        计算8种环境的原始分数（未归一化、未平滑）。
+
+        将分数计算独立为静态方法，便于单独测试和调整权重公式。
+        返回 (n, 8) 的 numpy 数组，列顺序为:
+        [trend_up, trend_down, range, high_vol, low_vol,
+         breakout, exhaustion_bull, exhaustion_bear]
+        """
+        # 趋势上涨
+        s_trend_up = (
+            w_adx * adx_norm * (dir_arr > 0).astype(float)
+            + w_cons * cons_arr * (dir_arr > 0).astype(float)
+            + w_div * (1 - bearish_arr)
+            + w_acc * np.clip(acc_arr, 0, None)
+        )
+
+        # 趋势下跌
+        s_trend_down = (
+            w_adx * adx_norm * (dir_arr < 0).astype(float)
+            + w_cons * cons_arr * (dir_arr < 0).astype(float)
+            + w_div * (1 - bullish_arr)
+            + w_acc * np.clip(-acc_arr, 0, None)
+        )
+
+        # 区间震荡
+        s_range = w_adx * (1 - adx_norm) + w_cons * (1 - cons_arr)
+
+        # 高波动
+        vol_above = np.clip(
+            (vol_arr - vol_high_arr) / np.maximum(1 - vol_high_arr, 0.01), 0, 1
+        )
+        s_high_vol = w_vol * vol_above + w_comp * (1 - comp_arr)
+
+        # 低波动
+        vol_below = np.clip(
+            (vol_low_arr - vol_arr) / np.maximum(vol_low_arr, 0.01), 0, 1
+        )
+        s_low_vol = w_vol * vol_below + w_comp * comp_arr
+
+        # 突破
+        s_breakout = w_comp * comp_arr * 0.6 + w_adx * adx_norm * 0.4
+
+        # 牛市衰竭
+        rsi_above_ob = np.clip(
+            (rsi_arr - rsi_ob_arr) / np.maximum(100 - rsi_ob_arr, 1.0), 0, 1
+        )
+        bb_above = np.clip(
+            (bb_arr - bb_upper_arr) / np.maximum(1 - bb_upper_arr, 0.01), 0, 1
+        )
+        s_exh_bull = w_div * bearish_arr + w_rsi * rsi_above_ob + w_bb * bb_above
+
+        # 熊市衰竭
+        rsi_below_os = np.clip(
+            (rsi_os_arr - rsi_arr) / np.maximum(rsi_os_arr, 1.0), 0, 1
+        )
+        bb_below = np.clip(
+            (bb_lower_arr - bb_arr) / np.maximum(bb_lower_arr, 0.01), 0, 1
+        )
+        s_exh_bear = w_div * bullish_arr + w_rsi * rsi_below_os + w_bb * bb_below
+
+        return np.column_stack(
+            [
+                s_trend_up,
+                s_trend_down,
+                s_range,
+                s_high_vol,
+                s_low_vol,
+                s_breakout,
+                s_exh_bull,
+                s_exh_bear,
+            ]
+        )
+
     def classify_regime(
         self,
         indicators: pd.DataFrame,
@@ -816,70 +918,27 @@ class MarketRegimeDetector:
         # --- 向量化计算各环境连续分数 ---
         adx_norm = np.clip(adx_arr / np.maximum(adx_trend_arr, 1.0), 0, 2) / 2.0
 
-        # 趋势上涨
-        s_trend_up = (
-            w_adx * adx_norm * (dir_arr > 0).astype(float)
-            + w_cons * cons_arr * (dir_arr > 0).astype(float)
-            + w_div * (1 - bearish_arr)
-            + w_acc * np.clip(acc_arr, 0, None)
-        )
-
-        # 趋势下跌
-        s_trend_down = (
-            w_adx * adx_norm * (dir_arr < 0).astype(float)
-            + w_cons * cons_arr * (dir_arr < 0).astype(float)
-            + w_div * (1 - bullish_arr)
-            + w_acc * np.clip(-acc_arr, 0, None)
-        )
-
-        # 区间震荡
-        s_range = w_adx * (1 - adx_norm) + w_cons * (1 - cons_arr)
-
-        # 高波动
-        vol_above = np.clip(
-            (vol_arr - vol_high_arr) / np.maximum(1 - vol_high_arr, 0.01), 0, 1
-        )
-        s_high_vol = w_vol * vol_above + w_comp * (1 - comp_arr)
-
-        # 低波动
-        vol_below = np.clip(
-            (vol_low_arr - vol_arr) / np.maximum(vol_low_arr, 0.01), 0, 1
-        )
-        s_low_vol = w_vol * vol_below + w_comp * comp_arr
-
-        # 突破
-        s_breakout = w_comp * comp_arr * 0.6 + w_adx * adx_norm * 0.4
-
-        # 牛市衰竭
-        rsi_above_ob = np.clip(
-            (rsi_arr - rsi_ob_arr) / np.maximum(100 - rsi_ob_arr, 1.0), 0, 1
-        )
-        bb_above = np.clip(
-            (bb_arr - bb_upper_arr) / np.maximum(1 - bb_upper_arr, 0.01), 0, 1
-        )
-        s_exh_bull = w_div * bearish_arr + w_rsi * rsi_above_ob + w_bb * bb_above
-
-        # 熊市衰竭
-        rsi_below_os = np.clip(
-            (rsi_os_arr - rsi_arr) / np.maximum(rsi_os_arr, 1.0), 0, 1
-        )
-        bb_below = np.clip(
-            (bb_lower_arr - bb_arr) / np.maximum(bb_lower_arr, 0.01), 0, 1
-        )
-        s_exh_bear = w_div * bullish_arr + w_rsi * rsi_below_os + w_bb * bb_below
-
-        # 归一化各分数到[0,1]
-        all_raw = np.column_stack(
-            [
-                s_trend_up,
-                s_trend_down,
-                s_range,
-                s_high_vol,
-                s_low_vol,
-                s_breakout,
-                s_exh_bull,
-                s_exh_bear,
-            ]
+        all_raw = self._compute_regime_raw_scores(
+            n=n,
+            adx_norm=adx_norm,
+            dir_arr=dir_arr,
+            vol_arr=vol_arr,
+            comp_arr=comp_arr,
+            rsi_arr=rsi_arr,
+            bb_arr=bb_arr,
+            cons_arr=cons_arr,
+            bearish_arr=bearish_arr,
+            bullish_arr=bullish_arr,
+            acc_arr=acc_arr,
+            w_adx=w_adx, w_vol=w_vol, w_comp=w_comp, w_rsi=w_rsi,
+            w_bb=w_bb, w_cons=w_cons, w_acc=w_acc, w_div=w_div,
+            adx_trend_arr=adx_trend_arr,
+            rsi_ob_arr=rsi_ob_arr,
+            rsi_os_arr=rsi_os_arr,
+            vol_high_arr=vol_high_arr,
+            vol_low_arr=vol_low_arr,
+            bb_upper_arr=bb_upper_arr,
+            bb_lower_arr=bb_lower_arr,
         )
         row_max = np.maximum(all_raw.max(axis=1), 1e-8)
         all_norm = all_raw / row_max[:, np.newaxis]
@@ -897,21 +956,25 @@ class MarketRegimeDetector:
         regimes_raw = [regime_values[i] for i in best_idx]
 
         # ── 精简为4种核心环境类型 ──
-        # trend_up, trend_down, breakout → trend（强趋势）
-        # low_volatility → weak_trend（弱趋势）
-        # range_bound, exhaustion_bull, exhaustion_bear → range（震荡）
-        # high_volatility → high_vol（高波动）
-        REGIME_SIMPLIFY = {
+        # trend_up, trend_down, breakout → trend_up/trend_down（按方向）
+        # low_volatility → low_volatility（保留低波动）
+        # range_bound, exhaustion_bull, exhaustion_bear → range_bound（震荡）
+        # high_volatility → high_volatility（高波动）
+        STATIC_SIMPLIFY = {
             "trend_up": "trend_up",
             "trend_down": "trend_down",
-            "breakout": "trend_up",  # 突破归入趋势
-            "low_volatility": "low_volatility",  # 保留低波动
+            "low_volatility": "low_volatility",
             "range_bound": "range_bound",
-            "exhaustion_bull": "range_bound",  # 牛市衰竭归入震荡
-            "exhaustion_bear": "range_bound",  # 熊市衰竭归入震荡
+            "exhaustion_bull": "range_bound",
+            "exhaustion_bear": "range_bound",
             "high_volatility": "high_volatility",
         }
-        regimes = [REGIME_SIMPLIFY.get(r, r) for r in regimes_raw]
+        regimes = []
+        for i, r in enumerate(regimes_raw):
+            if r == "breakout":
+                regimes.append("trend_up" if dir_arr[i] > 0 else "trend_down")
+            else:
+                regimes.append(STATIC_SIMPLIFY.get(r, r))
 
         # 置信度 = 最高分 - 第二高分（基于平滑分数）
         sorted_scores = np.sort(smoothed_arr, axis=1)
@@ -1067,20 +1130,34 @@ class MarketRegimeDetector:
 
         # ── 滚动窗口阈值更新 ──
         # 每 rolling_update_freq 个 bar 使用过去 rolling_window 个 bar 重新计算阈值
-        # 其余 bar 使用上一次计算的阈值（或拟合终值作为初始值）
+        # 仅在当前段区间生效，段间线性插值平滑过渡，避免阶梯突变
         thresholds = {}
         for key, val in self._fitted_threshold_values.items():
             thresholds[key] = np.full(n, val)
 
         if n > cfg.rolling_window:
-            for update_idx in range(cfg.rolling_window, n, cfg.rolling_update_freq):
+            update_idxs = list(range(cfg.rolling_window, n, cfg.rolling_update_freq))
+            prev_val_map = {key: thresholds[key][0] for key in thresholds}
+            prev_idx = 0
+            for update_idx in update_idxs:
                 window_start = max(0, update_idx - cfg.rolling_window)
                 window_indicators = indicators.iloc[window_start:update_idx]
                 window_thresholds = self.compute_dynamic_thresholds(window_indicators)
-                for key, series in window_thresholds.items():
-                    if key in thresholds and len(series.dropna()) > 0:
-                        last_val = float(series.dropna().iloc[-1])
-                        thresholds[key][update_idx:] = last_val
+                for key in thresholds:
+                    if key in window_thresholds and len(window_thresholds[key].dropna()) > 0:
+                        cur_val = float(window_thresholds[key].dropna().iloc[-1])
+                    else:
+                        cur_val = prev_val_map[key]
+                    seg_len = update_idx - prev_idx
+                    thresholds[key][prev_idx:update_idx] = np.linspace(
+                        prev_val_map[key], cur_val, seg_len
+                    )
+                    prev_val_map[key] = cur_val
+                prev_idx = update_idx
+            # 最后一段维持末值
+            for key in thresholds:
+                if prev_idx < n:
+                    thresholds[key][prev_idx:] = prev_val_map[key]
 
         for key in thresholds:
             thresholds[key] = pd.Series(thresholds[key], index=indicators.index)
@@ -1479,16 +1556,13 @@ class MarketRegimeDetector:
     def get_recommended_strategies(self, regime: MarketRegime) -> List[str]:
         """根据市场环境推荐策略。"""
         mapping = {
-            MarketRegime.TREND_UP: ["dual_ma", "vol_breakout"],
-            MarketRegime.TREND_DOWN: ["dual_ma", "vol_breakout"],
-            MarketRegime.RANGE_BOUND: ["rsi", "term_structure"],
-            MarketRegime.HIGH_VOLATILITY: ["term_structure"],
-            MarketRegime.LOW_VOLATILITY: ["vol_breakout", "dual_ma"],
-            MarketRegime.BREAKOUT: ["vol_breakout", "dual_ma"],
-            MarketRegime.EXHAUSTION_BULL: ["term_structure", "rsi"],
-            MarketRegime.EXHAUSTION_BEAR: ["dual_ma", "vol_breakout"],
+            MarketRegime.TREND_UP: ["ts_momentum", "alpha019"],
+            MarketRegime.TREND_DOWN: ["ts_momentum", "alpha019"],
+            MarketRegime.RANGE_BOUND: ["roll_yield", "alpha032"],
+            MarketRegime.HIGH_VOLATILITY: ["roll_yield"],
+            MarketRegime.LOW_VOLATILITY: ["alpha032", "ts_momentum"],
         }
-        return mapping.get(regime, ["dual_ma"])
+        return mapping.get(regime, ["ts_momentum"])
 
 
 class EnhancedTrendDetector:
@@ -1616,32 +1690,7 @@ class EnhancedTrendDetector:
         包含 ADX、+DI、-DI、趋势强度判断。
         """
         period = self.config.adx_period
-
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-
-        tr1 = high - low
-        tr2 = (high - close.shift(1)).abs()
-        tr3 = (low - close.shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        if len(tr) > 0:
-            tr.iloc[0] = tr1.iloc[0]
-
-        atr = tr.rolling(window=period, min_periods=period).mean()
-        atr_safe = atr.replace(0, np.nan)
-        plus_di = 100 * (
-            plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-        )
-        minus_di = 100 * (
-            minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-        )
-
-        dx_denom = (plus_di + minus_di).abs()
-        dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
-        dx = pd.Series(dx, index=high.index)
-        adx = dx.rolling(window=period, min_periods=period).mean()
+        adx, plus_di, minus_di = _compute_adx_components(high, low, close, period)
 
         strong_trend = adx >= self.config.adx_strong_threshold
         weak_trend = (adx >= self.config.adx_trend_threshold) & (
@@ -1922,3 +1971,14 @@ class EnhancedTrendDetector:
             "trend_distribution": trend_counts.to_dict(),
             "average_confidence": avg_confidence,
         }
+
+
+# ================================================================
+# v3 环境感知参数管理器与运行器 — 已迁移至独立模块
+# ================================================================
+
+# V3RegimeParamManager 已迁移至 core.param_manager
+from core.param_manager import V3RegimeParamManager, REGIME_TO_LEGACY
+
+# V3RegimeAwareRunner 已迁移至 scripts.analysis_runner（仅手动分析用）
+# 如需使用：from scripts.analysis_runner import V3RegimeAwareRunner
