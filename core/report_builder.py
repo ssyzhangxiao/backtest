@@ -43,6 +43,7 @@ RISK_FREE_RATE = 0.02
 # 数据读取与计算工具
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _read_csv(path: Path) -> List[Dict[str, str]]:
     """读取 CSV 文件返回字典列表，失败返回空列表。"""
     try:
@@ -64,11 +65,10 @@ def _read_equity_csv(path: Path) -> Tuple[List[str], List[float]]:
 
 
 def _safe_float(val: Any) -> float:
-    """安全转 float。"""
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return 0.0
+    """安全转 float，委托 runner.common.utils.safe_float。"""
+    from runner.common.utils import safe_float
+
+    return safe_float(val)
 
 
 def _annualized_return(total_return_pct: float, years: float) -> float:
@@ -137,7 +137,7 @@ def _rolling_sharpe(daily_rets: List[float], window: int = 36) -> List[float]:
     window_days = window * 21
     result = []
     for i in range(window_days, len(daily_rets) + 1):
-        slice_rets = daily_rets[i - window_days:i]
+        slice_rets = daily_rets[i - window_days : i]
         result.append(_compute_sharpe(slice_rets))
     return result
 
@@ -147,7 +147,7 @@ def _rolling_max_drawdown(equity: List[float], window_months: int = 12) -> List[
     window_days = window_months * 21
     result = []
     for i in range(window_days, len(equity) + 1):
-        slice_eq = equity[i - window_days:i]
+        slice_eq = equity[i - window_days : i]
         peak = slice_eq[0]
         max_dd = 0.0
         for v in slice_eq:
@@ -179,7 +179,7 @@ def _extract_monthly_returns(dates: List[str], equity: List[float]) -> Dict[str,
 
 
 def _correlation_matrix(
-    strategy_data: Dict[str, Dict[str, Any]]
+    strategy_data: Dict[str, Dict[str, Any]],
 ) -> Tuple[List[str], List[List[float]]]:
     """计算策略间日收益率相关性矩阵。"""
     all_daily_rets = {}
@@ -226,6 +226,7 @@ def _calc_pl_ratio(metrics: Dict[str, Any]) -> float:
 # 数据收集（自动扫描输出目录）
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _analyze_rebalance_decisions(
     switch_log: pd.DataFrame, equity_curve: pd.DataFrame
 ) -> Dict[str, Any]:
@@ -259,18 +260,18 @@ def _analyze_rebalance_decisions(
             direction = row.get("方向", "")
             composite_score = row.get("综合得分", 0.0)
             position_pct = row.get("仓位比例", 0.0)
-            
+
             # 寻找决策日期后的净值变化（下一个调仓日或固定窗口）
             if decision_date in equity_curve.index:
                 start_idx = equity_curve.index.get_loc(decision_date)
                 # 查看之后5个交易日的表现
                 end_idx = min(start_idx + 5, len(equity_curve) - 1)
-                
+
                 start_equity = equity_curve.iloc[start_idx]["equity"]
                 end_equity = equity_curve.iloc[end_idx]["equity"]
-                
+
                 pct_return = ((end_equity - start_equity) / start_equity) * 100
-                
+
                 # 根据方向判断是否盈利
                 is_winning = False
                 if direction == "多" and pct_return > 0:
@@ -280,20 +281,22 @@ def _analyze_rebalance_decisions(
                 elif direction == "平":
                     # 平仓决策，不计算盈亏
                     pass
-                
+
                 if is_winning:
                     winning_decisions += 1
-                
+
                 total_return += pct_return
-                
-                decisions.append({
-                    "date": decision_date.strftime("%Y-%m-%d"),
-                    "direction": direction,
-                    "composite_score": round(float(composite_score), 4),
-                    "position_pct": round(float(position_pct), 4),
-                    "return_5d": round(pct_return, 2),
-                    "winning": is_winning,
-                })
+
+                decisions.append(
+                    {
+                        "date": decision_date.strftime("%Y-%m-%d"),
+                        "direction": direction,
+                        "composite_score": round(float(composite_score), 4),
+                        "position_pct": round(float(position_pct), 4),
+                        "return_5d": round(pct_return, 2),
+                        "winning": is_winning,
+                    }
+                )
         except Exception as e:
             logger.debug(f"分析调仓决策时出错: {e}")
             continue
@@ -334,7 +337,10 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
 
     # 有效的策略实验名称（只有这些才出现在报告中）
     valid_experiments = {
-        "E1_ts_momentum", "E1_roll_yield", "E1_alpha019", "E1_alpha032",
+        "E1_ts_momentum",
+        "E1_roll_yield",
+        "E1_alpha019",
+        "E1_alpha032",
         "E2_Fusion",
     }
 
@@ -375,12 +381,12 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
             parts = stem.replace("_switch_log_", "|").split("|")
             if len(parts) < 2:
                 continue
-            
+
             exp_name = parts[0].upper()
             symbol = parts[1].replace("_", ".")
-            
+
             switch_log = pd.read_csv(switch_log_file)
-            
+
             # 找到对应的净值曲线
             equity_pattern = f"{parts[0]}_equity_{parts[1]}.csv"
             equity_file = output_dir / equity_pattern
@@ -465,13 +471,17 @@ def collect_from_validation(output_dir: Path) -> Dict[str, Any]:
     # 从 E7 文件读取净值曲线
     is_dates, is_equity = _read_equity_csv(output_dir / "e7_equity_in_sample.csv")
     if not is_equity:
-        is_dates, is_equity = _read_equity_csv(output_dir.parent / "e7_equity_in_sample.csv")
+        is_dates, is_equity = _read_equity_csv(
+            output_dir.parent / "e7_equity_in_sample.csv"
+        )
         if not is_equity:
             missing_files.append("e7_equity_in_sample.csv")
 
     os_dates, os_equity = _read_equity_csv(output_dir / "e7_equity_out_sample.csv")
     if not os_equity:
-        os_dates, os_equity = _read_equity_csv(output_dir.parent / "e7_equity_out_sample.csv")
+        os_dates, os_equity = _read_equity_csv(
+            output_dir.parent / "e7_equity_out_sample.csv"
+        )
         if not os_equity:
             missing_files.append("e7_equity_out_sample.csv")
 
@@ -546,6 +556,7 @@ def collect_from_validation(output_dir: Path) -> Dict[str, Any]:
 # HTML 模板（自包含，无需外部模板文件）
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _build_html_report(report_data: Dict[str, Any]) -> str:
     """根据报告数据构建完整 HTML 字符串。"""
     ctx = {**report_data}
@@ -559,6 +570,7 @@ def _build_html_report(report_data: Dict[str, Any]) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # 主入口：生成报告
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def generate_report(
     output_dir: Optional[str] = None,
@@ -601,7 +613,9 @@ def generate_report(
         logger.info("报告生成: 从输出目录自动扫描数据...")
         collected = collect_from_directory(out_path)
         strategies_data = collected["strategies"]
-        rebalance_analysis = rebalance_analysis or collected.get("rebalance_analysis", {})
+        rebalance_analysis = rebalance_analysis or collected.get(
+            "rebalance_analysis", {}
+        )
 
         # 标准扫描无结果，尝试父目录 (如果 out_path 是 validation 子目录)
         if not strategies_data:
@@ -611,7 +625,9 @@ def generate_report(
                 logger.info("尝试从父目录扫描标准数据...")
                 collected = collect_from_directory(parent_dir)
                 strategies_data = collected["strategies"]
-                rebalance_analysis = rebalance_analysis or collected.get("rebalance_analysis", {})
+                rebalance_analysis = rebalance_analysis or collected.get(
+                    "rebalance_analysis", {}
+                )
 
         # 仍无结果，降级为验证任务文件数据
         if not strategies_data:
@@ -619,7 +635,9 @@ def generate_report(
             validation_dir = out_path
             if not list(validation_dir.glob("task1_grid_*.csv")):
                 validation_dir = out_path / "validation"
-                if not validation_dir.exists() or not list(validation_dir.glob("task1_grid_*.csv")):
+                if not validation_dir.exists() or not list(
+                    validation_dir.glob("task1_grid_*.csv")
+                ):
                     validation_dir = out_path
             collected = collect_from_validation(validation_dir)
             strategies_data = collected["strategies"]
@@ -628,7 +646,9 @@ def generate_report(
             if missing:
                 missing_files_note = f"缺失文件: {', '.join(missing)}"
 
-        out_sample_metrics = out_sample_metrics or collected.get("out_sample_metrics", {})
+        out_sample_metrics = out_sample_metrics or collected.get(
+            "out_sample_metrics", {}
+        )
         in_sample_dates = in_sample_dates or collected.get("in_sample_dates", [])
         in_sample_equity = in_sample_equity or collected.get("in_sample_equity", [])
         out_sample_dates = out_sample_dates or collected.get("out_sample_dates", [])
@@ -707,7 +727,12 @@ def generate_report(
     # ── 选最佳策略（正收益优先） ──
     best_exp = strategy_names[0]
     for name in strategy_names:
-        if _safe_float(strategies_data[name].get("metrics", {}).get("total_return_pct", 0)) > 0:
+        if (
+            _safe_float(
+                strategies_data[name].get("metrics", {}).get("total_return_pct", 0)
+            )
+            > 0
+        ):
             best_exp = name
             break
 
@@ -719,15 +744,41 @@ def generate_report(
 
     # ── KPI 卡片 HTML ──
     kpi_items = [
-        ("年化收益率", f"{best_metrics.get('ann_return', 0):+.2f}%", best_metrics.get("ann_return", 0)),
-        ("夏普比率", f"{_safe_float(best_metrics.get('sharpe', 0)):.4f}", _safe_float(best_metrics.get("sharpe", 0))),
-        ("最大回撤", f"{_safe_float(best_metrics.get('max_drawdown_pct', 0)):.2f}%", _safe_float(best_metrics.get("max_drawdown_pct", 0))),
-        ("卡玛比率", f"{best_metrics.get('calmar', 0):.4f}", best_metrics.get("calmar", 0)),
-        ("胜率", f"{_safe_float(best_metrics.get('win_rate', 0)):.1f}%", _safe_float(best_metrics.get("win_rate", 0))),
+        (
+            "年化收益率",
+            f"{best_metrics.get('ann_return', 0):+.2f}%",
+            best_metrics.get("ann_return", 0),
+        ),
+        (
+            "夏普比率",
+            f"{_safe_float(best_metrics.get('sharpe', 0)):.4f}",
+            _safe_float(best_metrics.get("sharpe", 0)),
+        ),
+        (
+            "最大回撤",
+            f"{_safe_float(best_metrics.get('max_drawdown_pct', 0)):.2f}%",
+            _safe_float(best_metrics.get("max_drawdown_pct", 0)),
+        ),
+        (
+            "卡玛比率",
+            f"{best_metrics.get('calmar', 0):.4f}",
+            best_metrics.get("calmar", 0),
+        ),
+        (
+            "胜率",
+            f"{_safe_float(best_metrics.get('win_rate', 0)):.1f}%",
+            _safe_float(best_metrics.get("win_rate", 0)),
+        ),
         ("盈亏比", f"{_calc_pl_ratio(best_metrics):.2f}", _calc_pl_ratio(best_metrics)),
-        ("总交易次数", f"{int(_safe_float(best_metrics.get('trade_count', 0)))}", _safe_float(best_metrics.get("trade_count", 0))),
+        (
+            "总交易次数",
+            f"{int(_safe_float(best_metrics.get('trade_count', 0)))}",
+            _safe_float(best_metrics.get("trade_count", 0)),
+        ),
     ]
-    kpi_cards_html = "\n".join(_build_kpi_card(label, val, num) for label, val, num in kpi_items)
+    kpi_cards_html = "\n".join(
+        _build_kpi_card(label, val, num) for label, val, num in kpi_items
+    )
 
     # ── 策略对比表格 ──
     strategy_table_rows = ""
@@ -752,11 +803,11 @@ def generate_report(
 
         strategy_table_rows += f"""
         <tr>
-            <td><strong>{sd['label']}</strong></td>
+            <td><strong>{sd["label"]}</strong></td>
             <td class="{_cls(tr)}">{tr:+.2f}%</td>
             <td class="{_cls(ar)}">{ar:+.2f}%</td>
             <td class="{_cls(sh, 0.1)}">{sh:.4f}</td>
-            <td class="{'negative' if dd < -0.5 else ''}">{dd:.2f}%</td>
+            <td class="{"negative" if dd < -0.5 else ""}">{dd:.2f}%</td>
             <td class="{_cls(ca, 0.1)}">{ca:.4f}</td>
             <td>{wr:.1f}%</td>
             <td>{pl:.2f}</td>
@@ -776,15 +827,19 @@ def generate_report(
             ca = _calmar_ratio(ar, dd)
             wr = _safe_float(m.get("win_rate", 0))
             tc = int(_safe_float(m.get("trade_count", 0)))
-            split_label = "样本内 (2016-2020)" if split_name == "in_sample" else "样本外 (2021-2025)"
+            split_label = (
+                "样本内 (2016-2020)"
+                if split_name == "in_sample"
+                else "样本外 (2021-2025)"
+            )
             oos_table_rows += f"""
             <tr>
                 <td><strong>{split_label}</strong></td>
-                <td class="{'positive' if tr>0 else 'negative'}">{tr:+.2f}%</td>
-                <td class="{'positive' if ar>0 else 'negative'}">{ar:+.2f}%</td>
-                <td class="{'positive' if sh>0.1 else ''}">{sh:.4f}</td>
-                <td class="{'negative' if dd < -0.5 else ''}">{dd:.2f}%</td>
-                <td class="{'positive' if ca>0.1 else ''}">{ca:.4f}</td>
+                <td class="{"positive" if tr > 0 else "negative"}">{tr:+.2f}%</td>
+                <td class="{"positive" if ar > 0 else "negative"}">{ar:+.2f}%</td>
+                <td class="{"positive" if sh > 0.1 else ""}">{sh:.4f}</td>
+                <td class="{"negative" if dd < -0.5 else ""}">{dd:.2f}%</td>
+                <td class="{"positive" if ca > 0.1 else ""}">{ca:.4f}</td>
                 <td>{wr:.1f}%</td>
                 <td>{tc}</td>
             </tr>"""
@@ -802,11 +857,65 @@ def generate_report(
             "label": sd.get("label", name),
         }
 
+    # 所有策略回撤计算
+    all_drawdowns = {}
+    for name, sd in strategies_data.items():
+        eq = sd.get("equity", [])
+        dates = sd.get("dates", [])
+        if eq:
+            dd_seq = _compute_drawdown(eq)
+            peak = eq[0]
+            max_dd_val = 0.0
+            max_dd_idx = 0
+            max_dd_start_idx = 0
+            current_peak_idx = 0
+            for i, v in enumerate(eq):
+                if v > peak:
+                    peak = v
+                    current_peak_idx = i
+                dd_val = (v - peak) / peak * 100 if peak != 0 else 0
+                if dd_val < max_dd_val:
+                    max_dd_val = dd_val
+                    max_dd_idx = i
+                    max_dd_start_idx = current_peak_idx
+            duration_days = (
+                max_dd_idx - max_dd_start_idx if max_dd_idx > max_dd_start_idx else 0
+            )
+            all_drawdowns[name] = {
+                "dates": dates,
+                "drawdown": dd_seq,
+                "max_dd_pct": round(max_dd_val, 2),
+                "max_dd_date": dates[max_dd_idx] if max_dd_idx < len(dates) else "",
+                "max_dd_start_date": dates[max_dd_start_idx]
+                if max_dd_start_idx < len(dates)
+                else "",
+                "duration_days": duration_days,
+            }
+
     # 主策略回撤
     main_dd = _compute_drawdown(best_equity)
     main_daily_rets = _compute_daily_returns(best_equity)
 
-    # 滚动指标
+    # 所有策略滚动指标
+    all_rolling_sharpe = {}
+    all_rolling_dd = {}
+    for name, sd in strategies_data.items():
+        eq = sd.get("equity", [])
+        dates = sd.get("dates", [])
+        if eq:
+            daily_rets = _compute_daily_returns(eq)
+            rs_vals = _rolling_sharpe(daily_rets, window=36)
+            rd_vals = _rolling_max_drawdown(eq, window_months=12)
+            all_rolling_sharpe[name] = {
+                "dates": dates[36 * 21 :] if len(dates) >= 36 * 21 else [],
+                "values": rs_vals,
+            }
+            all_rolling_dd[name] = {
+                "dates": dates[12 * 21 :] if len(dates) >= 12 * 21 else [],
+                "values": rd_vals,
+            }
+
+    # 滚动指标（保留best策略用于原有图表）
     rolling_sharpe_vals = _rolling_sharpe(main_daily_rets, window=36)
     rolling_dd_vals = _rolling_max_drawdown(best_equity, window_months=12)
 
@@ -822,6 +931,23 @@ def generate_report(
             if key in monthly_returns:
                 heatmap_data[yi][mi] = round(monthly_returns[key], 2)
 
+    # 所有策略月度收益率热力图
+    all_heatmaps = {}
+    for name, sd in strategies_data.items():
+        eq = sd.get("equity", [])
+        dates = sd.get("dates", [])
+        if eq and dates:
+            mr = _extract_monthly_returns(dates, eq)
+            ms = sorted(mr.keys())
+            ys = sorted(set(k[:4] for k in ms))
+            hd = [[None] * 12 for _ in range(len(ys))]
+            for yi2, year in enumerate(ys):
+                for mi2, month in enumerate(months_labels):
+                    key = f"{year}-{month}"
+                    if key in mr:
+                        hd[yi2][mi2] = round(mr[key], 2)
+            all_heatmaps[name] = {"data": hd, "years_set": ys}
+
     # 风险收益散点
     risk_return = []
     for name in strategy_names:
@@ -830,13 +956,15 @@ def generate_report(
         rets = _compute_daily_returns(eq)
         ann_ret = (sum(rets) / len(rets)) * TRADING_DAYS_PER_YEAR * 100 if rets else 0
         ann_vol = _compute_volatility(rets)
-        risk_return.append({
-            "name": sd.get("label", name),
-            "key": name,
-            "ann_return": round(ann_ret, 2),
-            "ann_volatility": round(ann_vol, 2),
-            "sharpe": _safe_float(sd.get("metrics", {}).get("sharpe", 0)),
-        })
+        risk_return.append(
+            {
+                "name": sd.get("label", name),
+                "key": name,
+                "ann_return": round(ann_ret, 2),
+                "ann_volatility": round(ann_vol, 2),
+                "sharpe": _safe_float(sd.get("metrics", {}).get("sharpe", 0)),
+            }
+        )
 
     # 相关性矩阵
     corr_names, corr_matrix = _correlation_matrix(strategies_data)
@@ -857,6 +985,109 @@ def generate_report(
             "equity": [e / first_os for e in out_sample_equity],
         }
 
+    # 所有策略样本内/外净值（按日期拆分）
+    all_is_equity = {}
+    all_os_equity = {}
+    is_start_date = in_sample_dates[0] if in_sample_dates else ""
+    is_end_date = in_sample_dates[-1] if in_sample_dates else ""
+    os_start_date = out_sample_dates[0] if out_sample_dates else ""
+    for name, sd in strategies_data.items():
+        eq = sd.get("equity", [])
+        dates = sd.get("dates", [])
+        if eq and dates:
+            is_eq, is_dt = [], []
+            os_eq, os_dt = [], []
+            for i, d in enumerate(dates):
+                if i < len(eq):
+                    if in_sample_dates and d <= is_end_date:
+                        is_eq.append(eq[i])
+                        is_dt.append(d)
+                    if out_sample_dates and d >= os_start_date:
+                        os_eq.append(eq[i])
+                        os_dt.append(d)
+            if is_eq:
+                first_is_v = is_eq[0] if is_eq[0] != 0 else 1
+                all_is_equity[name] = {
+                    "dates": is_dt,
+                    "equity": [e / first_is_v for e in is_eq],
+                }
+            if os_eq:
+                first_os_v = os_eq[0] if os_eq[0] != 0 else 1
+                all_os_equity[name] = {
+                    "dates": os_dt,
+                    "equity": [e / first_os_v for e in os_eq],
+                }
+
+    # 所有策略样本内/外绩效对比表
+    strategy_labels_map = {
+        "E1_ts_momentum": "时序动量",
+        "E1_roll_yield": "展期收益",
+        "E1_alpha019": "Alpha019",
+        "E1_alpha032": "Alpha032",
+        "E2_Fusion": "融合策略",
+        "E4_Switching": "策略切换",
+    }
+    strategy_oos_rows = ""
+    for name in strategy_names:
+        sd = strategies_data[name]
+        eq = sd.get("equity", [])
+        dates = sd.get("dates", [])
+        label = strategy_labels_map.get(name, name)
+        if not eq or not dates or not in_sample_dates or not out_sample_dates:
+            continue
+        for split_label, split_eq, split_dates in [
+            (
+                "样本内",
+                [
+                    eq[i]
+                    for i, d in enumerate(dates)
+                    if i < len(eq) and d <= is_end_date
+                ],
+                [d for d in dates if d <= is_end_date],
+            ),
+            (
+                "样本外",
+                [
+                    eq[i]
+                    for i, d in enumerate(dates)
+                    if i < len(eq) and d >= os_start_date
+                ],
+                [d for d in dates if d >= os_start_date],
+            ),
+        ]:
+            if len(split_eq) < 10:
+                continue
+            split_rets = _compute_daily_returns(split_eq)
+            tr = (
+                (split_eq[-1] - split_eq[0]) / split_eq[0] * 100
+                if split_eq[0] != 0
+                else 0
+            )
+            years_split = len(split_eq) / TRADING_DAYS_PER_YEAR
+            ar = _annualized_return(tr, years_split) if years_split > 0 else 0
+            sh = _compute_sharpe(split_rets)
+            dd_seq = _compute_drawdown(split_eq)
+            dd = min(dd_seq) if dd_seq else 0
+            ca = _calmar_ratio(ar, dd)
+            wr = (
+                sum(1 for r in split_rets if r > 0) / len(split_rets) * 100
+                if split_rets
+                else 0
+            )
+            tc = len([1 for r in split_rets if abs(r) > 0.001])
+            strategy_oos_rows += f"""
+            <tr>
+                <td><strong>{label}</strong></td>
+                <td>{split_label}</td>
+                <td class="{"positive" if tr > 0 else "negative"}">{tr:+.2f}%</td>
+                <td class="{"positive" if ar > 0 else "negative"}">{ar:+.2f}%</td>
+                <td class="{"positive" if sh > 0.1 else ""}">{sh:.4f}</td>
+                <td class="{"negative" if dd < -0.5 else ""}">{dd:.2f}%</td>
+                <td class="{"positive" if ca > 0.1 else ""}">{ca:.4f}</td>
+                <td>{wr:.1f}%</td>
+                <td>{tc}</td>
+            </tr>"""
+
     # 组装 chart_data
     chart_data = {
         "equity_curves": equity_js,
@@ -864,17 +1095,23 @@ def generate_report(
             "dates": best_dates,
             "drawdown": main_dd,
         },
+        "all_drawdowns": all_drawdowns,
         "risk_return": risk_return,
         "heatmap_data": heatmap_data,
+        "all_heatmaps": all_heatmaps,
         "years_set": years_set,
         "rolling_sharpe": {
-            "dates": best_dates[36 * 21:] if len(best_dates) >= 36 * 21 else [],
+            "dates": best_dates[36 * 21 :] if len(best_dates) >= 36 * 21 else [],
             "values": rolling_sharpe_vals,
         },
+        "all_rolling_sharpe": all_rolling_sharpe,
         "rolling_dd": {
-            "dates": best_dates[12 * 21:] if len(best_dates) >= 12 * 21 else [],
+            "dates": best_dates[12 * 21 :] if len(best_dates) >= 12 * 21 else [],
             "values": rolling_dd_vals,
         },
+        "all_rolling_dd": all_rolling_dd,
+        "all_is_equity": all_is_equity,
+        "all_os_equity": all_os_equity,
         "correlation": {
             "names": corr_names,
             "matrix": corr_matrix,
@@ -888,15 +1125,15 @@ def generate_report(
         for key, analysis_data in rebalance_analysis.items():
             decisions = analysis_data.get("decisions", [])
             analysis = analysis_data.get("analysis", {})
-            
+
             if not decisions:
                 continue
-            
+
             total_decisions = analysis.get("total_decisions", 0)
             winning_decisions = analysis.get("winning_decisions", 0)
             win_rate = analysis.get("win_rate", 0)
             avg_return = analysis.get("avg_return_5d", 0)
-            
+
             decision_rows = []
             for d in decisions[:30]:  # 最多显示30条记录
                 direction_class = ""
@@ -904,18 +1141,18 @@ def generate_report(
                     direction_class = "positive"
                 elif d["direction"] == "空":
                     direction_class = "negative"
-                
+
                 winning_class = "positive" if d.get("winning") else "negative"
-                
+
                 decision_rows.append(f"""
                 <tr>
-                    <td>{d['date']}</td>
-                    <td class="{direction_class}">{d['direction']}</td>
-                    <td>{d['composite_score']}</td>
-                    <td>{d['position_pct']}</td>
-                    <td class="{winning_class}">{d['return_5d']}%</td>
+                    <td>{d["date"]}</td>
+                    <td class="{direction_class}">{d["direction"]}</td>
+                    <td>{d["composite_score"]}</td>
+                    <td>{d["position_pct"]}</td>
+                    <td class="{winning_class}">{d["return_5d"]}%</td>
                 </tr>""")
-            
+
             rebalance_sections.append(f"""
             <div class="section-title">🔄 调仓决策分析 - {key}</div>
             <div class="two-col">
@@ -932,7 +1169,7 @@ def generate_report(
                     <tbody>{"".join(decision_rows)}</tbody>
                 </table>
             </div>""")
-        
+
         if rebalance_sections:
             rebalance_html = "\n".join(rebalance_sections)
 
@@ -954,6 +1191,7 @@ def generate_report(
         "kpi_cards_html": kpi_cards_html,
         "strategy_table_html": strategy_table_rows,
         "oos_table_html": oos_table_rows,
+        "strategy_oos_html": strategy_oos_rows,
         "chart_data_json": json.dumps(chart_data, ensure_ascii=False),
         "rebalance_html": rebalance_html,
         "evaluation_html": evaluation_html,
@@ -968,17 +1206,27 @@ def generate_report(
     if data_source_note or missing_files_note:
         parts = []
         if data_source_note:
-            parts.append(f'<div class="meta-item"><span class="label">&#9888; 数据来源</span><span class="value" style="color:#f59e0b;">{data_source_note}</span></div>')
+            parts.append(
+                f'<div class="meta-item"><span class="label">&#9888; 数据来源</span><span class="value" style="color:#f59e0b;">{data_source_note}</span></div>'
+            )
         if missing_files_note:
-            parts.append(f'<div class="meta-item"><span class="label">&#10060; 缺失</span><span class="value" style="color:#ef4444;">{missing_files_note}</span></div>')
+            parts.append(
+                f'<div class="meta-item"><span class="label">&#10060; 缺失</span><span class="value" style="color:#ef4444;">{missing_files_note}</span></div>'
+            )
         if parts:
-            data_source_warning_html = '<div class="meta-row" style="margin-top:12px; background:rgba(245,158,11,0.1); padding:10px 14px; border-radius:8px; border:1px solid rgba(245,158,11,0.3);">' + "\n".join(parts) + '</div>'
+            data_source_warning_html = (
+                '<div class="meta-row" style="margin-top:12px; background:rgba(245,158,11,0.1); padding:10px 14px; border-radius:8px; border:1px solid rgba(245,158,11,0.3);">'
+                + "\n".join(parts)
+                + "</div>"
+            )
     report_ctx["data_source_warning_html"] = data_source_warning_html
 
     html = _build_html_report(report_ctx)
     report_path = out_path / report_name
     report_path.write_text(html, encoding="utf-8")
-    logger.info(f"报告已生成: {report_path} ({report_path.stat().st_size / 1024:.1f} KB)")
+    logger.info(
+        f"报告已生成: {report_path} ({report_path.stat().st_size / 1024:.1f} KB)"
+    )
     return report_path
 
 
@@ -1114,7 +1362,8 @@ _CSS_STYLE = """
         @media (max-width: 768px) { .container { padding: 10px; } .report-header { padding: 24px; } .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
 """
 
-_HTML_TEMPLATE = """<!DOCTYPE html>
+_HTML_TEMPLATE = (
+    """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -1123,7 +1372,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
-""" + _CSS_STYLE + """
+"""
+    + _CSS_STYLE
+    + """
     </style>
 </head>
 <body>
@@ -1167,17 +1418,17 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="card">
-        <div class="card-header">样本内/外绩效对比</div>
-        <div class="section-desc" style="margin-top:-8px;">对比样本内（2016-2020）与样本外（2021-2025）表现，评估策略泛化能力</div>
+        <div class="card-header">所有策略样本内/外绩效对比</div>
+        <div class="section-desc" style="margin-top:-8px;">各策略在样本内与样本外的独立表现对比，评估各策略泛化能力</div>
         <div class="table-wrapper">
         <table>
             <thead>
             <tr>
-                <th>数据集</th><th>总收益率</th><th>年化收益率</th><th>夏普比率</th>
+                <th>策略</th><th>数据集</th><th>总收益率</th><th>年化收益率</th><th>夏普比率</th>
                 <th>最大回撤</th><th>卡玛比率</th><th>胜率</th><th>交易次数</th>
             </tr>
             </thead>
-            <tbody>$oos_table_html</tbody>
+            <tbody>$strategy_oos_html</tbody>
         </table>
         </div>
     </div>
@@ -1186,17 +1437,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="section-desc">基于 Chart.js 的交互式图表，支持缩放、悬停提示</div>
 
     <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 净值曲线对比（归一化，从1开始）</div><canvas id="chartEquity"></canvas></div>
-    <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c9; 动态回撤曲线（$best_strategy_label）</div><canvas id="chartDrawdown"></canvas></div>
+    <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4ca; 所有策略回撤对比</div><canvas id="chartAllDrawdowns"></canvas></div>
 
     <div class="two-col">
         <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f539; 风险收益散点图</div><canvas id="chartScatter"></canvas></div>
         <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f321;&#xfe0f; 月度收益率热力图（$best_strategy_label）</div><canvas id="chartHeatmap"></canvas></div>
     </div>
+    <div id="allHeatmapsContainer"></div>
 
     <div class="section-title">风险分析</div>
     <div class="two-col">
-        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4ca; 滚动夏普比率（36个月窗口）</div><canvas id="chartRollingSharpe"></canvas></div>
-        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c9; 滚动最大回撤（12个月窗口）</div><canvas id="chartRollingDD"></canvas></div>
+        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4ca; 所有策略滚动夏普对比</div><canvas id="chartAllRollingSharpe"></canvas></div>
+        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c9; 所有策略滚动回撤对比</div><canvas id="chartAllRollingDD"></canvas></div>
     </div>
 
     <div class="chart-box">
@@ -1205,8 +1457,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="two-col">
-        <div class="chart-box" id="isChartBox"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 样本内净值曲线</div><canvas id="chartInSample"></canvas></div>
-        <div class="chart-box" id="osChartBox"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 样本外净值曲线</div><canvas id="chartOutSample"></canvas></div>
+        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 所有策略样本内净值对比</div><canvas id="chartAllIS"></canvas></div>
+        <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 所有策略样本外净值对比</div><canvas id="chartAllOS"></canvas></div>
     </div>
 
     $rebalance_html
@@ -1225,7 +1477,9 @@ var COLORS = {
     alpha032: '#06b6d4',
     fusion: '#10b981', switching: '#ef4444'
 };
-var reportData = """ + "$chart_data_json" + """;
+var reportData = """
+    + "$chart_data_json"
+    + """;
 
 (function() {
     if (!reportData || !reportData.equity_curves) return;
@@ -1261,23 +1515,60 @@ var reportData = """ + "$chart_data_json" + """;
 })();
 
 (function() {
-    var dd = reportData.main_drawdown;
-    if (!dd || !dd.dates) return;
-    new Chart(document.getElementById('chartDrawdown'), {
+    var ad = reportData.all_drawdowns;
+    if (!ad) return;
+    var keys = Object.keys(ad);
+    if (!keys.length) return;
+    var DD_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var DD_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var DD_BG = {
+        E1_ts_momentum: 'rgba(59,130,246,0.08)', E1_roll_yield: 'rgba(245,158,11,0.08)',
+        E1_alpha019: 'rgba(139,92,246,0.08)', E1_alpha032: 'rgba(6,182,212,0.08)',
+        E2_Fusion: 'rgba(16,185,129,0.08)', E4_Switching: 'rgba(239,68,68,0.08)'
+    };
+    var firstKey = keys[0];
+    var labels = ad[firstKey].dates;
+    var datasets = keys.map(function(k) {
+        var info = ad[k];
+        return {
+            label: DD_LABELS[k] || k,
+            data: info.drawdown,
+            borderColor: DD_COLORS[k] || '#666',
+            backgroundColor: DD_BG[k] || 'rgba(102,102,102,0.05)',
+            fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+        };
+    });
+    var summaryHtml = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">';
+    keys.forEach(function(k) {
+        var info = ad[k];
+        var color = DD_COLORS[k] || '#666';
+        var label = DD_LABELS[k] || k;
+        summaryHtml += '<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:6px;font-size:12px;background:' + color + '15;border:1px solid ' + color + '40;">'
+            + '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;"></span>'
+            + '<strong>' + label + '</strong>'
+            + '<span style="color:#666;">最大回撤: ' + info.max_dd_pct + '%</span>'
+            + '<span style="color:#666;">持续: ' + info.duration_days + '天</span>'
+            + '</span>';
+    });
+    summaryHtml += '</div>';
+    var container = document.getElementById('chartAllDrawdowns').parentElement;
+    container.insertAdjacentHTML('afterbegin', summaryHtml);
+    new Chart(document.getElementById('chartAllDrawdowns'), {
         type: 'line',
-        data: {
-            labels: dd.dates,
-            datasets: [{
-                label: '回撤 (%)',
-                data: dd.drawdown,
-                borderColor: '#dc2626',
-                backgroundColor: 'rgba(220,38,38,0.08)',
-                fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2,
-            }],
-        },
+        data: { labels: labels, datasets: datasets },
         options: {
             responsive: true,
-            plugins: { tooltip: { callbacks: { label: function(ctx) { return '回撤: ' + ctx.parsed.y.toFixed(2) + '%'; } } }, legend: { display: false } },
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ' 回撤: ' + ctx.parsed.y.toFixed(2) + '%'; } } },
+                legend: { position: 'top', labels: { usePointStyle: true, padding: 16 } },
+            },
             scales: {
                 x: { type: 'category', ticks: { maxTicksLimit: 12, autoSkip: true } },
                 y: { title: { display: true, text: '回撤 (%)' }, max: 0, ticks: { callback: function(v) { return v.toFixed(0) + '%'; } } },
@@ -1291,8 +1582,8 @@ var reportData = """ + "$chart_data_json" + """;
     if (!sc || !sc.length) return;
     var datasets = sc.map(function(d) {
         return {
-            label: d.name,
-            data: [{ x: d.ann_volatility, y: d.ann_return }],
+            label: d.name + ' (Sharpe=' + d.sharpe.toFixed(3) + ')',
+            data: [{ x: d.ann_volatility, y: d.ann_return, sharpe: d.sharpe }],
             backgroundColor: COLORS[d.key] || '#666',
             borderColor: COLORS[d.key] || '#666',
             pointRadius: 8, pointHoverRadius: 12,
@@ -1304,7 +1595,7 @@ var reportData = """ + "$chart_data_json" + """;
         options: {
             responsive: true,
             plugins: {
-                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ': 波动率=' + ctx.parsed.x.toFixed(2) + '%, 收益=' + ctx.parsed.y.toFixed(2) + '%'; } } },
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label.split(' (')[0] + ': 波动率=' + ctx.parsed.x.toFixed(2) + '%, 收益=' + ctx.parsed.y.toFixed(2) + '%, Sharpe=' + ctx.raw.sharpe.toFixed(3); } } },
                 legend: { position: 'top', labels: { usePointStyle: true } },
             },
             scales: {
@@ -1380,25 +1671,128 @@ var reportData = """ + "$chart_data_json" + """;
 })();
 
 (function() {
-    var rs = reportData.rolling_sharpe;
-    if (!rs || !rs.dates || !rs.dates.length) return;
-    new Chart(document.getElementById('chartRollingSharpe'), {
+    var ahm = reportData.all_heatmaps;
+    if (!ahm) return;
+    var keys = Object.keys(ahm);
+    if (!keys.length) return;
+    var HM_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var HM_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+    var container = document.getElementById('allHeatmapsContainer');
+    function heatColor(val) {
+        if (val === null || val === undefined) return '#f1f5f9';
+        var maxAbs = 15;
+        var ratio = Math.max(-1, Math.min(1, val / maxAbs));
+        if (ratio >= 0) {
+            var r = Math.round(34 + (1-ratio) * 221);
+            var g = Math.round(197 + (1-ratio) * 58);
+            var b = Math.round(94 + (1-ratio) * 161);
+            return 'rgb(' + r + ',' + g + ',' + b + ')';
+        } else {
+            var r2 = Math.round(220 + (1+ratio) * 35);
+            var g2 = Math.round(38 + (1+ratio) * 62);
+            var b2 = Math.round(38 + (1+ratio) * 62);
+            return 'rgb(' + r2 + ',' + g2 + ',' + b2 + ')';
+        }
+    }
+    function drawHeatmap(canvasEl, hm, yrs, label, color) {
+        var cellW = 56, cellH = 24, leftPad = 60, topPad = 36;
+        canvasEl.width = leftPad + 12 * cellW + 20;
+        canvasEl.height = topPad + yrs.length * cellH + 50;
+        canvasEl.style.width = '100%';
+        canvasEl.style.height = 'auto';
+        var ctx2 = canvasEl.getContext('2d');
+        ctx2.font = '10px ' + CHART_FONT;
+        ctx2.textAlign = 'right';
+        ctx2.textBaseline = 'middle';
+        ctx2.fillStyle = '#475569';
+        for (var yi = 0; yi < yrs.length; yi++) {
+            ctx2.fillText(yrs[yi], leftPad - 6, topPad + yi * cellH + cellH/2);
+        }
+        ctx2.textAlign = 'center';
+        for (var mi = 0; mi < 12; mi++) {
+            ctx2.fillText(months[mi], leftPad + mi * cellW + cellW/2, topPad - 12);
+        }
+        for (var yi2 = 0; yi2 < yrs.length; yi2++) {
+            for (var mi2 = 0; mi2 < 12; mi2++) {
+                var val = hm[yi2] && hm[yi2][mi2] !== undefined ? hm[yi2][mi2] : null;
+                ctx2.fillStyle = heatColor(val);
+                ctx2.fillRect(leftPad + mi2 * cellW, topPad + yi2 * cellH, cellW - 1, cellH - 1);
+                if (val !== null) {
+                    ctx2.fillStyle = Math.abs(val) > 8 ? '#fff' : '#1a1a2e';
+                    ctx2.fillText(val.toFixed(1) + '%', leftPad + mi2 * cellW + cellW/2, topPad + yi2 * cellH + cellH/2);
+                }
+            }
+        }
+        var legendY2 = topPad + yrs.length * cellH + 20;
+        ctx2.textAlign = 'left';
+        for (var li = 0; li <= 10; li++) {
+            var t2 = (li - 5) / 5 * 15;
+            ctx2.fillStyle = heatColor(t2);
+            ctx2.fillRect(leftPad + li * 28, legendY2, 24, 12);
+            if (li % 2 === 0) {
+                ctx2.fillStyle = '#475569';
+                ctx2.fillText(t2.toFixed(0) + '%', leftPad + li * 28 + 12, legendY2 + 22);
+            }
+        }
+    }
+    var html = '<div style="font-size:14px;font-weight:600;margin:16px 0 8px;">&#x1f321;&#xfe0f; 所有策略月度收益率热力图</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
+    keys.forEach(function(k) {
+        var info = ahm[k];
+        var label = HM_LABELS[k] || k;
+        var color = HM_COLORS[k] || '#666';
+        var canvasId = 'chartHeatmap_' + k;
+        html += '<div class="chart-box"><div style="font-size:12px;font-weight:600;margin-bottom:8px;color:' + color + ';">' + label + '</div><canvas id="' + canvasId + '"></canvas></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    keys.forEach(function(k) {
+        var info = ahm[k];
+        var canvasEl = document.getElementById('chartHeatmap_' + k);
+        if (canvasEl) drawHeatmap(canvasEl, info.data, info.years_set, HM_LABELS[k] || k, HM_COLORS[k] || '#666');
+    });
+})();
+
+(function() {
+    var ars = reportData.all_rolling_sharpe;
+    if (!ars) return;
+    var keys = Object.keys(ars);
+    if (!keys.length) return;
+    var RS_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var RS_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var firstKey = keys[0];
+    var labels = ars[firstKey].dates;
+    var datasets = keys.map(function(k) {
+        return {
+            label: RS_LABELS[k] || k,
+            data: ars[k].values,
+            borderColor: RS_COLORS[k] || '#666',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+        };
+    });
+    new Chart(document.getElementById('chartAllRollingSharpe'), {
         type: 'line',
-        data: {
-            labels: rs.dates,
-            datasets: [{
-                label: '滚动夏普 (36个月)',
-                data: rs.values,
-                borderColor: '#0f3460',
-                backgroundColor: 'rgba(15,52,96,0.06)',
-                fill: true, borderWidth: 1.8, pointRadius: 0, tension: 0.2,
-            }],
-        },
+        data: { labels: labels, datasets: datasets },
         options: {
             responsive: true,
+            interaction: { mode: 'index', intersect: false },
             plugins: {
-                tooltip: { callbacks: { label: function(ctx) { return '夏普: ' + ctx.parsed.y.toFixed(4); } } },
-                legend: { display: false },
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ' 夏普: ' + ctx.parsed.y.toFixed(4); } } },
+                legend: { position: 'top', labels: { usePointStyle: true, padding: 16 } },
                 annotation: { annotations: { zeroLine: { type: 'line', yMin: 0, yMax: 0, borderColor: '#94a3b8', borderWidth: 1, borderDash: [4,4] } } },
             },
             scales: {
@@ -1410,23 +1804,44 @@ var reportData = """ + "$chart_data_json" + """;
 })();
 
 (function() {
-    var rd = reportData.rolling_dd;
-    if (!rd || !rd.dates || !rd.dates.length) return;
-    new Chart(document.getElementById('chartRollingDD'), {
+    var ard = reportData.all_rolling_dd;
+    if (!ard) return;
+    var keys = Object.keys(ard);
+    if (!keys.length) return;
+    var RDD_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var RDD_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var RDD_BG = {
+        E1_ts_momentum: 'rgba(59,130,246,0.06)', E1_roll_yield: 'rgba(245,158,11,0.06)',
+        E1_alpha019: 'rgba(139,92,246,0.06)', E1_alpha032: 'rgba(6,182,212,0.06)',
+        E2_Fusion: 'rgba(16,185,129,0.06)', E4_Switching: 'rgba(239,68,68,0.06)'
+    };
+    var firstKey = keys[0];
+    var labels = ard[firstKey].dates;
+    var datasets = keys.map(function(k) {
+        return {
+            label: RDD_LABELS[k] || k,
+            data: ard[k].values,
+            borderColor: RDD_COLORS[k] || '#666',
+            backgroundColor: RDD_BG[k] || 'rgba(102,102,102,0.05)',
+            fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+        };
+    });
+    new Chart(document.getElementById('chartAllRollingDD'), {
         type: 'line',
-        data: {
-            labels: rd.dates,
-            datasets: [{
-                label: '滚动最大回撤 (12个月)',
-                data: rd.values,
-                borderColor: '#dc2626',
-                backgroundColor: 'rgba(220,38,38,0.06)',
-                fill: true, borderWidth: 1.8, pointRadius: 0, tension: 0.2,
-            }],
-        },
+        data: { labels: labels, datasets: datasets },
         options: {
             responsive: true,
-            plugins: { tooltip: { callbacks: { label: function(ctx) { return '回撤: ' + ctx.parsed.y.toFixed(2) + '%'; } } }, legend: { display: false } },
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ' 回撤: ' + ctx.parsed.y.toFixed(2) + '%'; } } },
+                legend: { position: 'top', labels: { usePointStyle: true, padding: 16 } },
+            },
             scales: {
                 x: { type: 'category', ticks: { maxTicksLimit: 12, autoSkip: true } },
                 y: { title: { display: true, text: '最大回撤 (%)' }, max: 0, ticks: { callback: function(v) { return v.toFixed(0) + '%'; } } },
@@ -1466,49 +1881,92 @@ var reportData = """ + "$chart_data_json" + """;
 })();
 
 (function() {
-    var isData = """ + "$in_sample_js" + """;
-    if (isData && isData.equity) {
-        new Chart(document.getElementById('chartInSample'), {
-            type: 'line',
-            data: {
-                labels: isData.dates,
-                datasets: [{
-                    label: '样本内净值', data: isData.equity,
-                    borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.06)',
-                    fill: true, borderWidth: 1.8, pointRadius: 0, tension: 0.1,
-                }],
+    var aie = reportData.all_is_equity;
+    if (!aie) return;
+    var keys = Object.keys(aie);
+    if (!keys.length) return;
+    var IS_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var IS_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var firstKey = keys[0];
+    var labels = aie[firstKey].dates;
+    var datasets = keys.map(function(k) {
+        return {
+            label: IS_LABELS[k] || k,
+            data: aie[k].equity,
+            borderColor: IS_COLORS[k] || '#666',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0, tension: 0.1,
+        };
+    });
+    new Chart(document.getElementById('chartAllIS'), {
+        type: 'line',
+        data: { labels: labels, datasets: datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(4); } } },
+                legend: { position: 'top', labels: { usePointStyle: true, padding: 12 } },
             },
-            options: {
-                responsive: true, plugins: { legend: { display: false } },
-                scales: { x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true } }, y: { title: { display: true, text: '净值' } } },
+            scales: {
+                x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true } },
+                y: { title: { display: true, text: '净值 (归一化)' } },
             },
-        });
-    }
+        },
+    });
 })();
 
 (function() {
-    var osData = """ + "$out_sample_js" + """;
-    if (osData && osData.equity) {
-        new Chart(document.getElementById('chartOutSample'), {
-            type: 'line',
-            data: {
-                labels: osData.dates,
-                datasets: [{
-                    label: '样本外净值', data: osData.equity,
-                    borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.06)',
-                    fill: true, borderWidth: 1.8, pointRadius: 0, tension: 0.1,
-                }],
+    var aoe = reportData.all_os_equity;
+    if (!aoe) return;
+    var keys = Object.keys(aoe);
+    if (!keys.length) return;
+    var OS_COLORS = {
+        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
+        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+    };
+    var OS_LABELS = {
+        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
+        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+    };
+    var firstKey = keys[0];
+    var labels = aoe[firstKey].dates;
+    var datasets = keys.map(function(k) {
+        return {
+            label: OS_LABELS[k] || k,
+            data: aoe[k].equity,
+            borderColor: OS_COLORS[k] || '#666',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0, tension: 0.1,
+        };
+    });
+    new Chart(document.getElementById('chartAllOS'), {
+        type: 'line',
+        data: { labels: labels, datasets: datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: { callbacks: { label: function(ctx) { return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(4); } } },
+                legend: { position: 'top', labels: { usePointStyle: true, padding: 12 } },
             },
-            options: {
-                responsive: true, plugins: { legend: { display: false } },
-                scales: { x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true } }, y: { title: { display: true, text: '净值' } } },
+            scales: {
+                x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true } },
+                y: { title: { display: true, text: '净值 (归一化)' } },
             },
-        });
-    }
+        },
+    });
 })();
 </script>
 </body>
 </html>"""
+)
 
 _DEFAULT_EVALUATION_HTML = """
     <div class="section-title">综合评价与改进建议</div>
@@ -1532,6 +1990,14 @@ _DEFAULT_EVALUATION_HTML = """
                 <li><strong>E1_roll_yield</strong> 收益偏低，需调整参数。</li>
             </ul>
         </div>
+        <div class="eval-problem">
+            <div class="eval-problem-title">4. 样本内外表现差异显著</div>
+            <p>部分策略在样本外表现明显变差，提示可能存在<strong>过拟合风险</strong>。样本内夏普比率与样本外差距过大时，需警惕参数对历史数据的过度适配。</p>
+        </div>
+        <div class="eval-problem">
+            <div class="eval-problem-title">5. 策略间相关性偏高</div>
+            <p>多策略组合的分散化效果有限，策略间相关性较高时，组合回撤与单策略回撤接近，未能有效降低系统性风险。</p>
+        </div>
     </div>
 
     <div class="card" style="margin-top:16px;">
@@ -1543,19 +2009,36 @@ _DEFAULT_EVALUATION_HTML = """
                 <tr><td>风险调整收益</td><td><span class="badge badge-danger">&#x274c; 很差</span></td><td>Sharpe &lt; 0.03，近乎随机漫步</td></tr>
                 <tr><td>回撤控制</td><td><span class="badge badge-danger">&#x274c; 不合格</span></td><td>普遍 &gt;15%，有的超30%</td></tr>
                 <tr><td>交易频率合理性</td><td><span class="badge badge-warning">&#x26a0;&#xfe0f; 存疑</span></td><td>高频策略收益并不更好</td></tr>
+                <tr><td>样本外稳定性</td><td><span class="badge badge-warning">&#x26a0;&#xfe0f; 需关注</span></td><td>部分策略样本外衰减明显</td></tr>
+                <tr><td>策略分散化</td><td><span class="badge badge-warning">&#x26a0;&#xfe0f; 不足</span></td><td>策略间相关性偏高，组合效果有限</td></tr>
                 <tr><td>实盘可行性</td><td><span class="badge badge-danger">&#x274c; 低</span></td><td>风险收益特征不具备吸引力</td></tr>
             </tbody>
         </table></div>
     </div>
 
     <div class="card" style="margin-top:16px;">
-        <div class="card-header">改进建议</div>
-        <ol class="suggestion-list">
-            <li><strong>检查过拟合</strong>：观察样本外表表现是否明显变差，已增加参数扰动测试和 WalkForward OOS 验证。</li>
-            <li><strong>加强风控</strong>：止损收紧至 2%、增加 ATR 动态止损、波动率目标仓位管理、信号连续确认已全部实现。</li>
-            <li><strong>降低换手率</strong>：信号确认机制、均线间距过滤均已实现，预期交易次数显著减少。</li>
-            <li><strong>交易成本真实化</strong>：手续费+滑点提升至万10，淘汰边际利润策略。</li>
-            <li><strong>策略相关性过滤</strong>：融合策略自动降权高相关策略对，降低风险集中度。</li>
-        </ol>
+        <div class="card-header">改进建议（已实施 + 待实施）</div>
+        <div class="eval-problem">
+            <div class="eval-problem-title" style="color:#10b981;">✅ 已实施的改进</div>
+            <ol class="suggestion-list">
+                <li><strong>检查过拟合</strong>：已增加参数扰动测试和 WalkForward OOS 验证，观察样本外表现是否明显变差。</li>
+                <li><strong>加强风控</strong>：止损收紧至 2%、增加 ATR 动态止损、波动率目标仓位管理、信号连续确认已全部实现。</li>
+                <li><strong>降低换手率</strong>：信号确认机制、均线间距过滤均已实现，预期交易次数显著减少。</li>
+                <li><strong>交易成本真实化</strong>：手续费+滑点提升至万10，淘汰边际利润策略。</li>
+                <li><strong>策略相关性过滤</strong>：融合策略自动降权高相关策略对，降低风险集中度。</li>
+            </ol>
+        </div>
+        <div class="eval-problem" style="margin-top:12px;">
+            <div class="eval-problem-title" style="color:#f59e0b;">⚠️ 待实施的改进</div>
+            <ol class="suggestion-list">
+                <li><strong>因子有效性提升</strong>：当前因子IC偏低，需引入更高预测力的因子（如订单流、资金流、期限结构等），或优化因子构造方式（非线性变换、交叉项）。</li>
+                <li><strong>自适应参数机制</strong>：固定参数在市场regime切换时失效，建议实现滚动窗口自适应参数（如EMA窗口、ATR倍数随波动率调整）。</li>
+                <li><strong>多时间框架融合</strong>：当前仅使用日频信号，建议引入周频/月频趋势判断作为过滤层，降低逆势交易频率。</li>
+                <li><strong>动态仓位管理</strong>：根据策略近期表现（如滚动Sharpe）动态调整各策略权重，表现差时自动降权。</li>
+                <li><strong>止损策略优化</strong>：当前固定止损可能过于刚性，建议实现追踪止损（Trailing Stop）和时间止损（持仓N日未达目标自动平仓）。</li>
+                <li><strong>品种选择优化</strong>：并非所有品种适合所有策略，建议为每个策略筛选适配品种池（基于品种波动率、流动性、趋势性等指标）。</li>
+                <li><strong>实盘模拟验证</strong>：回测结果需经过纸面交易（Paper Trading）验证至少3个月，确认实际滑点、成交率与回测假设一致。</li>
+            </ol>
+        </div>
     </div>
 """

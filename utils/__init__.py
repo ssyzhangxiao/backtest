@@ -2,6 +2,12 @@ import pandas as pd
 
 from .plots import PlotManager
 from .metrics import MetricsCalculator
+from .indicators import (
+    compute_adx,
+    compute_adx_series,
+    compute_adx_components,
+    compute_true_range,
+)
 
 
 def safe_col(df: pd.DataFrame, col: str) -> pd.Series:

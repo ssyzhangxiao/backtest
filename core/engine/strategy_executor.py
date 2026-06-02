@@ -313,11 +313,10 @@ class StrategyExecutorFactory:
             bar_counter[0] += 1
             trading_day_idx = bar_counter[0]
 
-            factor_scores = scoring_engine.extract_factor_scores(ctx, strategy_params)
-
-            # 更新滚动IC引擎
             symbol = ctx.symbol
             current_close = _get_close(ctx)
+            
+            # 1. 先更新滚动IC引擎（用上一bar的因子得分和当前bar的前瞻收益）
             if (self._rolling_ic_engine is not None
                     and self.config.use_rolling_ic
                     and symbol in self._prev_close
@@ -332,23 +331,19 @@ class StrategyExecutorFactory:
                     from core.engine.switch_engine import _shared_ic_weights
                     _shared_ic_weights.clear()
                     _shared_ic_weights.update(dynamic_weights)
-            else:
-                if self._rolling_ic_engine is None:
-                    pass
-                elif not self.config.use_rolling_ic:
-                    pass
-                elif symbol not in self._prev_close:
-                    pass
-                elif symbol not in self._prev_factor_scores:
-                    pass
+                    # 同步到switch_engine的_ic_weights
+                    scoring_engine.set_ic_weights(dynamic_weights)
 
-            # 缓存当前因子得分和收盘价
+            # 2. 再提取当前bar的因子得分（用于下一bar的IC更新）
+            factor_scores = scoring_engine.extract_factor_scores(ctx, strategy_params)
+            
+            # 3. 缓存当前因子得分和收盘价
             if factor_scores:
                 self._prev_factor_scores[symbol] = dict(factor_scores)
             if current_close is not None:
                 self._prev_close[symbol] = current_close
 
-            # 收集横截面数据
+            # 4. 收集横截面数据
             is_rebalance = scoring_engine.is_rebalance_day(
                 trading_day_index=trading_day_idx,
                 dt=ctx.dt,
@@ -364,7 +359,7 @@ class StrategyExecutorFactory:
             if not is_rebalance:
                 return
 
-            # 品种轮动检查：未入选的品种平仓
+            # 5. 品种轮动检查：未入选的品种平仓
             if not scoring_engine.is_symbol_selected(symbol):
                 has_long = ctx.pos(ctx.symbol, "long") is not None
                 has_short = ctx.pos(ctx.symbol, "short") is not None
@@ -372,7 +367,7 @@ class StrategyExecutorFactory:
                     self._close_all_positions(ctx)
                 return
 
-            # 计算综合得分：始终使用原始因子得分
+            # 6. 计算综合得分（使用最新的IC权重）
             if single_factor_mode and single_factor_name:
                 composite_score = factor_scores.get(single_factor_name, 0.0)
             else:

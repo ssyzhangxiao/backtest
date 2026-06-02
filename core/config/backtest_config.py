@@ -1,51 +1,25 @@
 """
-回测系统统一配置。
+回测主配置（BacktestConfig）。
 
-供 PyBroker 主引擎和自研验证引擎共用。
+PyBroker 主引擎和自研验证引擎共用。
 因子打分调仓模式：多因子综合得分决定持仓方向和仓位。
+
+规则2：config.yaml 是单一数据源，BacktestConfig 必须与 yaml 完全同步。
 """
 
-import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
+
 import yaml
 
-
-DATA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
-)
-
-PYBROKER_EXTRA_COLUMNS = (
-    "open_interest",
-    "is_dominant",
-    "dominant_symbol",
-    "prev_dominant_symbol",
-    "rollover_flag",
-    "rollover_signal",
-    "rollover_from",
-    "rollover_to",
-    "rollover_cost",
-    "product",
-)
-
-INITIAL_CASH = 1_000_000
-
-DEFAULT_FACTOR_WEIGHTS: Dict[str, float] = {
-    "ts_momentum": 0.25,
-    "roll_yield": 0.25,
-    "alpha019": 0.25,
-    "alpha032": 0.25,
-}
-
-
-def get_default_stress_events() -> list:
-    """获取默认压力测试事件列表。"""
-    return [
-        {"name": "2020新冠疫情", "start": "2020-02-15", "end": "2020-03-31"},
-        {"name": "2022俄乌冲突", "start": "2022-02-24", "end": "2022-04-30"},
-        {"name": "2023硅谷银行", "start": "2023-03-08", "end": "2023-03-31"},
-        {"name": "2024红海危机", "start": "2024-01-15", "end": "2024-03-15"},
-    ]
+from .constants import INITIAL_CASH, DEFAULT_FACTOR_WEIGHTS
+from .factors_config import FactorModuleConfig
+from .adaptive_config import AdaptiveModuleConfig
+from .multi_tf_config import MultiTFModuleConfig
+from .position_config import PositionModuleConfig
+from .stop_config import StopOptimizationConfig
+from .instrument_config import InstrumentModuleConfig
+from .validation_config import ValidationModuleConfig
 
 
 @dataclass
@@ -62,7 +36,9 @@ class BacktestConfig:
 
     # ── 因子打分调仓 ──
     rebalance_days: int = 3
-    factor_weights: Dict[str, float] = field(default_factory=lambda: DEFAULT_FACTOR_WEIGHTS.copy())
+    factor_weights: Dict[str, float] = field(
+        default_factory=lambda: DEFAULT_FACTOR_WEIGHTS.copy()
+    )
     entry_threshold: float = 0.05
     score_scale: float = 1.0
     stop_loss_cooldown: int = 1
@@ -94,24 +70,27 @@ class BacktestConfig:
     # ── 交叉验证 ──
     cross_validate: bool = False
 
+    # ── 新模块配置（灰度开关，默认关闭） ──
+    factors_config: FactorModuleConfig = field(default_factory=FactorModuleConfig)
+    adaptive_config: AdaptiveModuleConfig = field(default_factory=AdaptiveModuleConfig)
+    multi_tf_config: MultiTFModuleConfig = field(default_factory=MultiTFModuleConfig)
+    position_config: PositionModuleConfig = field(default_factory=PositionModuleConfig)
+    stop_optimization_config: StopOptimizationConfig = field(
+        default_factory=StopOptimizationConfig
+    )
+    instrument_config: InstrumentModuleConfig = field(
+        default_factory=InstrumentModuleConfig
+    )
+    validation_config: ValidationModuleConfig = field(
+        default_factory=ValidationModuleConfig
+    )
+
     @classmethod
     def from_yaml(cls, path: str = "config.yaml") -> "BacktestConfig":
         """
         从 YAML 文件加载配置。
 
-        YAML 结构示例:
-          backtest:
-            start_date: "2020-01-01"
-            end_date: "2023-12-31"
-            initial_capital: 1000000
-            rebalance_freq: 3
-            commission: 0.0002
-            slippage: 0.001
-          factor_weights:
-            ts_momentum: 0.25
-            roll_yield: 0.25
-            alpha019: 0.25
-            alpha032: 0.25
+        规则2：config.yaml 是单一数据源，BacktestConfig 必须与 yaml 完全同步。
 
         Args:
             path: YAML 文件路径
@@ -124,6 +103,15 @@ class BacktestConfig:
 
         bt = raw.get("backtest", {})
         fw = raw.get("factor_weights", {})
+
+        # 各模块配置委托给各自的from_yaml解析
+        factors_cfg = FactorModuleConfig.from_yaml(raw)
+        adaptive_cfg = AdaptiveModuleConfig.from_yaml(raw)
+        multi_tf_cfg = MultiTFModuleConfig.from_yaml(raw)
+        position_cfg = PositionModuleConfig.from_yaml(raw)
+        stop_cfg = StopOptimizationConfig.from_yaml(raw)
+        instrument_cfg = InstrumentModuleConfig.from_yaml(raw)
+        validation_cfg = ValidationModuleConfig.from_yaml(raw)
 
         return cls(
             initial_cash=float(bt.get("initial_capital", INITIAL_CASH)),
@@ -140,4 +128,11 @@ class BacktestConfig:
             use_rank_score=bool(bt.get("use_rank_score", True)),
             use_rolling_ic=bool(bt.get("use_rolling_ic", True)),
             top_n_symbols=int(bt.get("top_n_symbols", 5)),
+            factors_config=factors_cfg,
+            adaptive_config=adaptive_cfg,
+            multi_tf_config=multi_tf_cfg,
+            position_config=position_cfg,
+            stop_optimization_config=stop_cfg,
+            instrument_config=instrument_cfg,
+            validation_config=validation_cfg,
         )

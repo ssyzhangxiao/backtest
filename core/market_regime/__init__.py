@@ -257,42 +257,20 @@ EQUAL_WEIGHT = 1.0 / len(IC_INDICATORS)
 
 
 def _compute_true_range(high, low, close):
-    """计算真实波幅（模块级公共函数，供多处复用）。"""
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    if len(tr) > 0:
-        tr.iloc[0] = tr1.iloc[0]
-    return tr
+    """计算真实波幅（委托公共工具函数）。"""
+    from utils.indicators import compute_true_range as _tr
+    return _tr(high, low, close)
 
 
 def _compute_adx_components(high, low, close, period):
     """
-    计算ADX组件（模块级公共函数，供 MarketRegimeDetector 和 EnhancedTrendDetector 复用）。
+    计算ADX组件（委托公共工具函数）。
 
     Returns:
         (adx, plus_di, minus_di)
     """
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    tr = _compute_true_range(high, low, close)
-    atr = tr.rolling(window=period, min_periods=period).mean()
-    atr_safe = atr.replace(0, np.nan)
-    plus_di = 100 * (
-        plus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-    )
-    minus_di = 100 * (
-        minus_dm.rolling(window=period, min_periods=period).mean() / atr_safe
-    )
-    dx_denom = (plus_di + minus_di).abs()
-    dx = np.where(dx_denom > 0, 100 * (plus_di - minus_di).abs() / dx_denom, 0.0)
-    dx = pd.Series(dx, index=high.index)
-    adx = dx.rolling(window=period, min_periods=period).mean()
-    return adx, plus_di, minus_di
+    from utils.indicators import compute_adx_components as _adx_comp
+    return _adx_comp(high, low, close, period)
 
 
 class MarketRegimeDetector:
