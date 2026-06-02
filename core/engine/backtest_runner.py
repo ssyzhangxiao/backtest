@@ -124,6 +124,7 @@ class PyBrokerBacktestRunner:
             use_cross_section=self.config.use_cross_section,
             use_rank_score=self.config.use_rank_score,
             use_rolling_ic=self.config.use_rolling_ic,
+            use_trend_filter=self.config.use_trend_filter,
             top_n_symbols=self.config.top_n_symbols,
         )
         self.switch_engine = FactorScoringEngine(self.library, scoring_config)
@@ -359,6 +360,7 @@ class PyBrokerBacktestRunner:
             pybroker.indicator("regime", _regime),
             pybroker.indicator("regime_confidence", _regime_conf),
             pybroker.indicator("regime_stability", _regime_stab),
+            pybroker.indicator("sma_20", lambda d: pd.Series(d.close).rolling(20).mean().values),
         ]
 
         symbols = sorted(df["symbol"].unique().tolist())

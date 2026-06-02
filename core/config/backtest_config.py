@@ -53,6 +53,7 @@ class BacktestConfig:
     use_cross_section: bool = True
     use_rank_score: bool = True
     use_rolling_ic: bool = True
+    use_trend_filter: bool = False
     top_n_symbols: int = 5
 
     # ── PyBroker 相关 ──
@@ -127,6 +128,7 @@ class BacktestConfig:
             use_cross_section=bool(bt.get("use_cross_section", True)),
             use_rank_score=bool(bt.get("use_rank_score", True)),
             use_rolling_ic=bool(bt.get("use_rolling_ic", True)),
+            use_trend_filter=bool(bt.get("use_trend_filter", False)),
             top_n_symbols=int(bt.get("top_n_symbols", 5)),
             factors_config=factors_cfg,
             adaptive_config=adaptive_cfg,

@@ -79,6 +79,9 @@ class ScoringConfig:
     # 滚动IC动态权重开关
     use_rolling_ic: bool = True
 
+    # 趋势过滤开关
+    use_trend_filter: bool = False
+
     # 品种轮动：持有综合得分最高的前N个品种
     top_n_symbols: int = 5
 
@@ -399,10 +402,20 @@ class FactorScoringEngine:
                 else:
                     scores_df[col] = 0.0
 
-        # 排名叠加
+        # 排名叠加（加权版：高IC因子权重更大）
         if self.config.use_rank_score and len(scores_df) > 1:
             rank_df = scores_df.rank(pct=True) * 2 - 1
-            self._rank_scores = rank_df.mean(axis=1).to_dict()
+            weights = self._get_effective_weights()
+            weighted_rank = pd.Series(0.0, index=rank_df.index)
+            total_w = 0.0
+            for col in factor_names:
+                w = weights.get(col, 0.0)
+                if w > 0:
+                    weighted_rank += w * rank_df[col]
+                    total_w += w
+            if total_w > 0:
+                weighted_rank = weighted_rank / total_w
+            self._rank_scores = weighted_rank.to_dict()
         else:
             self._rank_scores = {}
 

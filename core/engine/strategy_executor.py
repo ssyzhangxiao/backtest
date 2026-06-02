@@ -381,6 +381,18 @@ class StrategyExecutorFactory:
 
             direction, score_pct = scoring_engine.score_to_position(composite_score)
 
+            # 趋势过滤：只顺趋势方向交易
+            if scoring_engine.config.use_trend_filter and direction != 0:
+                sma_20 = _get_indicator(ctx, "sma_20")
+                if sma_20 is not None and current_close is not None:
+                    is_uptrend = current_close > sma_20
+                    if direction == 1 and not is_uptrend:
+                        self._close_all_positions(ctx)
+                        return
+                    if direction == -1 and is_uptrend:
+                        self._close_all_positions(ctx)
+                        return
+
             atr_vol = _get_indicator(ctx, "atr_14")
             vol_scale = 1.0
             if atr_vol is not None and current_close is not None and current_close > 0:

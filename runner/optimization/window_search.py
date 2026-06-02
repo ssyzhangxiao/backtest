@@ -83,7 +83,7 @@ def window_search_single_strategy(
                     s = safe_float(m.get("sharpe"))
                     if s is not None:
                         window_sharpes.append(s)
-                    r = safe_float(m.get("total_return_pct"))
+                    r = safe_float(m.get("total_return_pct") or m.get("total_return"))
                     if r is not None:
                         window_returns.append(r)
 
@@ -168,6 +168,8 @@ def rolling_validate(
                 window_sharpes.append(safe_float(m["sharpe"]))
             if "total_return_pct" in m and safe_float(m["total_return_pct"]) is not None:
                 window_returns.append(safe_float(m["total_return_pct"]))
+            elif "total_return" in m and safe_float(m["total_return"]) is not None:
+                window_returns.append(safe_float(m["total_return"]))
 
         result = {
             "n_windows": len(wf_result.windows),

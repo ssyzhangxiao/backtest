@@ -77,6 +77,21 @@ class PyBrokerDataSource:
     def __len__(self) -> int:
         return len(self._df)
 
+    def for_symbol(self, symbol: str) -> "PyBrokerDataSource":
+        """
+        返回仅包含单个品种数据的子数据源。
+
+        Args:
+            symbol: 品种代码（如 'SHFE.RB'）
+
+        Returns:
+            仅含指定品种数据的新 PyBrokerDataSource 实例
+        """
+        filtered = self._df[self._df["symbol"] == symbol].copy()
+        if filtered.empty:
+            raise ValueError(f"数据源中无品种 {symbol}，可用品种: {self._symbols}")
+        return PyBrokerDataSource(filtered)
+
 
 def create_hybrid_data_source(
     phone: Optional[str] = None,

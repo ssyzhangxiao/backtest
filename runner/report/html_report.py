@@ -120,7 +120,7 @@ def _convert_results(
     """
     将实验结果转换为 report_builder 所需格式。
 
-    支持 PyBrokerResult 对象和普通字典两种输入格式。
+    支持 PyBrokerResult、普通字典、DataFrame 三种格式。
 
     Args:
         results: 实验结果字典
@@ -128,6 +128,8 @@ def _convert_results(
     Returns:
         {策略名: {metrics: {...}, dates: [...], equity: [...]}} 字典
     """
+    import pandas as pd
+
     strategies_data = {}
 
     for name, res in results.items():
@@ -150,15 +152,66 @@ def _convert_results(
             strategies_data[name] = sd
             continue
 
-        # 普通字典格式
+        # 普通字典格式（支持 equity 和 equity_curve 两种键名）
         if isinstance(res, dict):
             metrics = res.get("metrics", {})
             if metrics:
                 sd = {"metrics": dict(metrics)}
-                eq = res.get("equity_curve")
+                eq = res.get("equity_curve") or res.get("equity")
                 if eq is not None and hasattr(eq, "empty") and not eq.empty:
                     sd["dates"] = eq["date"].astype(str).tolist()
                     sd["equity"] = eq["equity"].astype(float).tolist()
                 strategies_data[name] = sd
+            continue
+
+        # DataFrame 格式（E1/E2/E3 等实验返回汇总表）
+        if isinstance(res, pd.DataFrame) and not res.empty:
+            _convert_dataframe_result(name, res, strategies_data)
+            continue
 
     return strategies_data
+
+
+def _convert_dataframe_result(
+    name: str,
+    df: "pd.DataFrame",
+    strategies_data: Dict[str, Dict[str, Any]],
+) -> None:
+    """
+    将 DataFrame 格式的实验结果展开为报告所需格式。
+
+    按 strategy/experiment 列分组，每组提取第一行作为指标。
+
+    Args:
+        name: 实验名称
+        df: 实验结果 DataFrame
+        strategies_data: 输出字典（原地修改）
+    """
+    import numpy as np
+
+    group_col = None
+    for col in ["strategy", "experiment"]:
+        if col in df.columns:
+            group_col = col
+            break
+
+    if group_col is None:
+        row = df.iloc[0].to_dict()
+        clean = {k: v for k, v in row.items()
+                 if isinstance(v, (int, float, np.integer, np.floating))
+                 and not np.isnan(v)}
+        strategies_data[name] = {"metrics": clean}
+        return
+
+    for group_val in df[group_col].dropna().unique():
+        if not group_val or (isinstance(group_val, float) and np.isnan(group_val)):
+            continue
+        subset = df[df[group_col] == group_val]
+        if subset.empty:
+            continue
+        row = subset.iloc[0].to_dict()
+        clean = {k: v for k, v in row.items()
+                 if isinstance(v, (int, float, np.integer, np.floating))
+                 and not np.isnan(v)}
+        entry_name = str(group_val).replace(" ", "_")
+        strategies_data[entry_name] = {"metrics": clean}

@@ -35,6 +35,10 @@ def main() -> None:
         help="先运行参数优化，再执行回测",
     )
     parser.add_argument(
+        "--symbol", default=None,
+        help="指定品种代码（如 SHFE.RB），仅优化/回测该品种",
+    )
+    parser.add_argument(
         "--validate", default=None,
         help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, all",
     )
@@ -58,7 +62,7 @@ def main() -> None:
         # 参数优化
         if args.optimize:
             logger.info("执行参数优化...")
-            pipe.optimize()
+            pipe.optimize(symbol=args.symbol)
 
         # 回测实验
         pipe.run_backtest(args.experiment)

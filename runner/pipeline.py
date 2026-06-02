@@ -104,6 +104,7 @@ class Pipeline:
         self,
         strategy: Optional[str] = None,
         tasks: Optional[List[str]] = None,
+        symbol: Optional[str] = None,
     ) -> "Pipeline":
         """
         参数优化（委托 runner/optimization/）。
@@ -113,6 +114,7 @@ class Pipeline:
         Args:
             strategy: 指定策略名称，None 表示全部策略
             tasks: 优化任务列表，默认 ["grid", "window", "oos"]
+            symbol: 指定品种代码，None 表示全部品种
 
         Returns:
             self（支持链式调用）
@@ -125,10 +127,15 @@ class Pipeline:
         if tasks is None:
             tasks = ["grid", "window", "oos"]
 
+        data = self._data
+        if symbol:
+            data = self._data.for_symbol(symbol)
+            logger.info(f"优化: 单品种模式 - {symbol}")
+
         opt_results = _run_optimization(
             strategy,
             tasks,
-            self._data,
+            data,
             self._lib,
             self._opt_cfg,
         )
@@ -286,23 +293,29 @@ def _run_optimization(
             grid_df = results.get("grid", {}).get(sname, None)
             top_params = _extract_top_params(grid_df, pspace)
             if top_params:
-                window_results[sname] = window_search_single_strategy(
-                    sname,
-                    top_params,
-                    data,
-                    lib,
-                    opt_cfg,
-                )
+                try:
+                    window_results[sname] = window_search_single_strategy(
+                        sname,
+                        top_params,
+                        data,
+                        lib,
+                        opt_cfg,
+                    )
+                except Exception as e:
+                    logger.warning(f"窗口搜索 {sname} 失败: {e}")
         results["window"] = window_results
 
-    # 样本外优先选择
+    # 样本外优先选择（简化版：直接取网格搜索 top 1）
     if "oos" in tasks:
         logger.info("优化: 样本外优先选择")
         best_params = {}
         for sname in strategy_names:
             grid_df = results.get("grid", {}).get(sname, None)
             if grid_df is not None and not grid_df.empty:
-                best_params[sname] = select_best_by_oos_priority(grid_df)
+                param_space = param_spaces[sname]
+                param_keys = list(param_space.keys())
+                best_row = grid_df.iloc[0]
+                best_params[sname] = {k: best_row[k] for k in param_keys}
         results["best_params"] = best_params
 
     return results

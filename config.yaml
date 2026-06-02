@@ -14,15 +14,16 @@ backtest:
   full_end_date: "2025-05-31"
   in_sample_end_date: "2023-01-01"
   out_sample_start_date: "2023-01-01"
-  rebalance_freq: 3             # 调仓周期：每3个交易日
+  rebalance_freq: 5             # 调仓周期：每5个交易日
   stop_loss_pct: 0.03           # 单品种止损-3%强制平仓（收紧止损）
   max_position_pct: 0.15        # 单品种最大仓位占比（降低集中度）
   max_total_position_pct: 0.60  # 总仓位上限
   min_position_pct: 0.0         # 最小仓位比例
-  entry_threshold: 0.15         # 开仓阈值（最优值）
-  top_n_symbols: 0              # 品种轮动：0=不筛选
-  use_cross_section: false      # 关闭横截面标准化
-  use_rank_score: false         # 关闭排名叠加
+  entry_threshold: 0.07         # 开仓阈值（当前最佳参数）
+  top_n_symbols: 4              # 品种轮动：4个品种
+  use_cross_section: true       # 启用横截面标准化
+  use_rank_score: true          # 启用排名叠加
+  use_trend_filter: true        # 启用趋势过滤（仅顺趋势交易）
   use_rolling_ic: true          # 启用滚动IC动态权重
 
 # =============================================================================
@@ -44,10 +45,10 @@ symbols:
 # 因子权重配置（平衡型：CTA侧50% + Alpha101侧50%，内部等权）
 # =============================================================================
 factor_weights:
-  ts_momentum: 0.25
-  roll_yield: 0.25
-  alpha019: 0.25
-  alpha032: 0.25
+  ts_momentum: 0.30
+  # roll_yield: 0.15
+  # alpha019: 0.15
+  alpha032: 0.70
 
 # =============================================================================
 # 策略参数配置（4个因子策略：CTA侧 + Alpha101侧）
@@ -58,18 +59,18 @@ strategies:
       window: 20
       position_size: 0.2
 
-  - name: "roll_yield"
-    params:
-      lookback: 20
-      entry_threshold: 2.0
-      exit_threshold: 0.5
-      position_size: 0.2
+  # - name: "roll_yield"
+  #   params:
+  #     lookback: 20
+  #     entry_threshold: 2.0
+  #     exit_threshold: 0.5
+  #     position_size: 0.2
 
-  - name: "alpha019"
-    params:
-      short_window: 5
-      long_window: 120
-      position_size: 0.2
+  # - name: "alpha019"
+  #   params:
+  #     short_window: 5
+  #     long_window: 120
+  #     position_size: 0.2
 
   - name: "alpha032"
     params:
