@@ -104,3 +104,26 @@ def format_metrics(m: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    清理文件名，移除非法字符，防止路径遍历。
+
+    Args:
+        name: 原始文件名
+
+    Returns:
+        安全的文件名
+    """
+    import re
+
+    # 移除或替换非法字符
+    sanitized = re.sub(r'[<>:"/\\|?*]', "_", name)
+    # 移除控制字符
+    sanitized = re.sub(r"[\x00-\x1f\x7f]", "", sanitized)
+    # 防止路径遍历
+    sanitized = sanitized.replace("..", "_")
+    # 去除首尾空格
+    sanitized = sanitized.strip()
+    return sanitized if sanitized else "unnamed"

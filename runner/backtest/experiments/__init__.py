@@ -11,6 +11,7 @@ from runner.backtest.experiments.e1_e5 import (
     run_e1_single_strategy_baselines,
     run_e2_equal_weight,
     run_e3_dynamic_weight,
+    run_e4_placeholder,
     run_e5_multi_symbol,
 )
 from runner.backtest.experiments.e6_e11 import (
@@ -26,6 +27,7 @@ _EXPERIMENT_MAP: Dict[str, Callable] = {
     "e1": run_e1_single_strategy_baselines,
     "e2": run_e2_equal_weight,
     "e3": run_e3_dynamic_weight,
+    "e4": run_e4_placeholder,
     "e5": run_e5_multi_symbol,
     "e6": run_e6_walkforward,
     "e7": run_e7_out_of_sample,
