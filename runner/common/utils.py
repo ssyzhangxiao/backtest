@@ -5,12 +5,16 @@
 统一调用入口，消除重复实现（重复#1）。
 """
 
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import numpy as np
 import pandas as pd
 from loguru import logger
+
+# 类型变量用于装饰器
+F = TypeVar("F", bound=Callable[..., Any])
 
 _EPSILON = 1e-10
 
@@ -127,3 +131,58 @@ def sanitize_filename(name: str) -> str:
     # 去除首尾空格
     sanitized = sanitized.strip()
     return sanitized if sanitized else "unnamed"
+
+
+def save_equity_curve(
+    equity: pd.DataFrame, output_dir: Path, prefix: str = "equity"
+) -> None:
+    """
+    通用净值曲线保存函数。
+
+    Args:
+        equity: 净值曲线 DataFrame
+        output_dir: 输出目录
+        prefix: 文件名前缀
+    """
+    if equity is None or equity.empty:
+        logger.warning(f"净值曲线为空，跳过保存: {prefix}")
+        return
+    save_csv(equity, output_dir / f"{prefix}.csv")
+
+
+def handle_backtest_errors(
+    return_value: Any = None,
+    log_error: bool = True,
+    reraise_types: tuple = (KeyboardInterrupt, SystemExit),
+) -> Callable[[F], F]:
+    """
+    回测错误处理装饰器。
+
+    捕获 KeyboardInterrupt 和 SystemExit 重新抛出，
+    其他异常记录日志后返回指定值。
+
+    Args:
+        return_value: 异常时返回的值
+        log_error: 是否记录错误日志
+        reraise_types: 需要重新抛出的异常类型
+
+    Returns:
+        装饰器函数
+    """
+
+    def decorator(func: F) -> F:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return func(*args, **kwargs)
+            except reraise_types:
+                # 重新抛出用户中断和系统退出
+                raise
+            except Exception as e:
+                if log_error:
+                    logger.error(f"函数 {func.__name__} 执行失败: {e}")
+                return return_value
+
+        return wrapper
+
+    return decorator

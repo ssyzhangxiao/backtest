@@ -29,7 +29,7 @@ import math
 import string
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -412,6 +412,9 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
     is_dates, is_eq = _read_equity_csv(output_dir / "e7_equity_in_sample.csv")
     os_dates, os_eq = _read_equity_csv(output_dir / "e7_equity_out_sample.csv")
 
+    # 收集 E5 多品种分散化数据
+    diversification_data = _collect_diversification_data(output_dir)
+
     return {
         "strategies": strategies,
         "out_sample_metrics": out_sample,
@@ -420,7 +423,60 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
         "out_sample_dates": os_dates,
         "out_sample_equity": os_eq,
         "rebalance_analysis": rebalance_analysis,
+        "diversification_data": diversification_data,
     }
+
+
+def _collect_diversification_data(output_dir: Path) -> dict:
+    """
+    收集 E5 多品种分散化数据。
+    """
+    data = {}
+
+    # 1. 收集 E5 多品种组合净值
+    e5_equity_file = output_dir / "e5_multi_symbol_equity.csv"
+    if e5_equity_file.exists():
+        dates, equity = _read_equity_csv(e5_equity_file)
+        data["multi_symbol_equity"] = {"dates": dates, "equity": equity}
+
+    # 2. 收集单品种净值（从 E1/E2/E3 的 equity 文件）
+    single_symbol_equities = {}
+    for equity_file in sorted(output_dir.glob("e*_equity_*.csv")):
+        stem = equity_file.stem
+        parts = stem.replace("_equity_", "|").split("|")
+        if len(parts) < 2:
+            continue
+        # 从文件名中提取品种名
+        symbol = parts[1].replace("_", ".")
+        dates, equity = _read_equity_csv(equity_file)
+        if dates and equity:
+            single_symbol_equities[symbol] = {"dates": dates, "equity": equity}
+    data["single_symbol_equities"] = single_symbol_equities
+
+    # 3. 收集相关性矩阵
+    corr_file = output_dir / "e5_correlation_matrix.csv"
+    if corr_file.exists():
+        try:
+            data["correlation_matrix"] = pd.read_csv(corr_file)
+        except Exception:
+            pass
+
+    # 4. 收集 E1/E2/E3 指标
+    for exp in [
+        "e1_baseline_metrics.csv",
+        "e2_equal_weight_metrics.csv",
+        "e3_dynamic_weight_metrics.csv",
+    ]:
+        file_path_exp = output_dir / exp
+        if file_path_exp.exists():
+            try:
+                df = pd.read_csv(file_path_exp)
+                key = exp.replace(".csv", "").replace("_", "_").replace("e", "E")
+                data[f"{key}_metrics"] = df
+            except Exception:
+                pass
+
+    return data
 
 
 def collect_from_validation(output_dir: Path) -> Dict[str, Any]:
@@ -573,7 +629,7 @@ def _build_html_report(report_data: Dict[str, Any]) -> str:
 
 
 def generate_report(
-    output_dir: Optional[str] = None,
+    output_dir: Optional[Union[Path, str]] = None,
     strategies_data: Optional[Dict[str, Any]] = None,
     out_sample_metrics: Optional[Dict[str, Any]] = None,
     in_sample_dates: Optional[List[str]] = None,
@@ -585,6 +641,8 @@ def generate_report(
     subtitle: str = "多策略期货量化交易系统 · 综合绩效评估",
     report_name: str = "backtest_report_full.html",
     include_evaluation: bool = True,
+    config: Optional[Dict[str, Any]] = None,
+    evaluation_html: Optional[str] = None,
 ) -> Path:
     """
     生成完整的量化回测分析 HTML 报告。
@@ -598,6 +656,8 @@ def generate_report(
         title / subtitle: 报告标题与副标题
         report_name: 输出文件名
         include_evaluation: 是否包含综合评价与改进建议模块
+        config: 配置字典，用于动态生成评价
+        evaluation_html: 自定义评价 HTML，若提供则不自动生成
 
     Returns:
         生成的报告文件 Path
@@ -616,6 +676,7 @@ def generate_report(
         rebalance_analysis = rebalance_analysis or collected.get(
             "rebalance_analysis", {}
         )
+        diversification_data = collected.get("diversification_data", {})
 
         # 标准扫描无结果，尝试父目录 (如果 out_path 是 validation 子目录)
         if not strategies_data:
@@ -659,6 +720,7 @@ def generate_report(
         in_sample_equity = in_sample_equity or []
         out_sample_dates = out_sample_dates or []
         out_sample_equity = out_sample_equity or []
+        diversification_data = {}
         # 即使程序化传入策略数据，也尝试从目录读取E7净值曲线和样本外指标
         if not in_sample_equity:
             is_d, is_e = _read_equity_csv(out_path / "e7_equity_in_sample.csv")
@@ -1088,6 +1150,189 @@ def generate_report(
                 <td>{tc}</td>
             </tr>"""
 
+    # ── 多品种分散化分析 ──
+    diversification_html = ""
+    diversification_chart_data = {}
+    if diversification_data:
+        # 准备分散化图表数据
+        single_symbols = diversification_data.get("single_symbol_equities", {})
+        multi_symbol = diversification_data.get("multi_symbol_equity", {})
+
+        if single_symbols or multi_symbol:
+            # 归一化净值数据
+            normalized_equities = {}
+
+            # 处理单品种
+            for name, data_item in single_symbols.items():
+                dates = data_item.get("dates", [])
+                equity = data_item.get("equity", [])
+                if dates and equity and len(equity) > 0:
+                    first_val = equity[0] if equity[0] != 0 else 1
+                    normalized = [e / first_val for e in equity]
+                    normalized_equities[name] = {"dates": dates, "equity": normalized}
+
+            # 处理多品种组合
+            if multi_symbol:
+                dates = multi_symbol.get("dates", [])
+                equity = multi_symbol.get("equity", [])
+                if dates and equity and len(equity) > 0:
+                    first_val = equity[0] if equity[0] != 0 else 1
+                    normalized = [e / first_val for e in equity]
+                    normalized_equities["多品种组合"] = {
+                        "dates": dates,
+                        "equity": normalized,
+                    }
+
+            # 计算绩效指标对比
+            performance_comparison = []
+            for name, data_item in normalized_equities.items():
+                equity = data_item.get("equity", [])
+                if len(equity) < 2:
+                    continue
+                # 计算指标
+                total_return = (equity[-1] / equity[0] - 1) * 100
+                daily_rets = _compute_daily_returns(equity)
+                annualized_return = (
+                    (sum(daily_rets) / len(daily_rets)) * TRADING_DAYS_PER_YEAR * 100
+                    if daily_rets
+                    else 0
+                )
+                volatility = _compute_volatility(daily_rets)
+                sharpe = (
+                    (annualized_return - RISK_FREE_RATE) / volatility
+                    if volatility != 0
+                    else 0
+                )
+                drawdown_seq = _compute_drawdown(equity)
+                max_drawdown = min(drawdown_seq) if drawdown_seq else 0
+
+                performance_comparison.append(
+                    {
+                        "name": name,
+                        "total_return": round(total_return, 2),
+                        "annualized_return": round(annualized_return, 2),
+                        "volatility": round(volatility, 2),
+                        "sharpe": round(sharpe, 4),
+                        "max_drawdown": round(max_drawdown, 2),
+                    }
+                )
+
+            # 相关性矩阵数据
+            corr_matrix_data = None
+            if "correlation_matrix" in diversification_data:
+                df_corr = diversification_data["correlation_matrix"]
+                if hasattr(df_corr, "to_dict"):
+                    try:
+                        corr_matrix_data = df_corr.to_dict(orient="split")
+                    except Exception:
+                        pass
+
+            # 组装图表数据
+            diversification_chart_data = {
+                "equity_curves": normalized_equities,
+                "performance": performance_comparison,
+                "correlation": corr_matrix_data,
+            }
+
+            # 构建绩效表格行
+            perf_rows = ""
+            for item in performance_comparison:
+                name = item["name"]
+                tr = item["total_return"]
+                ar = item["annualized_return"]
+                vol = item["volatility"]
+                sh = item["sharpe"]
+                md = item["max_drawdown"]
+
+                perf_rows += f'''
+                <tr>
+                    <td><strong>{name}</strong></td>
+                    <td class="{"positive" if tr > 0 else "negative"}">{tr:+.2f}%</td>
+                    <td class="{"positive" if ar > 0 else "negative"}">{ar:+.2f}%</td>
+                    <td>{vol:.2f}%</td>
+                    <td class="{"positive" if sh > 0.1 else ""}">{sh:.4f}</td>
+                    <td class="{"negative" if md < -5 else ""}">{md:.2f}%</td>
+                </tr>'''
+
+            # 相关性热力图 HTML
+            corr_html = ""
+            if corr_matrix_data:
+                corr_rows = []
+                headers = corr_matrix_data.get("columns", [])
+                data_rows = corr_matrix_data.get("data", [])
+
+                # 表头
+                header_html = "<th></th>" + "".join([f"<th>{h}</th>" for h in headers])
+
+                # 数据行
+                for i, row in enumerate(data_rows):
+                    cells = [f"<td><strong>{headers[i]}</strong></td>"]
+                    for j, val in enumerate(row):
+                        # 根据相关性值设置颜色
+                        cell = ""
+                        if isinstance(val, (int, float)):
+                            color = ""
+                            if val > 0.7:
+                                color = "background-color: #ff6b6b; color: white;"
+                            elif val > 0.5:
+                                color = "background-color: #ffa726;"
+                            elif val > 0.3:
+                                color = "background-color: #ffee58;"
+                            elif val < -0.5:
+                                color = "background-color: #42a5f5; color: white;"
+                            cell = f'<td style="{color}">{val:.2f}</td>'
+                        else:
+                            cell = f"<td>{val}</td>"
+                        cells.append(cell)
+                    corr_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+                corr_html = f"""
+                <div class="table-box" style="margin-top: 20px;">
+                    <h4 style="margin-bottom: 10px;">品种相关性矩阵</h4>
+                    <div class="table-wrapper">
+                        <table class="data-table" style="font-size: 12px;">
+                            <thead>
+                                <tr>{header_html}</tr>
+                            </thead>
+                            <tbody>{"".join(corr_rows)}</tbody>
+                        </table>
+                    </div>
+                </div>"""
+
+            # 组装完整 HTML
+            diversification_html = f"""
+            <div class="section-title">📊 多品种分散化分析</div>
+            <div class="section-desc">对比单品种与多品种组合的绩效表现，展示分散化效应</div>
+            
+            <!-- 净值对比图 -->
+            <div class="card">
+                <div class="card-header">净值曲线对比（归一化）</div>
+                <div id="diversificationEquityChart" style="height: 300px;"></div>
+            </div>
+            
+            <!-- 绩效对比表格 -->
+            <div class="card" style="margin-top: 20px;">
+                <div class="card-header">绩效对比</div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>总收益</th>
+                                <th>年化收益</th>
+                                <th>波动率</th>
+                                <th>夏普比率</th>
+                                <th>最大回撤</th>
+                            </tr>
+                        </thead>
+                        <tbody>{perf_rows}</tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {corr_html}
+            """
+
     # 组装 chart_data
     chart_data = {
         "equity_curves": equity_js,
@@ -1116,6 +1361,7 @@ def generate_report(
             "names": corr_names,
             "matrix": corr_matrix,
         },
+        "diversification": diversification_chart_data,
     }
 
     # ── 调仓决策分析 ──
@@ -1174,7 +1420,19 @@ def generate_report(
             rebalance_html = "\n".join(rebalance_sections)
 
     # ── 综合评价 ──
-    evaluation_html = _DEFAULT_EVALUATION_HTML if include_evaluation else ""
+    if not include_evaluation:
+        evaluation_html = ""
+    elif evaluation_html is not None:
+        # 使用调用方提供的自定义 HTML
+        pass
+    else:
+        # 动态生成评价 HTML
+        evaluation_html = _build_dynamic_evaluation_html(
+            config=config,
+            strategies_data=strategies_data,
+            out_sample_metrics=out_sample_metrics,
+            output_dir=out_path,
+        )
 
     # ── 构建报告上下文 ──
     report_ctx = {
@@ -1192,6 +1450,7 @@ def generate_report(
         "strategy_table_html": strategy_table_rows,
         "oos_table_html": oos_table_rows,
         "strategy_oos_html": strategy_oos_rows,
+        "diversification_html": diversification_html,
         "chart_data_json": json.dumps(chart_data, ensure_ascii=False),
         "rebalance_html": rebalance_html,
         "evaluation_html": evaluation_html,
@@ -1460,6 +1719,8 @@ _HTML_TEMPLATE = (
         <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 所有策略样本内净值对比</div><canvas id="chartAllIS"></canvas></div>
         <div class="chart-box"><div style="font-size:14px;font-weight:600;margin-bottom:12px;">&#x1f4c8; 所有策略样本外净值对比</div><canvas id="chartAllOS"></canvas></div>
     </div>
+
+    $diversification_html
 
     $rebalance_html
 
@@ -1963,12 +2224,465 @@ var reportData = """
         },
     });
 })();
+
+// ── 多品种分散化净值图表 ──
+(function() {
+    if (!reportData.diversification || !reportData.diversification.equity_curves) return;
+    var divEquities = reportData.diversification.equity_curves;
+    var divNames = Object.keys(divEquities);
+    if (!divNames.length) return;
+    
+    // 使用第一个品种的日期作为基准
+    var firstKey = divNames[0];
+    var labels = divEquities[firstKey].dates;
+    
+    var COLORS = [
+        '#3b82f6', '#10b981', '#f59e0b', '#ef4444', 
+        '#8b5cf6', '#06b6d4', '#ec4899', '#6366f1'
+    ];
+    
+    var datasets = divNames.map(function(name, idx) {
+        return {
+            label: name,
+            data: divEquities[name].equity,
+            borderColor: COLORS[idx % COLORS.length],
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.1
+        };
+    });
+    
+    new Chart(document.getElementById('diversificationEquityChart'), {
+        type: 'line',
+        data: { labels: labels, datasets: datasets },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { position: 'top' },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) {
+                            return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(4);
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { type: 'category', ticks: { maxTicksLimit: 12, autoSkip: true } },
+                y: { title: { display: true, text: '净值（归一化）' } }
+            }
+        }
+    });
+})();
+
 </script>
 </body>
 </html>"""
 )
 
-_DEFAULT_EVALUATION_HTML = """
+
+def _build_dynamic_evaluation_html(
+    config: Optional[Dict[str, Any]] = None,
+    strategies_data: Optional[Dict[str, Any]] = None,
+    out_sample_metrics: Optional[Dict[str, Any]] = None,
+    output_dir: Optional[Path] = None,
+) -> str:
+    """
+    根据输入数据动态生成综合评价与改进建议 HTML。
+
+    Args:
+        config: 配置字典
+        strategies_data: 策略数据
+        out_sample_metrics: 样本外指标
+        output_dir: 输出目录
+
+    Returns:
+        动态生成的 HTML 字符串
+    """
+    try:
+        # ── 1. 初始化状态标记 ──
+        implemented_items = []
+        pending_items = []
+        problems = []
+        scores = []
+
+        # ── 2. 从 config 检查风控参数 ──
+        if config:
+            risk = config.get("risk", {})
+
+            # 检查止损
+            stop_loss = risk.get("stop_loss")
+            if stop_loss and stop_loss.get("enabled"):
+                implemented_items.append(
+                    f"<strong>止损机制</strong>：已启用，止损幅度 {stop_loss.get('percent', 'N/A')}%"
+                )
+            else:
+                pending_items.append(
+                    f"<strong>止损机制</strong>：建议启用固定止损或 ATR 动态止损"
+                )
+
+            # 检查 ATR 止损
+            atr_stop = risk.get("atr_stop")
+            if atr_stop and atr_stop.get("enabled"):
+                implemented_items.append(
+                    f"<strong>ATR 动态止损</strong>：已启用，倍数 {atr_stop.get('multiplier', 'N/A')}x"
+                )
+            else:
+                pending_items.append(
+                    f"<strong>ATR 动态止损</strong>：建议实现基于波动率的自适应止损"
+                )
+
+            # 检查交易成本
+            costs = config.get("costs", {})
+            if costs.get("commission") or costs.get("slippage"):
+                commission = costs.get("commission", 0)
+                slippage = costs.get("slippage", 0)
+                implemented_items.append(
+                    f"<strong>交易成本</strong>：已设置，手续费 {commission * 10000:.0f}bps + 滑点 {slippage * 10000:.0f}bps"
+                )
+            else:
+                pending_items.append(
+                    f"<strong>交易成本</strong>：建议真实化交易成本（手续费+滑点）"
+                )
+
+            # 检查信号确认
+            signal = config.get("signal", {})
+            if signal.get("confirm"):
+                implemented_items.append(
+                    f"<strong>信号确认</strong>：已启用连续确认机制"
+                )
+            else:
+                pending_items.append(
+                    f"<strong>信号确认</strong>：建议增加信号确认以降低假阳性"
+                )
+
+        # ── 3. 从 strategies_data 计算全局指标 ──
+        avg_sharpe = 0.0
+        avg_max_dd = 0.0
+        strat_count = 0
+
+        if strategies_data:
+            sharpes = []
+            max_dds = []
+
+            for name, data in strategies_data.items():
+                metrics = data.get("metrics", {})
+                sharpe = metrics.get("sharpe")
+                max_dd = metrics.get("max_drawdown_pct")
+
+                # 尝试转换为数值类型（处理从 CSV 读取的字符串）
+                def to_float(x):
+                    try:
+                        return float(x)
+                    except (ValueError, TypeError):
+                        return None
+
+                sharpe = to_float(sharpe)
+                max_dd = to_float(max_dd)
+
+                if isinstance(sharpe, (int, float)):
+                    sharpes.append(sharpe)
+                if isinstance(max_dd, (int, float)):
+                    max_dds.append(abs(max_dd))
+
+            if sharpes:
+                avg_sharpe = sum(sharpes) / len(sharpes)
+            if max_dds:
+                avg_max_dd = sum(max_dds) / len(max_dds)
+            strat_count = len(sharpes)
+
+        # 基于指标添加问题诊断
+        if avg_sharpe < 0.3:
+            problems.append(
+                {
+                    "title": "1. 风险调整后收益偏低",
+                    "desc": f'平均 Sharpe 比率仅为 <span class="negative">{avg_sharpe:.3f}</span>，低于一般可接受水平（建议 &gt;0.5）。',
+                }
+            )
+        elif avg_sharpe < 0.5:
+            problems.append(
+                {
+                    "title": "1. 风险调整后收益有待提高",
+                    "desc": f"平均 Sharpe 比率为 {avg_sharpe:.3f}，仍有优化空间。",
+                }
+            )
+        else:
+            problems.append(
+                {
+                    "title": "1. 风险调整后收益良好",
+                    "desc": f'平均 Sharpe 比率为 <span class="positive">{avg_sharpe:.3f}</span>，表现不错。',
+                }
+            )
+
+        if avg_max_dd > 20:
+            problems.append(
+                {
+                    "title": "2. 最大回撤偏高",
+                    "desc": f'平均最大回撤 <span class="negative">{avg_max_dd:.1f}%</span>，风控需要加强。',
+                }
+            )
+        elif avg_max_dd > 10:
+            problems.append(
+                {
+                    "title": "2. 回撤控制尚可",
+                    "desc": f"平均最大回撤 {avg_max_dd:.1f}%，仍有优化空间。",
+                }
+            )
+        else:
+            problems.append(
+                {
+                    "title": "2. 回撤控制良好",
+                    "desc": f'平均最大回撤 <span class="positive">{avg_max_dd:.1f}%</span>，表现优秀。',
+                }
+            )
+
+        # ── 4. 检查样本外衰减 ──
+        oos_decay = 0.0
+        if out_sample_metrics:
+            # 辅助函数：安全地转换为 float
+            def to_float_safe(x, default=0.0):
+                try:
+                    return float(x)
+                except (ValueError, TypeError):
+                    return default
+
+            in_sample = out_sample_metrics.get("in_sample", {})
+            out_sample = out_sample_metrics.get("out_sample", {})
+
+            is_sharpe = to_float_safe(in_sample.get("sharpe"))
+            oos_sharpe = to_float_safe(out_sample.get("sharpe"))
+
+            if is_sharpe and is_sharpe != 0:
+                oos_decay = (
+                    (is_sharpe - oos_sharpe) / abs(is_sharpe) if is_sharpe > 0 else 0
+                )
+
+            if oos_decay > 0.3:
+                problems.append(
+                    {
+                        "title": "3. 样本外衰减显著",
+                        "desc": f'样本外 Sharpe 衰减约 <span class="negative">{oos_decay * 100:.0f}%</span>，存在过拟合风险。',
+                    }
+                )
+                pending_items.append(
+                    f"<strong>过拟合检查</strong>：建议增加参数扰动测试和 WalkForward 验证"
+                )
+            elif oos_decay > 0:
+                problems.append(
+                    {
+                        "title": "3. 样本外有一定衰减",
+                        "desc": f"样本外 Sharpe 衰减约 {oos_decay * 100:.0f}%，需要关注。",
+                    }
+                )
+            else:
+                problems.append(
+                    {
+                        "title": "3. 样本外表现稳定",
+                        "desc": f"样本外 Sharpe 衰减很小，策略鲁棒性较好。",
+                    }
+                )
+
+        # ── 5. 扫描 output_dir 检查分析文件 ──
+        has_wf = False
+        has_mc = False
+        has_corr = False
+
+        if output_dir and output_dir.exists():
+            has_wf = (output_dir / "task1_wf_compare.csv").exists() or (
+                output_dir / "e7_equity_out_sample.csv"
+            ).exists()
+            has_mc = (output_dir / "task3_monte_carlo_summary.csv").exists() or (
+                output_dir / "e9_monte_carlo_results.csv"
+            ).exists()
+            has_corr = (output_dir / "e5_correlation_matrix.csv").exists()
+
+        if has_wf:
+            implemented_items.append(
+                f"<strong>WalkForward 验证</strong>：已执行滚动窗口验证"
+            )
+        else:
+            pending_items.append(
+                f"<strong>WalkForward 验证</strong>：建议执行滚动窗口验证以评估参数稳定性"
+            )
+
+        if has_mc:
+            implemented_items.append(
+                f"<strong>蒙特卡洛模拟</strong>：已执行蒙特卡洛分析"
+            )
+        else:
+            pending_items.append(
+                f"<strong>蒙特卡洛模拟</strong>：建议执行蒙特卡洛模拟以评估策略鲁棒性"
+            )
+
+        if has_corr:
+            implemented_items.append(
+                f"<strong>相关性分析</strong>：已计算策略相关性矩阵"
+            )
+        else:
+            pending_items.append(
+                f"<strong>相关性分析</strong>：建议分析策略间相关性以优化组合"
+            )
+
+        # ── 6. 始终保留的通用待实施项 ──
+        pending_items.append(
+            f"<strong>因子有效性提升</strong>：引入更高预测力的因子或优化因子构造方式"
+        )
+        pending_items.append(
+            f"<strong>自适应参数机制</strong>：实现滚动窗口自适应参数（EMA窗口、ATR倍数等）"
+        )
+        pending_items.append(
+            f"<strong>多时间框架融合</strong>：引入周频/月频趋势判断作为过滤层"
+        )
+        pending_items.append(
+            f"<strong>动态仓位管理</strong>：根据策略近期表现动态调整权重"
+        )
+        pending_items.append(
+            f"<strong>追踪止损优化</strong>：实现 Trailing Stop 和时间止损"
+        )
+        pending_items.append(f"<strong>品种选择优化</strong>：为每个策略筛选适配品种池")
+        pending_items.append(
+            f"<strong>实盘模拟验证</strong>：通过 Paper Trading 验证至少3个月"
+        )
+
+        # ── 7. 生成评分表 ──
+        # 绝对收益
+        if avg_sharpe > 1.0:
+            scores.append(("绝对收益", "✅ 优秀", "Sharpe > 1.0"))
+        elif avg_sharpe > 0.5:
+            scores.append(("绝对收益", "⚠️ 良好", f"Sharpe {avg_sharpe:.2f}"))
+        else:
+            scores.append(("绝对收益", "❌ 较差", f"Sharpe {avg_sharpe:.2f}"))
+
+        # 风险调整收益
+        if avg_sharpe > 1.0:
+            scores.append(("风险调整收益", "✅ 优秀", f"Sharpe {avg_sharpe:.2f}"))
+        elif avg_sharpe > 0.5:
+            scores.append(("风险调整收益", "⚠️ 良好", f"Sharpe {avg_sharpe:.2f}"))
+        else:
+            scores.append(("风险调整收益", "❌ 很差", f"Sharpe {avg_sharpe:.2f}"))
+
+        # 回撤控制
+        if avg_max_dd < 10:
+            scores.append(("回撤控制", "✅ 优秀", f"平均回撤 {avg_max_dd:.1f}%"))
+        elif avg_max_dd < 20:
+            scores.append(("回撤控制", "⚠️ 合格", f"平均回撤 {avg_max_dd:.1f}%"))
+        else:
+            scores.append(("回撤控制", "❌ 不合格", f"平均回撤 {avg_max_dd:.1f}%"))
+
+        # 样本外稳定性
+        if oos_decay < 0.1:
+            scores.append(("样本外稳定性", "✅ 很好", "衰减 < 10%"))
+        elif oos_decay < 0.3:
+            scores.append(("样本外稳定性", "⚠️ 需关注", f"衰减 {oos_decay * 100:.0f}%"))
+        else:
+            scores.append(("样本外稳定性", "❌ 风险大", f"衰减 {oos_decay * 100:.0f}%"))
+
+        # 分析完整性
+        analysis_count = sum([has_wf, has_mc, has_corr])
+        if analysis_count >= 3:
+            scores.append(("分析完整性", "✅ 完整", "所有分析均执行"))
+        elif analysis_count >= 1:
+            scores.append(("分析完整性", "⚠️ 部分", f"已执行 {analysis_count}/3 项分析"))
+        else:
+            scores.append(("分析完整性", "❌ 不足", "建议补充验证分析"))
+
+        # ── 8. 组装 HTML ──
+        html_parts = []
+
+        html_parts.append("""
+    <div class="section-title">综合评价与改进建议</div>
+    <div class="section-desc">基于回测结果的多维度定性分析，识别策略核心问题并提出改进方向</div>
+
+    <div class="card">
+        <div class="card-header">核心问题诊断</div>
+""")
+
+        # 添加问题
+        for problem in problems:
+            html_parts.append(f"""
+        <div class="eval-problem">
+            <div class="eval-problem-title">{problem["title"]}</div>
+            <p>{problem["desc"]}</p>
+        </div>
+""")
+
+        html_parts.append("""
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <div class="card-header">多维度评分</div>
+        <div class="table-wrapper"><table>
+            <thead><tr><th>评价维度</th><th>评级</th><th>说明</th></tr></thead>
+            <tbody>
+""")
+
+        # 添加评分行
+        for dim, rating, desc in scores:
+            badge_class = (
+                "badge-success"
+                if "✅" in rating
+                else "badge-warning"
+                if "⚠️" in rating
+                else "badge-danger"
+            )
+            html_parts.append(f"""
+                <tr><td>{dim}</td><td><span class="badge {badge_class}">{rating}</span></td><td>{desc}</td></tr>
+""")
+
+        html_parts.append("""
+            </tbody>
+        </table></div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <div class="card-header">改进建议（已实施 + 待实施）</div>
+        <div class="eval-problem">
+            <div class="eval-problem-title" style="color:#10b981;">✅ 已实施的改进</div>
+            <ol class="suggestion-list">
+""")
+
+        # 添加已实施项
+        if implemented_items:
+            for item in implemented_items[:8]:  # 限制数量避免过长
+                html_parts.append(f"""
+                <li>{item}</li>
+""")
+        else:
+            html_parts.append("""
+                <li>暂无记录，请检查配置或运行完整分析流程。</li>
+""")
+
+        html_parts.append("""
+            </ol>
+        </div>
+        <div class="eval-problem" style="margin-top:12px;">
+            <div class="eval-problem-title" style="color:#f59e0b;">⚠️ 待实施的改进</div>
+            <ol class="suggestion-list">
+""")
+
+        # 添加待实施项
+        for item in pending_items[:10]:  # 限制数量
+            html_parts.append(f"""
+                <li>{item}</li>
+""")
+
+        html_parts.append("""
+            </ol>
+        </div>
+    </div>
+""")
+
+        return "".join(html_parts)
+
+    except Exception as e:
+        logger.warning(f"动态评价生成失败，使用默认模板: {e}")
+        return _FALLBACK_EVALUATION_HTML
+
+
+# 保留原有模板作为后备
+_FALLBACK_EVALUATION_HTML = """
     <div class="section-title">综合评价与改进建议</div>
     <div class="section-desc">基于回测结果的多维度定性分析，识别策略核心问题并提出改进方向</div>
 

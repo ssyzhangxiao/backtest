@@ -5,6 +5,7 @@ HTML 报告生成模块。
 不重复实现报告构建逻辑。
 """
 
+from dataclasses import is_dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -120,7 +121,7 @@ def _convert_results(
     """
     将实验结果转换为 report_builder 所需格式。
 
-    支持 PyBrokerResult、普通字典、DataFrame 三种格式。
+    支持 PyBrokerResult、普通字典、DataFrame、dataclass 四种格式。
 
     Args:
         results: 实验结果字典
@@ -129,6 +130,7 @@ def _convert_results(
         {策略名: {metrics: {...}, dates: [...], equity: [...]}} 字典
     """
     import pandas as pd
+    import numpy as np
 
     strategies_data = {}
 
@@ -139,7 +141,9 @@ def _convert_results(
         # PyBrokerResult 对象
         if isinstance(res, PyBrokerResult):
             sd = {
-                "metrics": dict(res.metrics) if hasattr(res, "metrics") and res.metrics else {},
+                "metrics": dict(res.metrics)
+                if hasattr(res, "metrics") and res.metrics
+                else {},
             }
             if (
                 hasattr(res, "equity_curve")
@@ -150,6 +154,29 @@ def _convert_results(
                 sd["dates"] = df["date"].astype(str).tolist()
                 sd["equity"] = df["equity"].astype(float).tolist()
             strategies_data[name] = sd
+            continue
+
+        # Dataclass（如 BootstrapResult）
+        if is_dataclass(res):
+            try:
+                data_dict = asdict(res)
+                # 提取 dataclass 中的数值作为指标
+                metrics = {}
+                for key, value in data_dict.items():
+                    if isinstance(value, (int, float)) and not np.isnan(value):
+                        metrics[key] = value
+                    elif (
+                        isinstance(value, list)
+                        and len(value) > 0
+                        and isinstance(value[0], (int, float))
+                    ):
+                        metrics[f"{key}_mean"] = np.mean(value)
+                        metrics[f"{key}_std"] = np.std(value)
+                        metrics[f"{key}_count"] = len(value)
+                if metrics:
+                    strategies_data[name] = {"metrics": metrics}
+            except Exception as e:
+                logger.warning(f"转换 dataclass 失败: {e}")
             continue
 
         # 普通字典格式（支持 equity 和 equity_curve 两种键名）
@@ -180,7 +207,7 @@ def _convert_dataframe_result(
     """
     将 DataFrame 格式的实验结果展开为报告所需格式。
 
-    按 strategy/experiment 列分组，每组提取第一行作为指标。
+    按 strategy/experiment 列分组，计算每组的统计指标。
 
     Args:
         name: 实验名称
@@ -189,6 +216,12 @@ def _convert_dataframe_result(
     """
     import numpy as np
 
+    # 筛选数值列
+    numeric_cols = []
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            numeric_cols.append(col)
+
     group_col = None
     for col in ["strategy", "experiment"]:
         if col in df.columns:
@@ -196,22 +229,56 @@ def _convert_dataframe_result(
             break
 
     if group_col is None:
+        # 无分组列，计算整体统计
+        stats = {}
+        for col in numeric_cols:
+            if col in ["date", "time"]:
+                continue
+            col_data = df[col].dropna()
+            if len(col_data) > 0:
+                stats[f"{col}_mean"] = col_data.mean()
+                stats[f"{col}_std"] = col_data.std()
+                stats[f"{col}_min"] = col_data.min()
+                stats[f"{col}_max"] = col_data.max()
+        # 同时保留第一行数据
         row = df.iloc[0].to_dict()
-        clean = {k: v for k, v in row.items()
-                 if isinstance(v, (int, float, np.integer, np.floating))
-                 and not np.isnan(v)}
-        strategies_data[name] = {"metrics": clean}
+        clean = {
+            k: v
+            for k, v in row.items()
+            if isinstance(v, (int, float, np.integer, np.floating)) and not np.isnan(v)
+        }
+        stats.update(clean)
+        strategies_data[name] = {"metrics": stats}
         return
 
+    # 有分组列，按组计算统计
     for group_val in df[group_col].dropna().unique():
         if not group_val or (isinstance(group_val, float) and np.isnan(group_val)):
             continue
         subset = df[df[group_col] == group_val]
         if subset.empty:
             continue
+
+        # 计算该组的统计指标
+        stats = {}
+        for col in numeric_cols:
+            if col in ["date", "time"]:
+                continue
+            col_data = subset[col].dropna()
+            if len(col_data) > 0:
+                stats[f"{col}_mean"] = col_data.mean()
+                stats[f"{col}_std"] = col_data.std()
+                stats[f"{col}_min"] = col_data.min()
+                stats[f"{col}_max"] = col_data.max()
+
+        # 同时保留第一行数据
         row = subset.iloc[0].to_dict()
-        clean = {k: v for k, v in row.items()
-                 if isinstance(v, (int, float, np.integer, np.floating))
-                 and not np.isnan(v)}
+        clean = {
+            k: v
+            for k, v in row.items()
+            if isinstance(v, (int, float, np.integer, np.floating)) and not np.isnan(v)
+        }
+        stats.update(clean)
+
         entry_name = str(group_val).replace(" ", "_")
-        strategies_data[entry_name] = {"metrics": clean}
+        strategies_data[entry_name] = {"metrics": stats}
