@@ -41,14 +41,15 @@ def generate(
 
     fmt_lower = fmt.lower()
 
+    raw_config = config if isinstance(config, dict) else {}
+
     if fmt_lower == "html":
-        raw_config = config if isinstance(config, dict) else {}
         return generate_html_report(raw_config, results, output_dir)
     elif fmt_lower == "csv":
         paths = export_results_csv(results, output_dir)
         return str(paths[0]) if paths else None
     elif fmt_lower == "validation":
-        return generate_validation_report(output_dir)
+        return generate_validation_report(output_dir, config=raw_config)
     else:
         from loguru import logger
 

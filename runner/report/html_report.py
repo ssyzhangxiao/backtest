@@ -49,9 +49,12 @@ def generate_html_report(
     # 将 PyBrokerResult 转换为 report_builder 所需格式
     strategies_data = _convert_results(results)
 
-    if not strategies_data:
-        logger.warning("无策略数据，跳过报告生成")
-        return None
+    # 从 validation 结果中提取样本外指标
+    out_sample_metrics = None
+    if "validation" in results:
+        validation = results["validation"]
+        if isinstance(validation, dict) and "train_test" in validation:
+            out_sample_metrics = validation["train_test"]
 
     if subtitle is None:
         subtitle = f"PyBroker 多策略回测 · {datetime.now().strftime('%Y-%m-%d')}"
@@ -63,6 +66,8 @@ def generate_html_report(
             title=title,
             subtitle=subtitle,
             report_name=report_name,
+            config=config,
+            out_sample_metrics=out_sample_metrics,
         )
         logger.info(f"报告已保存至 {output_dir / report_name}")
         return report_path
@@ -73,6 +78,7 @@ def generate_html_report(
 
 def generate_validation_report(
     output_dir: Path,
+    config: Optional[Dict[str, Any]] = None,
     title: str = "量化回测验证分析报告",
     subtitle: Optional[str] = None,
     report_name: str = "validation_report.html",
@@ -84,6 +90,7 @@ def generate_validation_report(
 
     Args:
         output_dir: 输出目录
+        config: 配置字典（用于动态评价）
         title: 报告标题
         subtitle: 报告副标题
         report_name: 报告文件名
@@ -107,6 +114,7 @@ def generate_validation_report(
             title=title,
             subtitle=subtitle,
             report_name=report_name,
+            config=config,
         )
         logger.info(f"验证报告已生成: {report_path}")
         return report_path
@@ -122,6 +130,7 @@ def _convert_results(
     将实验结果转换为 report_builder 所需格式。
 
     支持 PyBrokerResult、普通字典、DataFrame、dataclass 四种格式。
+    特别处理 "all" 键，递归展开其内部内容。
 
     Args:
         results: 实验结果字典
@@ -136,6 +145,13 @@ def _convert_results(
 
     for name, res in results.items():
         if res is None:
+            continue
+
+        # 处理 "all" 键：递归展开内部内容
+        if name == "all" and isinstance(res, dict):
+            logger.info("发现 'all' 实验结果，递归展开...")
+            sub_data = _convert_results(res)
+            strategies_data.update(sub_data)
             continue
 
         # PyBrokerResult 对象
