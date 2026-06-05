@@ -9,6 +9,7 @@
   python run_optimize.py                     # 全部策略优化
   python run_optimize.py --strategy ts_mom   # 单策略优化
   python run_optimize.py --skip-grid         # 跳过网格搜索
+  python run_optimize.py --factor-screen     # 先筛选AlphaFutures24因子再优化
 """
 
 import argparse
@@ -22,16 +23,24 @@ def main() -> None:
     """主执行入口：解析参数 → Pipeline 优化调用。"""
     parser = argparse.ArgumentParser(description="参数优化（Pipeline版）")
     parser.add_argument(
-        "--config", default="config.yaml",
+        "--config",
+        default="config.yaml",
         help="配置文件路径（默认: config.yaml）",
     )
     parser.add_argument(
-        "--strategy", default=None,
+        "--strategy",
+        default=None,
         help="指定策略名称，默认全部策略",
     )
     parser.add_argument(
-        "--skip-grid", action="store_true",
+        "--skip-grid",
+        action="store_true",
         help="跳过网格搜索，仅执行窗口搜索和OOS选择",
+    )
+    parser.add_argument(
+        "--factor-screen",
+        action="store_true",
+        help="先运行AlphaFutures24因子筛选（IC/IR测试），再执行优化",
     )
 
     args = parser.parse_args()
@@ -45,6 +54,11 @@ def main() -> None:
         from runner import Pipeline
 
         pipe = Pipeline(args.config).load_data()
+
+        # AlphaFutures24 因子筛选
+        if args.factor_screen:
+            logger.info("执行AlphaFutures24因子筛选...")
+            pipe.screen_factors()
 
         # 构建优化任务列表
         tasks = ["window", "oos"] if args.skip_grid else ["grid", "window", "oos"]

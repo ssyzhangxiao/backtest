@@ -16,9 +16,8 @@ from core.config import BacktestConfig
 from core.engine.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from core.strategy_registry import StrategyLibrary
-from core.validation.monte_carlo import MonteCarloSimulator
 from runner.backtest.experiments import run_e9_monte_carlo
-from runner.common.utils import safe_float, is_valid_number, save_csv
+from runner.common.utils import is_valid_number
 
 _N_MONTE_CARLO = 1000
 _RANDOM_SEED = 42
@@ -27,7 +26,7 @@ _DEFAULT_BANKRUPTCY_THRESHOLD = 0.8
 
 def task3_monte_carlo(
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     lib: StrategyLibrary,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -40,7 +39,7 @@ def task3_monte_carlo(
 
     Args:
         ds: 数据源
-        opt_cfg: 优化配置字典
+        config: 回测配置（BacktestConfig）
         lib: 策略库
         output_dir: 输出目录
         best_params: 优化后的最优参数
@@ -48,11 +47,9 @@ def task3_monte_carlo(
     Returns:
         蒙特卡洛验证结果字典
     """
-    full_start = opt_cfg.get("full_start", "2016-01-01")
-    full_end = opt_cfg.get("full_end", "2025-12-31")
-    bankruptcy_threshold = opt_cfg.get(
-        "bankruptcy_threshold", _DEFAULT_BANKRUPTCY_THRESHOLD,
-    )
+    full_start = config.full_start
+    full_end = config.full_end
+    bankruptcy_threshold = config.bankruptcy_threshold
 
     logger.info("=" * 60)
     logger.info("任务3: 蒙特卡洛 1000 次鲁棒性测试")
@@ -60,58 +57,67 @@ def task3_monte_carlo(
     logger.info(f"  破产阈值: {bankruptcy_threshold:.1%}")
     logger.info("=" * 60)
 
-    strategy_names = list(opt_cfg["strategy_names"])
+    strategy_names = list(config.strategy_names)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 调用标准蒙特卡洛实验
-    val_config = _build_mc_config(opt_cfg, strategy_names)
+    val_config = _build_mc_config(config, strategy_names)
     mc_base_df = run_e9_monte_carlo(ds, val_config, output_dir)
 
     # 逐策略蒙特卡洛详细分析
     all_mc_results = _run_per_strategy_mc(
-        strategy_names, ds, opt_cfg, full_start, full_end,
-        best_params, bankruptcy_threshold,
+        strategy_names,
+        ds,
+        config,
+        full_start,
+        full_end,
+        best_params,
+        bankruptcy_threshold,
     )
 
     # 汇总表
     summary_rows = []
     for sname, mc in all_mc_results.items():
-        summary_rows.append({
-            "strategy": sname,
-            "final_mean": round(mc["final_mean"], 4),
-            "final_median": round(mc["final_median"], 4),
-            "final_5pct": round(mc["final_5pct"], 4),
-            "final_95pct": round(mc["final_95pct"], 4),
-            "bankruptcy_prob": round(mc["bankruptcy_prob"], 4),
-            "avg_max_dd": round(mc["avg_max_dd"], 4),
-            "avg_monthly_win_rate": round(mc["avg_monthly_win_rate"], 4),
-            "calmar_mean": round(mc["calmar_mean"], 4),
-        })
+        summary_rows.append(
+            {
+                "strategy": sname,
+                "final_mean": round(mc["final_mean"], 4),
+                "final_median": round(mc["final_median"], 4),
+                "final_5pct": round(mc["final_5pct"], 4),
+                "final_95pct": round(mc["final_95pct"], 4),
+                "bankruptcy_prob": round(mc["bankruptcy_prob"], 4),
+                "avg_max_dd": round(mc["avg_max_dd"], 4),
+                "avg_monthly_win_rate": round(mc["avg_monthly_win_rate"], 4),
+                "calmar_mean": round(mc["calmar_mean"], 4),
+            }
+        )
 
     df_mc = pd.DataFrame(summary_rows)
     df_mc.to_csv(output_dir / "task3_monte_carlo_summary.csv", index=False)
 
     # 保存详细模拟数据
     for sname, mc in all_mc_results.items():
-        detail = pd.DataFrame({
-            "sim_id": range(_N_MONTE_CARLO),
-            "final_value": mc["final_values"],
-            "max_drawdown": mc["max_drawdowns"],
-        })
+        detail = pd.DataFrame(
+            {
+                "sim_id": range(_N_MONTE_CARLO),
+                "final_value": mc["final_values"],
+                "max_drawdown": mc["max_drawdowns"],
+            }
+        )
         detail.to_csv(output_dir / f"task3_mc_detail_{sname}.csv", index=False)
 
     return {"summary": df_mc, "details": all_mc_results, "base": mc_base_df}
 
 
 def _build_mc_config(
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     strategy_names: List[str],
 ) -> Dict[str, Any]:
     """
     构建蒙特卡洛实验配置。
 
     Args:
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         strategy_names: 策略名称列表
 
     Returns:
@@ -119,15 +125,15 @@ def _build_mc_config(
     """
     return {
         "backtest": {
-            "initial_cash": opt_cfg["initial_cash"],
-            "commission_rate": opt_cfg["commission_rate"],
-            "slippage_rate": opt_cfg["slippage_rate"],
-            "full_start_date": opt_cfg["full_start"],
-            "full_end_date": opt_cfg["full_end"],
-            "in_sample_end_date": opt_cfg.get("in_sample_end", "2020-12-31"),
-            "out_sample_start_date": opt_cfg.get("out_sample_start", "2021-01-01"),
+            "initial_cash": config.initial_cash,
+            "commission_rate": config.commission_rate,
+            "slippage_rate": config.slippage_rate,
+            "full_start_date": config.full_start,
+            "full_end_date": config.full_end,
+            "in_sample_end_date": config.in_sample_end,
+            "out_sample_start_date": config.out_sample_start,
         },
-        "symbols": opt_cfg["symbols"],
+        "symbols": config.symbols,
         "strategies": [{"name": s} for s in strategy_names],
         "risk_management": {
             "stop_loss_pct": 0.05,
@@ -139,14 +145,14 @@ def _build_mc_config(
             "n_simulations": _N_MONTE_CARLO,
             "random_seed": _RANDOM_SEED,
         },
-        "output": {"output_dir": str(opt_cfg["output_dir"])},
+        "output": {"output_dir": config.output_dir},
     }
 
 
 def _run_per_strategy_mc(
     strategy_names: List[str],
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     full_start: str,
     full_end: str,
     best_params: Optional[Dict[str, Dict[str, Any]]],
@@ -161,7 +167,7 @@ def _run_per_strategy_mc(
     Args:
         strategy_names: 策略名称列表
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         full_start: 全期开始日期
         full_end: 全期结束日期
         best_params: 优化参数
@@ -175,12 +181,12 @@ def _run_per_strategy_mc(
     for sname in strategy_names:
         logger.info(f"\n  策略: {sname}")
         try:
-            config = BacktestConfig(
-                initial_cash=opt_cfg["initial_cash"],
-                commission_rate=opt_cfg["commission_rate"],
-                slippage_rate=opt_cfg["slippage_rate"],
+            bt_config = BacktestConfig(
+                initial_cash=config.initial_cash,
+                commission_rate=config.commission_rate,
+                slippage_rate=config.slippage_rate,
             )
-            runner = PyBrokerBacktestRunner(ds, config)
+            runner = PyBrokerBacktestRunner(ds, bt_config)
             runner.register_strategies([sname])
 
             custom_params = None
@@ -268,7 +274,10 @@ def _run_monte_carlo_sim(
 
     # 月胜率计算
     monthly_win_rates = _compute_monthly_win_rates(
-        sim_equities, returns, n_simulations, n_days,
+        sim_equities,
+        returns,
+        n_simulations,
+        n_days,
     )
     monthly_win_rate = float(np.mean(monthly_win_rates)) if monthly_win_rates else 0.0
 

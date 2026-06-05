@@ -21,7 +21,7 @@ from runner.common.utils import safe_float, save_csv
 
 def task2_train_test_split(
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     lib: StrategyLibrary,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -36,7 +36,7 @@ def task2_train_test_split(
 
     Args:
         ds: 数据源
-        opt_cfg: 优化配置字典
+        config: 回测配置（BacktestConfig）
         lib: 策略库
         output_dir: 输出目录
         best_params: 优化后的最优参数
@@ -44,10 +44,10 @@ def task2_train_test_split(
     Returns:
         验证结果字典
     """
-    train_start = opt_cfg.get("train_start", "2016-01-01")
-    train_end = opt_cfg.get("train_end", "2020-12-31")
-    test_start = opt_cfg.get("test_start", "2021-01-01")
-    test_end = opt_cfg.get("test_end", "2025-12-31")
+    train_start = config.train_start
+    train_end = config.train_end
+    test_start = config.test_start
+    test_end = config.test_end
 
     logger.info("=" * 60)
     logger.info("任务2: 训练/验证期划分验证（P1-B）")
@@ -55,11 +55,11 @@ def task2_train_test_split(
     logger.info(f"  验证期: {test_start} ~ {test_end}")
     logger.info("=" * 60)
 
-    strategy_names = opt_cfg["strategy_names"]
+    strategy_names = config.strategy_names
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 构建回测配置
-    val_config = _build_validation_config(opt_cfg)
+    # 构建与 experiments 兼容的配置字典
+    val_config = _build_validation_config(config)
 
     # WalkForward 滚动验证
     logger.info("\n  WalkForward 滚动验证:")
@@ -71,7 +71,7 @@ def task2_train_test_split(
 
     # 环境分布统计
     logger.info("\n  环境分布统计:")
-    env_stats = _compute_environment_stats(ds, opt_cfg)
+    env_stats = _compute_environment_stats(ds, config)
     if not env_stats.empty:
         env_stats.to_csv(output_dir / "task2_env_stats.csv", index=False)
         logger.info(f"\n{env_stats.to_string(index=False)}")
@@ -79,18 +79,18 @@ def task2_train_test_split(
     # 训练期回测（固定参数 vs 环境感知参数）
     logger.info("\n  训练期回测（固定参数 vs 环境感知参数）:")
     train_fixed = _run_period_backtest(
-        strategy_names, ds, opt_cfg, train_start, train_end, "fixed",
+        strategy_names, ds, config, train_start, train_end, "fixed",
         best_params=best_params,
     )
     train_regime = _run_period_backtest(
-        strategy_names, ds, opt_cfg, train_start, train_end, "regime",
+        strategy_names, ds, config, train_start, train_end, "regime",
         best_params=best_params,
     )
 
     # 验证期按年切片
     logger.info("\n  验证期按年切片:")
     yearly_results = _run_yearly_validation(
-        strategy_names, ds, opt_cfg, train_end, test_end, best_params,
+        strategy_names, ds, config, train_end, test_end, best_params,
     )
     df_yearly = pd.DataFrame(yearly_results)
     df_yearly.to_csv(output_dir / "task2_yearly_validation.csv", index=False)
@@ -122,28 +122,30 @@ def task2_train_test_split(
     }
 
 
-def _build_validation_config(opt_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _build_validation_config(config: BacktestConfig) -> Dict[str, Any]:
     """
     构建与 runner/backtest/experiments 兼容的配置字典。
 
+    experiments 模块暂仍接收字典，此处做适配层。
+
     Args:
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
 
     Returns:
         回测配置字典
     """
     return {
         "backtest": {
-            "initial_cash": opt_cfg["initial_cash"],
-            "commission_rate": opt_cfg["commission_rate"],
-            "slippage_rate": opt_cfg["slippage_rate"],
-            "full_start_date": opt_cfg["full_start"],
-            "full_end_date": opt_cfg["full_end"],
-            "in_sample_end_date": opt_cfg["in_sample_end"],
-            "out_sample_start_date": opt_cfg["out_sample_start"],
+            "initial_cash": config.initial_cash,
+            "commission_rate": config.commission_rate,
+            "slippage_rate": config.slippage_rate,
+            "full_start_date": config.full_start,
+            "full_end_date": config.full_end,
+            "in_sample_end_date": config.in_sample_end,
+            "out_sample_start_date": config.out_sample_start,
         },
-        "symbols": opt_cfg["symbols"],
-        "strategies": [{"name": s} for s in opt_cfg["strategy_names"]],
+        "symbols": config.symbols,
+        "strategies": [{"name": s} for s in config.strategy_names],
         "risk_management": {
             "stop_loss_pct": 0.05,
             "position_limit_pct": 0.4,
@@ -154,13 +156,13 @@ def _build_validation_config(opt_cfg: Dict[str, Any]) -> Dict[str, Any]:
             "n_simulations": 1000,
             "random_seed": 42,
         },
-        "output": {"output_dir": str(opt_cfg["output_dir"])},
+        "output": {"output_dir": config.output_dir},
     }
 
 
 def _compute_environment_stats(
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
 ) -> pd.DataFrame:
     """
     计算各品种的环境分布统计（5类环境）。
@@ -169,7 +171,7 @@ def _compute_environment_stats(
 
     Args:
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置
 
     Returns:
         环境分布统计 DataFrame
@@ -183,7 +185,7 @@ def _compute_environment_stats(
     regime_runner = V3RegimeAwareRunner()
     all_stats = []
 
-    for sym in opt_cfg["symbols"]:
+    for sym in config.symbols:
         try:
             df = ds.to_pybroker_df()
             if df is None or df.empty:
@@ -215,7 +217,7 @@ def _compute_environment_stats(
 def _run_period_backtest(
     strategy_names: List[str],
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     start: str,
     end: str,
     mode: str = "fixed",
@@ -230,7 +232,7 @@ def _run_period_backtest(
     Args:
         strategy_names: 策略名称列表
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         start: 开始日期
         end: 结束日期
         mode: 回测模式
@@ -242,17 +244,17 @@ def _run_period_backtest(
     results = {}
 
     if mode == "regime":
-        return _run_regime_backtest(strategy_names, ds, opt_cfg, start, end)
+        return _run_regime_backtest(strategy_names, ds, config, start, end)
 
     # 固定参数回测
+    bt_config = BacktestConfig(
+        initial_cash=config.initial_cash,
+        commission_rate=config.commission_rate,
+        slippage_rate=config.slippage_rate,
+    )
     for sname in strategy_names:
         try:
-            config = BacktestConfig(
-                initial_cash=opt_cfg["initial_cash"],
-                commission_rate=opt_cfg["commission_rate"],
-                slippage_rate=opt_cfg["slippage_rate"],
-            )
-            runner = PyBrokerBacktestRunner(ds, config)
+            runner = PyBrokerBacktestRunner(ds, bt_config)
             runner.register_strategies([sname])
 
             custom_params = None
@@ -271,7 +273,7 @@ def _run_period_backtest(
 def _run_regime_backtest(
     strategy_names: List[str],
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     start: str,
     end: str,
 ) -> Dict[str, Dict[str, Any]]:
@@ -281,7 +283,7 @@ def _run_regime_backtest(
     Args:
         strategy_names: 策略名称列表
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         start: 开始日期
         end: 结束日期
 
@@ -301,12 +303,12 @@ def _run_regime_backtest(
             logger.warning("  环境感知回测跳过：数据为空")
             return results
 
-        config = BacktestConfig(
-            initial_cash=opt_cfg["initial_cash"],
-            commission_rate=opt_cfg["commission_rate"],
-            slippage_rate=opt_cfg["slippage_rate"],
+        bt_config = BacktestConfig(
+            initial_cash=config.initial_cash,
+            commission_rate=config.commission_rate,
+            slippage_rate=config.slippage_rate,
         )
-        runner = PyBrokerBacktestRunner(ds, config)
+        runner = PyBrokerBacktestRunner(ds, bt_config)
         runner.register_strategies(strategy_names)
 
         regime_result = regime_runner.run_with_regime_switch(
@@ -331,7 +333,7 @@ def _run_regime_backtest(
 def _run_yearly_validation(
     strategy_names: List[str],
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     train_end: str,
     test_end: str,
     best_params: Optional[Dict[str, Dict[str, Any]]],
@@ -342,7 +344,7 @@ def _run_yearly_validation(
     Args:
         strategy_names: 策略名称列表
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         train_end: 训练期结束日期
         test_end: 测试期结束日期
         best_params: 优化参数
@@ -359,11 +361,11 @@ def _run_yearly_validation(
         end = f"{year}-12-31"
 
         fixed_kpi = _run_period_backtest(
-            strategy_names, ds, opt_cfg, start, end, "fixed",
+            strategy_names, ds, config, start, end, "fixed",
             best_params=best_params,
         )
         regime_kpi = _run_period_backtest(
-            strategy_names, ds, opt_cfg, start, end, "regime",
+            strategy_names, ds, config, start, end, "regime",
             best_params=best_params,
         )
 

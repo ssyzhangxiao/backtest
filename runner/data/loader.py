@@ -78,7 +78,7 @@ def load_raw_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     加载 YAML 配置文件为原始字典。
 
     注意：推荐使用 BacktestConfig.from_yaml() 获取结构化配置。
-    此函数保留用于需要原始字典的场景（如构建 opt_cfg）。
+    此函数保留用于需要原始字典的场景。
 
     Args:
         config_path: 配置文件路径
@@ -124,31 +124,19 @@ def get_tqsdk_credentials(
     return phone, password
 
 
-def build_opt_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def build_opt_cfg(cfg: Dict[str, Any]) -> BacktestConfig:
     """
-    从原始配置字典构建优化配置。
+    从原始配置字典构建 BacktestConfig。
+
+    规则2、17：统一使用 BacktestConfig，不再返回字典。
+    内部委托 BacktestConfig.from_yaml()，避免重复解析。
 
     Args:
-        cfg: 原始配置字典
+        cfg: 原始配置字典（需包含 config_path 或已完整加载）
 
     Returns:
-        优化配置字典
+        BacktestConfig 实例
     """
-    bt = cfg.get("backtest", {})
-    return {
-        "initial_cash": bt.get("initial_cash", 1_000_000),
-        "commission_rate": bt.get("commission_rate", 0.0005),
-        "slippage_rate": bt.get("slippage_rate", 0.0005),
-        "train_start": bt.get("in_sample_start_date", "2016-01-01"),
-        "train_end": bt.get("in_sample_end_date", "2020-12-31"),
-        "test_start": bt.get("out_sample_start_date", "2021-01-01"),
-        "test_end": bt.get("out_sample_end_date", "2025-12-31"),
-        "full_start": bt.get("full_start_date", "2016-01-01"),
-        "full_end": bt.get("full_end_date", "2025-12-31"),
-        "in_sample_end": bt.get("in_sample_end_date", "2020-12-31"),
-        "out_sample_start": bt.get("out_sample_start_date", "2021-01-01"),
-        "symbols": cfg.get("symbols", ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]),
-        "output_dir": cfg.get("output", {}).get("output_dir", "output_validation"),
-        "strategy_names": [s["name"] for s in cfg.get("strategies", []) if s.get("name")],
-        "bankruptcy_threshold": cfg.get("risk_management", {}).get("bankruptcy_threshold", 0.8),
-    }
+    # 优先使用 config_path 重新加载（确保字段完整）
+    config_path = cfg.get("_config_path", "config.yaml")
+    return BacktestConfig.from_yaml(config_path)

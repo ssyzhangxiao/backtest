@@ -11,20 +11,23 @@ from typing import Any, Dict, List
 import pandas as pd
 from loguru import logger
 
+from core.config import BacktestConfig
 from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
 from core.engine.factor_decay import (
-    FactorDecayMonitor, FactorDecayConfig, DecayStatus,
+    FactorDecayMonitor,
+    FactorDecayConfig,
+    DecayStatus,
 )
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from runner.common.utils import is_valid_number, save_csv
-from runner.data.preprocessor import compute_factor_scores_from_ohlcv
+from core.factors.basic_factors import compute_factor_scores_from_ohlcv
 
 _DEFAULT_FACTOR_NAMES = ["ts_momentum", "roll_yield", "alpha019", "alpha032"]
 
 
 def factor_ic_stability_analysis(
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     output_dir: Path,
     factor_names: List[str] = None,
 ) -> Dict[str, Any]:
@@ -39,7 +42,7 @@ def factor_ic_stability_analysis(
 
     Args:
         ds: 数据源
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         output_dir: 输出目录
         factor_names: 待分析因子名称列表
 
@@ -49,11 +52,11 @@ def factor_ic_stability_analysis(
     if factor_names is None:
         factor_names = _DEFAULT_FACTOR_NAMES
 
-    train_start = opt_cfg.get("train_start", "2016-01-01")
-    train_end = opt_cfg.get("train_end", "2020-12-31")
-    test_start = opt_cfg.get("test_start", "2021-01-01")
-    test_end = opt_cfg.get("test_end", "2025-12-31")
-    symbols = opt_cfg["symbols"]
+    train_start = config.train_start
+    train_end = config.train_end
+    test_start = config.test_start
+    test_end = config.test_end
+    symbols = config.symbols
 
     logger.info("=" * 60)
     logger.info("因子IC稳定性分析（滚动IC + 衰减监控）")
@@ -64,7 +67,10 @@ def factor_ic_stability_analysis(
 
     # IC配置
     ic_config = RollingICConfig(
-        window=60, forward_period=5, ema_alpha=0.1, min_observations=30,
+        window=60,
+        forward_period=5,
+        ema_alpha=0.1,
+        min_observations=30,
     )
     decay_config = FactorDecayConfig(
         trend_window=40,
@@ -81,9 +87,15 @@ def factor_ic_stability_analysis(
         logger.info(f"  分析品种: {symbol}")
         try:
             sym_result = _analyze_single_symbol(
-                symbol, ds, opt_cfg, factor_names,
-                ic_config, decay_config,
-                train_start, train_end, test_start, test_end,
+                symbol,
+                ds,
+                factor_names,
+                ic_config,
+                decay_config,
+                train_start,
+                train_end,
+                test_start,
+                test_end,
             )
             if sym_result is not None:
                 all_results[symbol] = sym_result["details"]
@@ -111,7 +123,6 @@ def factor_ic_stability_analysis(
 def _analyze_single_symbol(
     symbol: str,
     ds: PyBrokerDataSource,
-    opt_cfg: Dict[str, Any],
     factor_names: List[str],
     ic_config: RollingICConfig,
     decay_config: FactorDecayConfig,
@@ -126,7 +137,6 @@ def _analyze_single_symbol(
     Args:
         symbol: 品种代码
         ds: 数据源
-        opt_cfg: 优化配置
         factor_names: 因子名称列表
         ic_config: 滚动IC配置
         decay_config: 衰减监控配置
@@ -178,21 +188,28 @@ def _analyze_single_symbol(
     summary_rows = []
     for name, stats in ic_summary.items():
         status = decay_monitor.current_status.get(name, DecayStatus.HEALTHY).value
-        summary_rows.append({
-            "symbol": symbol,
-            "factor": name,
-            "mean_ic": round(stats.get("mean", 0.0), 6),
-            "std_ic": round(stats.get("std", 0.0), 6),
-            "ir": round(stats.get("ir", 0.0), 4),
-            "current_ic": round(stats.get("current", 0.0), 6),
-            "current_weight": round(final_weights.get(name, 0.0), 4),
-            "decay_status": status,
-        })
+        summary_rows.append(
+            {
+                "symbol": symbol,
+                "factor": name,
+                "mean_ic": round(stats.get("mean", 0.0), 6),
+                "std_ic": round(stats.get("std", 0.0), 6),
+                "ir": round(stats.get("ir", 0.0), 4),
+                "current_ic": round(stats.get("current", 0.0), 6),
+                "current_weight": round(final_weights.get(name, 0.0), 4),
+                "decay_status": status,
+            }
+        )
 
     # 分别统计训练期和验证期IC
     train_ic_summary, test_ic_summary = _compute_period_ic(
-        scored, factor_names, ic_config,
-        train_start, train_end, test_start, test_end,
+        scored,
+        factor_names,
+        ic_config,
+        train_start,
+        train_end,
+        test_start,
+        test_end,
     )
 
     # 输出衰减对比
@@ -201,7 +218,8 @@ def _analyze_single_symbol(
         test_mean = test_ic_summary.get(name, {}).get("mean", 0.0)
         ic_drop = (
             (test_mean - train_mean) / (abs(train_mean) + 1e-10)
-            if abs(train_mean) > 1e-6 else 0.0
+            if abs(train_mean) > 1e-6
+            else 0.0
         )
         logger.info(
             f"    {name}: train_IC={train_mean:.4f}, "
@@ -248,9 +266,7 @@ def _compute_period_ic(
     train_scored = scored[
         (scored["date"] >= train_start) & (scored["date"] <= train_end)
     ]
-    test_scored = scored[
-        (scored["date"] >= test_start) & (scored["date"] <= test_end)
-    ]
+    test_scored = scored[(scored["date"] >= test_start) & (scored["date"] <= test_end)]
 
     train_ic_engine = RollingICWeightEngine(ic_config)
     test_ic_engine = RollingICWeightEngine(ic_config)

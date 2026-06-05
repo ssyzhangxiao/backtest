@@ -31,8 +31,17 @@ class BacktestConfig:
     commission_rate: float = 0.0001
     slippage_rate: float = 0.0001
 
+    # ── 日期范围（从 config.yaml backtest 段读取） ──
+    full_start: str = "2016-01-01"
+    full_end: str = "2025-12-31"
+    train_start: str = "2016-01-01"
+    train_end: str = "2020-12-31"
+    test_start: str = "2021-01-01"
+    test_end: str = "2025-12-31"
+
     # ── 样本内/外分割 ──
     in_sample_end: Optional[str] = None
+    out_sample_start: Optional[str] = None
 
     # ── 因子打分调仓 ──
     rebalance_days: int = 3
@@ -70,6 +79,16 @@ class BacktestConfig:
 
     # ── 交叉验证 ──
     cross_validate: bool = False
+
+    # ── 品种与策略（从 config.yaml 顶层读取） ──
+    symbols: list = field(
+        default_factory=lambda: ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]
+    )
+    strategy_names: list = field(default_factory=list)
+
+    # ── 输出与风控 ──
+    output_dir: str = "output_validation"
+    bankruptcy_threshold: float = 0.8
 
     # ── 新模块配置（灰度开关，默认关闭） ──
     factors_config: FactorModuleConfig = field(default_factory=FactorModuleConfig)
@@ -118,6 +137,19 @@ class BacktestConfig:
             initial_cash=float(bt.get("initial_capital", INITIAL_CASH)),
             commission_rate=float(bt.get("commission", 0.0001)),
             slippage_rate=float(bt.get("slippage", 0.0001)),
+            # 日期范围
+            full_start=bt.get("full_start_date", "2016-01-01"),
+            full_end=bt.get("full_end_date", "2025-12-31"),
+            train_start=bt.get(
+                "in_sample_start_date", bt.get("full_start_date", "2016-01-01")
+            ),
+            train_end=bt.get("in_sample_end_date", "2020-12-31"),
+            test_start=bt.get("out_sample_start_date", "2021-01-01"),
+            test_end=bt.get("out_sample_end_date", "2025-12-31"),
+            # 样本分割
+            in_sample_end=bt.get("in_sample_end_date"),
+            out_sample_start=bt.get("out_sample_start_date"),
+            # 因子打分调仓
             rebalance_days=int(bt.get("rebalance_freq", 3)),
             factor_weights=fw if fw else DEFAULT_FACTOR_WEIGHTS.copy(),
             entry_threshold=float(bt.get("entry_threshold", 0.05)),
@@ -130,6 +162,21 @@ class BacktestConfig:
             use_rolling_ic=bool(bt.get("use_rolling_ic", True)),
             use_trend_filter=bool(bt.get("use_trend_filter", False)),
             top_n_symbols=int(bt.get("top_n_symbols", 5)),
+            # 品种与策略
+            symbols=raw.get(
+                "symbols", ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]
+            ),
+            strategy_names=[
+                s["name"]
+                for s in raw.get("strategies", [])
+                if isinstance(s, dict) and "name" in s
+            ],
+            # 输出与风控
+            output_dir=raw.get("output", {}).get("output_dir", "output_validation"),
+            bankruptcy_threshold=raw.get("risk_management", {}).get(
+                "bankruptcy_threshold", 0.8
+            ),
+            # 模块配置
             factors_config=factors_cfg,
             adaptive_config=adaptive_cfg,
             multi_tf_config=multi_tf_cfg,

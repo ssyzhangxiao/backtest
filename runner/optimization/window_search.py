@@ -27,7 +27,7 @@ def window_search_single_strategy(
     top_params_list: List[Dict[str, Any]],
     ds,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
 ) -> pd.DataFrame:
     """
     对 Top N 参数组合，遍历不同训练窗口长度做 WalkForward。
@@ -42,12 +42,14 @@ def window_search_single_strategy(
         top_params_list: Top N 参数组合列表
         ds: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
 
     Returns:
         DataFrame，每行 = (参数组合, 窗口配置, WF指标)
     """
-    logger.info(f"\n  窗口搜索: {strategy_name} | 参数组合数: {len(top_params_list)} | 窗口配置数: {len(_INSAMPLE_BAR_RANGE)}")
+    logger.info(
+        f"\n  窗口搜索: {strategy_name} | 参数组合数: {len(top_params_list)} | 窗口配置数: {len(_INSAMPLE_BAR_RANGE)}"
+    )
 
     results = []
     total = len(top_params_list) * len(_INSAMPLE_BAR_RANGE)
@@ -60,20 +62,20 @@ def window_search_single_strategy(
 
             progress += 1
             try:
-                config = BacktestConfig(
-                    initial_cash=opt_cfg["initial_cash"],
-                    commission_rate=opt_cfg["commission_rate"],
-                    slippage_rate=opt_cfg["slippage_rate"],
+                wf_config = BacktestConfig(
+                    initial_cash=config.initial_cash,
+                    commission_rate=config.commission_rate,
+                    slippage_rate=config.slippage_rate,
                     wf_train_bars=train_bars,
                     wf_test_bars=test_bars,
                     wf_step_bars=step_bars,
                 )
-                runner = PyBrokerBacktestRunner(ds, config)
+                runner = PyBrokerBacktestRunner(ds, wf_config)
                 runner.register_strategies([strategy_name])
 
                 wf_result = runner.walkforward(
-                    opt_cfg["full_start"],
-                    opt_cfg["in_sample_end"],
+                    config.full_start,
+                    config.in_sample_end,
                 )
 
                 window_sharpes = []
@@ -95,7 +97,8 @@ def window_search_single_strategy(
                     "wf_avg_sharpe": np.mean(window_sharpes) if window_sharpes else 0.0,
                     "wf_min_sharpe": min(window_sharpes) if window_sharpes else 0.0,
                     "wf_avg_return": np.mean(window_returns) if window_returns else 0.0,
-                    "wf_positive_ratio": sum(1 for s in window_sharpes if s > 0) / max(len(window_sharpes), 1),
+                    "wf_positive_ratio": sum(1 for s in window_sharpes if s > 0)
+                    / max(len(window_sharpes), 1),
                 }
                 row.update(params)
                 results.append(row)
@@ -120,7 +123,7 @@ def rolling_validate(
     best_params: Dict[str, Any],
     ds,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     train_bars: int = 252,
     test_bars: int = 63,
     step_bars: int = 21,
@@ -133,7 +136,7 @@ def rolling_validate(
         best_params: 最优参数
         ds: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         train_bars: 训练窗口长度
         test_bars: 测试窗口长度
         step_bars: 步进长度
@@ -141,23 +144,25 @@ def rolling_validate(
     Returns:
         验证结果字典
     """
-    logger.info(f"\n  滚动窗口验证: {strategy_name} | train={train_bars}, test={test_bars}, step={step_bars}")
+    logger.info(
+        f"\n  滚动窗口验证: {strategy_name} | train={train_bars}, test={test_bars}, step={step_bars}"
+    )
 
     try:
-        config = BacktestConfig(
-            initial_cash=opt_cfg["initial_cash"],
-            commission_rate=opt_cfg["commission_rate"],
-            slippage_rate=opt_cfg["slippage_rate"],
+        wf_config = BacktestConfig(
+            initial_cash=config.initial_cash,
+            commission_rate=config.commission_rate,
+            slippage_rate=config.slippage_rate,
             wf_train_bars=train_bars,
             wf_test_bars=test_bars,
             wf_step_bars=step_bars,
         )
-        runner = PyBrokerBacktestRunner(ds, config)
+        runner = PyBrokerBacktestRunner(ds, wf_config)
         runner.register_strategies([strategy_name])
 
         wf_result = runner.walkforward(
-            opt_cfg["full_start"],
-            opt_cfg["in_sample_end"],
+            config.full_start,
+            config.in_sample_end,
         )
 
         window_sharpes = []
@@ -166,7 +171,10 @@ def rolling_validate(
             m = w.get("metrics", {})
             if "sharpe" in m and safe_float(m["sharpe"]) is not None:
                 window_sharpes.append(safe_float(m["sharpe"]))
-            if "total_return_pct" in m and safe_float(m["total_return_pct"]) is not None:
+            if (
+                "total_return_pct" in m
+                and safe_float(m["total_return_pct"]) is not None
+            ):
                 window_returns.append(safe_float(m["total_return_pct"]))
             elif "total_return" in m and safe_float(m["total_return"]) is not None:
                 window_returns.append(safe_float(m["total_return"]))
@@ -177,7 +185,8 @@ def rolling_validate(
             "avg_return_pct": np.mean(window_returns) if window_returns else 0.0,
             "min_sharpe": min(window_sharpes) if window_sharpes else 0.0,
             "sharpe_std": np.std(window_sharpes) if len(window_sharpes) > 1 else 0.0,
-            "positive_sharpe_ratio": sum(1 for s in window_sharpes if s > 0) / max(len(window_sharpes), 1),
+            "positive_sharpe_ratio": sum(1 for s in window_sharpes if s > 0)
+            / max(len(window_sharpes), 1),
         }
 
         logger.info(f"    窗口数: {result['n_windows']}")
@@ -196,7 +205,7 @@ def out_of_sample_test(
     best_params: Dict[str, Any],
     ds,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
 ) -> Dict[str, Any]:
     """
     样本外测试。
@@ -206,7 +215,7 @@ def out_of_sample_test(
         best_params: 最优参数
         ds: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
 
     Returns:
         样本外 KPI 字典
@@ -214,24 +223,28 @@ def out_of_sample_test(
     logger.info(f"\n  样本外测试: {strategy_name}")
 
     try:
-        config = BacktestConfig(
-            initial_cash=opt_cfg["initial_cash"],
-            commission_rate=opt_cfg["commission_rate"],
-            slippage_rate=opt_cfg["slippage_rate"],
+        bt_config = BacktestConfig(
+            initial_cash=config.initial_cash,
+            commission_rate=config.commission_rate,
+            slippage_rate=config.slippage_rate,
         )
-        runner = PyBrokerBacktestRunner(ds, config)
+        runner = PyBrokerBacktestRunner(ds, bt_config)
         runner.register_strategies([strategy_name])
 
         result = runner.run(
-            opt_cfg.get("out_sample_start", "2024-01-01"),
-            opt_cfg["full_end"],
+            config.out_sample_start or "2024-01-01",
+            config.full_end,
             custom_params={strategy_name: best_params},
         )
         kpi = dict(result.metrics)
 
-        logger.info(f"    样本外收益: {safe_float(kpi.get('total_return_pct', 0)):.2f}%")
+        logger.info(
+            f"    样本外收益: {safe_float(kpi.get('total_return_pct', 0)):.2f}%"
+        )
         logger.info(f"    样本外Sharpe: {safe_float(kpi.get('sharpe', 0)):.4f}")
-        logger.info(f"    样本外回撤: {safe_float(kpi.get('max_drawdown_pct', 0)):.2f}%")
+        logger.info(
+            f"    样本外回撤: {safe_float(kpi.get('max_drawdown_pct', 0)):.2f}%"
+        )
 
         return kpi
 

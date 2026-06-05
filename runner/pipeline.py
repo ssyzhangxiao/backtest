@@ -7,7 +7,6 @@ Pipeline 编排器。
 详见规则18。
 """
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -47,7 +46,6 @@ class Pipeline:
         self._data = None
         self._results: Dict[str, Any] = {}
         self._lib = StrategyLibrary()
-        self._opt_cfg: Optional[Dict[str, Any]] = None
 
     @property
     def config(self) -> BacktestConfig:
@@ -63,18 +61,16 @@ class Pipeline:
         """
         加载数据（委托 runner/data/loader）。
 
-        同时加载原始配置和构建优化配置。
+        同时加载原始配置。
 
         Returns:
             self（支持链式调用）
         """
-        from runner.data.loader import DataLoader, build_opt_cfg
+        from runner.data.loader import DataLoader
 
         loader = DataLoader(self._config_path)
         self._data = loader.load()
         self._raw_config = loader.raw_config
-        if self._raw_config:
-            self._opt_cfg = build_opt_cfg(self._raw_config)
         logger.info("数据加载完成")
         return self
 
@@ -121,8 +117,6 @@ class Pipeline:
         """
         if self._data is None:
             raise PipelineError("请先调用 load_data() 加载数据")
-        if self._opt_cfg is None:
-            raise PipelineError("请先调用 load_data() 构建优化配置")
 
         if tasks is None:
             tasks = ["grid", "window", "oos"]
@@ -137,7 +131,7 @@ class Pipeline:
             tasks,
             data,
             self._lib,
-            self._opt_cfg,
+            self._config,
         )
         self._results["optimization"] = opt_results
         return self
@@ -164,17 +158,15 @@ class Pipeline:
         """
         if self._data is None:
             raise PipelineError("请先调用 load_data() 加载数据")
-        if self._opt_cfg is None:
-            raise PipelineError("请先调用 load_data() 构建优化配置")
 
-        output_dir = Path(self._opt_cfg["output_dir"]) / "validation"
+        output_dir = Path(self._config.output_dir) / "validation"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if method.lower() == "all":
             self._results["validation"] = _run_all_validations(
                 self._data,
                 self._lib,
-                self._opt_cfg,
+                self._config,
                 output_dir,
                 best_params,
             )
@@ -184,7 +176,7 @@ class Pipeline:
             validator = get_validator(method)
             self._results["validation"] = validator(
                 self._data,
-                self._opt_cfg,
+                self._config,
                 self._lib,
                 output_dir,
                 best_params=best_params,
@@ -202,13 +194,49 @@ class Pipeline:
         Returns:
             self（支持链式调用）
         """
-        output_dir = Path("results")
-        if self._opt_cfg:
-            output_dir = Path(self._opt_cfg["output_dir"])
+        output_dir = Path(self._config.output_dir)
 
         from runner.report import generate
 
         generate(fmt, self._results, self._config, output_dir)
+        return self
+
+    def screen_factors(
+        self,
+        symbols: Optional[List[str]] = None,
+        do_winsorize: bool = True,
+    ) -> "Pipeline":
+        """
+        因子筛选：对AlphaFutures24全部24因子做IC/IR统计测试。
+
+        委托 core/factors/AlphaFutures24 做因子计算和IC分析，
+        筛选出通过规则9（IC>0.03且IR>0.5）的有效因子。
+
+        Args:
+            symbols: 测试品种列表，默认使用配置中的品种
+            do_winsorize: 是否对因子值做缩尾后处理
+
+        Returns:
+            self（支持链式调用）
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+
+        if symbols is None:
+            symbols = self._config.symbols
+
+        logger.info("=" * 60)
+        logger.info("因子筛选: AlphaFutures24 24因子IC/IR测试")
+        logger.info(f"  品种: {symbols}")
+        logger.info("=" * 60)
+
+        results = _run_factor_screening(
+            self._data,
+            symbols,
+            self._config,
+            do_winsorize=do_winsorize,
+        )
+        self._results["factor_screening"] = results
         return self
 
     def with_config(self, **overrides) -> "Pipeline":
@@ -223,7 +251,9 @@ class Pipeline:
         Returns:
             新的 Pipeline 实例
         """
-        new_config = self._config.copy(update=overrides)
+        from dataclasses import replace
+
+        new_config = replace(self._config, **overrides)
         new_pipe = Pipeline.__new__(Pipeline)
         new_pipe._config = new_config
         new_pipe._config_path = self._config_path
@@ -231,7 +261,6 @@ class Pipeline:
         new_pipe._data = self._data
         new_pipe._results = dict(self._results)
         new_pipe._lib = self._lib
-        new_pipe._opt_cfg = self._opt_cfg
         return new_pipe
 
     def is_healthy(self) -> bool:
@@ -244,7 +273,7 @@ def _run_optimization(
     tasks: List[str],
     data,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
 ) -> Dict[str, Any]:
     """
     执行参数优化流程。
@@ -254,7 +283,7 @@ def _run_optimization(
         tasks: 优化任务列表
         data: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置
 
     Returns:
         优化结果字典
@@ -262,9 +291,8 @@ def _run_optimization(
     from runner.strategy.selector import get_param_spaces
     from runner.optimization.grid_search import grid_search_single_strategy
     from runner.optimization.window_search import window_search_single_strategy
-    from runner.optimization.oos_selector import select_best_by_oos_priority
 
-    strategy_names = opt_cfg["strategy_names"]
+    strategy_names = config.strategy_names
     if strategy:
         strategy_names = [strategy]
 
@@ -281,7 +309,7 @@ def _run_optimization(
                 pspace,
                 data,
                 lib,
-                opt_cfg,
+                config,
             )
         results["grid"] = grid_results
 
@@ -299,7 +327,7 @@ def _run_optimization(
                         top_params,
                         data,
                         lib,
-                        opt_cfg,
+                        config,
                     )
                 except Exception as e:
                     logger.warning(f"窗口搜索 {sname} 失败: {e}")
@@ -348,7 +376,7 @@ def _extract_top_params(
 def _run_all_validations(
     data,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Any]:
@@ -358,7 +386,7 @@ def _run_all_validations(
     Args:
         data: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置
         output_dir: 输出目录
         best_params: 优化参数
 
@@ -375,7 +403,7 @@ def _run_all_validations(
     logger.info("验证: 训练/测试分割")
     results["train_test"] = task2_train_test_split(
         data,
-        opt_cfg,
+        config,
         lib,
         output_dir,
         best_params=best_params,
@@ -385,7 +413,7 @@ def _run_all_validations(
     logger.info("验证: 蒙特卡洛")
     results["monte_carlo"] = task3_monte_carlo(
         data,
-        opt_cfg,
+        config,
         lib,
         output_dir,
         best_params=best_params,
@@ -395,8 +423,148 @@ def _run_all_validations(
     logger.info("验证: 因子IC稳定性")
     results["factor_ic"] = factor_ic_stability_analysis(
         data,
-        opt_cfg,
+        config,
         output_dir,
     )
 
     return results
+
+
+def _run_factor_screening(
+    data,
+    symbols: List[str],
+    config: BacktestConfig,
+    do_winsorize: bool = True,
+) -> Dict[str, Any]:
+    """
+    运行AlphaFutures24因子筛选（IC/IR测试）。
+
+    委托 core/factors/AlphaFutures24 做因子计算，
+    对每个因子计算IC、IR、Sharpe、胜率等指标。
+
+    Args:
+        data: 数据源
+        symbols: 测试品种列表
+        config: 回测配置
+        do_winsorize: 是否做缩尾后处理
+
+    Returns:
+        {
+            results_df: 因子测试结果DataFrame,
+            pass_count: 通过规则9的因子数,
+            best_factors: Top N因子列表,
+        }
+    """
+    import numpy as np
+    import pandas as pd
+    from core.factors import AlphaFutures24, AlphaFuturesConfig
+
+    calc = AlphaFutures24(AlphaFuturesConfig())
+    all_rows = []
+
+    for symbol in symbols:
+        try:
+            ohlcv = data.query(config.train_start, config.test_end, symbols=[symbol])
+            if ohlcv is None or len(ohlcv) < 100:
+                continue
+
+            ohlcv = ohlcv.sort_values("date").reset_index(drop=True)
+            close = ohlcv["close"].values.astype(float)
+            high = ohlcv["high"].values.astype(float)
+            low = ohlcv["low"].values.astype(float)
+            open_price = ohlcv["open"].values.astype(float)
+            oi = (
+                ohlcv["open_interest"].values.astype(float)
+                if "open_interest" in ohlcv.columns
+                else None
+            )
+            if oi is None:
+                continue
+
+            # 计算24个因子
+            factors = calc.compute_all(
+                close=close,
+                open_price=open_price,
+                high=high,
+                low=low,
+                open_interest=oi,
+            )
+
+            if do_winsorize:
+                factors = calc.post_process(factors, do_winsorize=True)
+
+            # 前瞻收益（5日）
+            forward_ret = np.full_like(close, np.nan, dtype=float)
+            fwd_period = 5
+            forward_ret[:-fwd_period] = (
+                close[fwd_period:] - close[:-fwd_period]
+            ) / close[:-fwd_period]
+
+            # 逐个因子计算IC
+            for fname, fvalues in factors.items():
+                valid = ~(np.isnan(fvalues) | np.isnan(forward_ret))
+                if valid.sum() < 30:
+                    continue
+                fv = fvalues[valid]
+                fr = forward_ret[valid]
+                ic = np.corrcoef(fv, fr)[0, 1] if len(fv) > 2 else np.nan
+
+                # 滚动IC
+                rolling_ic = (
+                    pd.Series(fv, dtype=float)
+                    .rolling(60, min_periods=30)
+                    .corr(pd.Series(fr, dtype=float))
+                    .dropna()
+                    .values
+                )
+
+                mean_ic = np.nanmean(rolling_ic) if len(rolling_ic) > 10 else ic
+                std_ic = np.nanstd(rolling_ic) if len(rolling_ic) > 10 else np.nan
+                ir = mean_ic / std_ic if std_ic and std_ic > 0 else 0.0
+
+                all_rows.append(
+                    {
+                        "symbol": symbol,
+                        "factor": fname,
+                        "mean_ic": round(float(mean_ic), 6),
+                        "ir": round(float(ir), 4),
+                        "pass": abs(mean_ic) > 0.03 and abs(ir) > 0.5,
+                    }
+                )
+
+        except Exception as e:
+            logger.warning(f"因子筛选 {symbol} 失败: {e}")
+
+    if not all_rows:
+        return {"results_df": pd.DataFrame(), "pass_count": 0, "best_factors": []}
+
+    df = pd.DataFrame(all_rows)
+    # 因子汇总：多品种平均IC
+    summary = (
+        df.groupby("factor")
+        .agg(
+            {
+                "mean_ic": "mean",
+                "ir": "mean",
+                "pass": "mean",
+            }
+        )
+        .reset_index()
+    )
+    summary["abs_ic"] = summary["mean_ic"].abs()
+    summary = summary.sort_values("abs_ic", ascending=False)
+
+    # 通过规则9的因子
+    pass_count = int((summary["pass"] > 0.5).sum())
+    best_factors = summary[summary["pass"] > 0.5]["factor"].tolist()
+
+    logger.info(f"因子筛选完成: {pass_count}/{len(summary)} 通过规则9")
+    if best_factors:
+        logger.info(f"  有效因子: {best_factors}")
+
+    return {
+        "results_df": df,
+        "summary_df": summary,
+        "pass_count": pass_count,
+        "best_factors": best_factors,
+    }

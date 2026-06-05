@@ -29,12 +29,12 @@ from runner.common.utils import (
     format_metrics,
     sanitize_filename,
     save_equity_curve,
-    handle_backtest_errors
+    handle_backtest_errors,
 )
 from runner.common.config_utils import (
     get_walkforward_config,
     get_montecarlo_config,
-    get_factors_list
+    get_factors_list,
 )
 from runner.strategy.selector import get_strategy_names
 
@@ -47,9 +47,11 @@ _SAFE_DECAY_THRESHOLD = 0.3
 # E8：Bootstrap Result 数据类
 # ============================================
 
+
 @dataclass
 class BootstrapResult:
     """Bootstrap 结果数据类"""
+
     sharpe_samples: List[float]
     confidence_intervals: pd.DataFrame
     n_samples: int
@@ -59,6 +61,7 @@ class BootstrapResult:
 # ============================================
 # 实验函数
 # ============================================
+
 
 @handle_backtest_errors(return_value=pd.DataFrame())
 def run_e6_walkforward(
@@ -162,12 +165,14 @@ def run_e7_out_of_sample(
         logger.info(f"  品种: {sym}")
         try:
             # 样本内回测
-            runner_in = get_pybroker_runner(data_source, config, strategies=strategy_names)
+            runner_in = get_pybroker_runner(
+                data_source, config, strategies=strategy_names
+            )
             result_in = safe_run_backtest(
                 runner_in,
                 str(full_start.date()),
                 str(in_sample_end.date()),
-                f"E7_in_{sym}"
+                f"E7_in_{sym}",
             )
             if result_in is not None:
                 m_in = format_metrics(result_in.metrics)
@@ -180,12 +185,14 @@ def run_e7_out_of_sample(
                         save_equity_curve(eq_in, output_dir, "e7_equity_in_sample")
 
             # 样本外回测
-            runner_out = get_pybroker_runner(data_source, config, strategies=strategy_names)
+            runner_out = get_pybroker_runner(
+                data_source, config, strategies=strategy_names
+            )
             result_out = safe_run_backtest(
                 runner_out,
                 str(out_sample_start.date()),
                 str(full_end.date()),
-                f"E7_out_{sym}"
+                f"E7_out_{sym}",
             )
             if result_out is not None:
                 m_out = format_metrics(result_out.metrics)
@@ -204,7 +211,9 @@ def run_e7_out_of_sample(
                 if abs(sharpe_in) > _EPSILON:
                     decay = (sharpe_in - sharpe_out) / abs(sharpe_in)
                     is_qualified = decay < _SAFE_DECAY_THRESHOLD
-                    logger.info(f"  Sharpe衰减率: {decay:.1%} {'合格' if is_qualified else '不合格'}")
+                    logger.info(
+                        f"  Sharpe衰减率: {decay:.1%} {'合格' if is_qualified else '不合格'}"
+                    )
         except Exception as e:
             logger.error(f"  {sym}: 失败 - {e}")
 
@@ -243,10 +252,7 @@ def run_e8_bootstrap(
 
     runner = get_pybroker_runner(data_source, config, strategies=default_strategy)
     result = safe_run_backtest(
-        runner,
-        bt_cfg["full_start_date"],
-        bt_cfg["full_end_date"],
-        "E8_base"
+        runner, bt_cfg["full_start_date"], bt_cfg["full_end_date"], "E8_base"
     )
 
     if result is None or result.equity_curve is None or result.equity_curve.empty:
@@ -261,7 +267,9 @@ def run_e8_bootstrap(
         logger.warning(f"  系统Bootstrap失败: {e}, 回退到MetricsCalculator")
         try:
             equity = result.equity_curve["equity"].values
-            bootstrap_result = MetricsCalculator.bootstrap_confidence_interval(equity, n_samples=n_samples)
+            bootstrap_result = MetricsCalculator.bootstrap_confidence_interval(
+                equity, n_samples=n_samples
+            )
             logger.info(f"  MetricsCalculator Bootstrap完成: {n_samples} 样本")
         except Exception as e2:
             logger.error(f"  MetricsCalculator Bootstrap也失败: {e2}")
@@ -325,12 +333,11 @@ def run_e9_monte_carlo(
     bankruptcy_threshold = float(mc_cfg.get("bankruptcy_threshold", 0.8))
 
     try:
-        runner = get_pybroker_runner(data_source, config, strategies=get_strategy_names(config))
+        runner = get_pybroker_runner(
+            data_source, config, strategies=get_strategy_names(config)
+        )
         result = safe_run_backtest(
-            runner,
-            bt_cfg["full_start_date"],
-            bt_cfg["full_end_date"],
-            "E9_base"
+            runner, bt_cfg["full_start_date"], bt_cfg["full_end_date"], "E9_base"
         )
         if result is None:
             return None
@@ -366,14 +373,18 @@ def run_e9_monte_carlo(
 
         bankruptcy_prob = float(np.mean(final_values < bankruptcy_threshold))
         logger.info(f"  模拟次数: {n_simulations}")
-        logger.info(f"  终值均值: {np.mean(final_values):.4f}, 中位数: {np.median(final_values):.4f}")
+        logger.info(
+            f"  终值均值: {np.mean(final_values):.4f}, 中位数: {np.median(final_values):.4f}"
+        )
         logger.info(f"  破产概率(终值<{bankruptcy_threshold}): {bankruptcy_prob:.2%}")
 
-        mc_results = pd.DataFrame({
-            "sim_id": range(n_simulations),
-            "final_value": final_values,
-            "max_drawdown": max_drawdowns,
-        })
+        mc_results = pd.DataFrame(
+            {
+                "sim_id": range(n_simulations),
+                "final_value": final_values,
+                "max_drawdown": max_drawdowns,
+            }
+        )
         save_csv(mc_results, output_dir / "e9_monte_carlo_results.csv")
 
         # 保存模拟统计数据（不包含绘图逻辑，绘图在外部处理）
@@ -384,15 +395,15 @@ def run_e9_monte_carlo(
                 np.median(final_values),
                 np.std(final_values),
                 np.percentile(final_values, 5),
-                np.percentile(final_values, 95)
+                np.percentile(final_values, 95),
             ],
             "max_drawdown": [
                 np.mean(max_drawdowns),
                 np.median(max_drawdowns),
                 np.std(max_drawdowns),
                 np.percentile(max_drawdowns, 5),
-                np.percentile(max_drawdowns, 95)
-            ]
+                np.percentile(max_drawdowns, 95),
+            ],
         }
         save_csv(pd.DataFrame(stats_data), output_dir / "e9_monte_carlo_stats.csv")
 
@@ -431,7 +442,7 @@ def run_e10_html_report(
             config=config,
             results=results,
             output_dir=output_dir,
-            optimization_info=optimization_info
+            optimization_info=optimization_info,
         )
 
         if report_path:
@@ -462,16 +473,21 @@ def _run_factor_analysis_for_symbol(
     Returns:
         (ic_df, decay_df, summary) 元组
     """
-    ic_config = RollingICConfig(window=60, forward_period=5, ema_alpha=0.1, min_observations=30)
+    ic_config = RollingICConfig(
+        window=60, forward_period=5, ema_alpha=0.1, min_observations=30
+    )
     decay_config = FactorDecayConfig(
-        trend_window=40, ic_healthy_threshold=0.03, ic_dead_threshold=0.01,
-        max_consecutive_decline=5, decay_slope_threshold=-0.001,
+        trend_window=40,
+        ic_healthy_threshold=0.03,
+        ic_dead_threshold=0.01,
+        max_consecutive_decline=5,
+        decay_slope_threshold=-0.001,
     )
 
     ic_rows: List[Dict[str, Any]] = []
     summary: Dict[str, Any] = {}
 
-    from runner.data.preprocessor import compute_factor_scores_from_ohlcv
+    from core.factors.basic_factors import compute_factor_scores_from_ohlcv
 
     sym_df = data_source.query(
         data_source.date_range[0], data_source.date_range[1], symbols=[sym]
@@ -521,28 +537,40 @@ def _run_factor_analysis_for_symbol(
     for name in factor_names:
         if name in decay_monitor._ic_history:
             ic_series = decay_monitor._ic_history[name]
-            decay_rows.append({
-                "date": str(scored["date"].iloc[-1])[:10],
-                "factor": name,
-                "current_ic": round(ic_series[-1], 6) if ic_series else 0.0,
-                "mean_ic": round(np.mean(ic_series), 6) if ic_series else 0.0,
-                "status": decay_monitor.current_status.get(name, DecayStatus.HEALTHY).value,
-            })
+            decay_rows.append(
+                {
+                    "date": str(scored["date"].iloc[-1])[:10],
+                    "factor": name,
+                    "current_ic": round(ic_series[-1], 6) if ic_series else 0.0,
+                    "mean_ic": round(np.mean(ic_series), 6) if ic_series else 0.0,
+                    "status": decay_monitor.current_status.get(
+                        name, DecayStatus.HEALTHY
+                    ).value,
+                }
+            )
     decay_df = pd.DataFrame(decay_rows)
 
     ic_summary = ic_engine.get_ic_summary()
     summary_rows: List[Dict[str, Any]] = []
     for name, stats in ic_summary.items():
-        summary_rows.append({
-            "symbol": sym,
-            "factor": name,
-            "mean_ic": round(stats.get("mean", 0.0), 6),
-            "std_ic": round(stats.get("std", 0.0), 6),
-            "ir": round(stats.get("ir", 0.0), 4),
-            "current_ic": round(stats.get("current", 0.0), 6),
-            "current_weight": round(ic_engine.get_dynamic_weights().get(name, 0.0), 4),
-        })
-    summary = {"ic_summary": summary_rows, "alerts": alerts, "final_weights": ic_engine.get_dynamic_weights()}
+        summary_rows.append(
+            {
+                "symbol": sym,
+                "factor": name,
+                "mean_ic": round(stats.get("mean", 0.0), 6),
+                "std_ic": round(stats.get("std", 0.0), 6),
+                "ir": round(stats.get("ir", 0.0), 4),
+                "current_ic": round(stats.get("current", 0.0), 6),
+                "current_weight": round(
+                    ic_engine.get_dynamic_weights().get(name, 0.0), 4
+                ),
+            }
+        )
+    summary = {
+        "ic_summary": summary_rows,
+        "alerts": alerts,
+        "final_weights": ic_engine.get_dynamic_weights(),
+    }
 
     return ic_df, decay_df, summary
 
@@ -583,10 +611,18 @@ def run_e11_factor_analysis(
             )
 
             if not ic_df.empty:
-                save_csv(ic_df, output_dir / f"e11_ic_{sanitize_filename(sym.replace('.', '_'))}.csv")
+                save_csv(
+                    ic_df,
+                    output_dir
+                    / f"e11_ic_{sanitize_filename(sym.replace('.', '_'))}.csv",
+                )
 
             if not decay_df.empty:
-                save_csv(decay_df, output_dir / f"e11_decay_{sanitize_filename(sym.replace('.', '_'))}.csv")
+                save_csv(
+                    decay_df,
+                    output_dir
+                    / f"e11_decay_{sanitize_filename(sym.replace('.', '_'))}.csv",
+                )
 
             if "ic_summary" in summary:
                 all_summary_rows.extend(summary["ic_summary"])
@@ -599,7 +635,9 @@ def run_e11_factor_analysis(
             }
 
             final_weights = summary.get("final_weights", {})
-            logger.info(f"  {sym}: 最终权重={({k: round(v, 4) for k, v in final_weights.items()})}")
+            logger.info(
+                f"  {sym}: 最终权重={ ({k: round(v, 4) for k, v in final_weights.items()}) }"
+            )
         except Exception as e:
             logger.error(f"  {sym} 因子分析失败: {e}")
 

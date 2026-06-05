@@ -6,10 +6,11 @@
 原 run_validation.py 保留兼容。
 
 用法:
-  python run_validate.py                           # 全部验证
-  python run_validate.py --method monte_carlo      # 仅蒙特卡洛
-  python run_validate.py --method train_test       # 仅训练/测试分割
-  python run_validate.py --method factor_ic        # 仅因子IC稳定性
+  python run_validate.py                               # 全部验证
+  python run_validate.py --method monte_carlo          # 仅蒙特卡洛
+  python run_validate.py --method train_test           # 仅训练/测试分割
+  python run_validate.py --method factor_ic            # 仅因子IC稳定性
+  python run_validate.py --method factor_alpha24       # 仅AlphaFutures24因子IC/IR验证
 """
 
 import argparse
@@ -28,7 +29,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--method", default="all",
-        help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, all（默认: all）",
+        help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, factor_alpha24, all（默认: all）",
     )
     parser.add_argument(
         "--report", action="store_true",

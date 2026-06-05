@@ -9,6 +9,7 @@
   python run_backtest.py                     # 全部实验
   python run_backtest.py --experiment e1     # 单实验
   python run_backtest.py --optimize          # 先优化再回测
+  python run_backtest.py --factor-screen     # 先筛选AlphaFutures24因子再回测
   python run_backtest.py --report csv        # CSV格式报告
 """
 
@@ -35,12 +36,16 @@ def main() -> None:
         help="先运行参数优化，再执行回测",
     )
     parser.add_argument(
+        "--factor-screen", action="store_true",
+        help="先运行AlphaFutures24因子筛选（IC/IR测试），再执行回测",
+    )
+    parser.add_argument(
         "--symbol", default=None,
-        help="指定品种代码（如 SHFE.RB），仅优化/回测该品种",
+        help="指定品种代码（如 SHFE.RB），仅优化/回测/因子筛选该品种",
     )
     parser.add_argument(
         "--validate", default=None,
-        help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, all",
+        help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, factor_alpha24, all",
     )
     parser.add_argument(
         "--report", default="html",
@@ -58,6 +63,12 @@ def main() -> None:
         from runner import Pipeline
 
         pipe = Pipeline(args.config).load_data()
+
+        # AlphaFutures24 因子筛选
+        if args.factor_screen:
+            logger.info("执行AlphaFutures24因子筛选...")
+            symbols = [args.symbol] if args.symbol else None
+            pipe.screen_factors(symbols=symbols)
 
         # 参数优化
         if args.optimize:

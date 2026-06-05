@@ -25,7 +25,7 @@ def grid_search_single_strategy(
     param_space: Dict[str, Any],
     ds,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
 ) -> pd.DataFrame:
     """
     对单个策略执行参数网格搜索，返回按 Sharpe 排序的结果。
@@ -37,7 +37,7 @@ def grid_search_single_strategy(
         param_space: 参数搜索空间
         ds: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
 
     Returns:
         按复合得分排序的结果 DataFrame
@@ -49,6 +49,13 @@ def grid_search_single_strategy(
 
     logger.info(f"\n  策略: {strategy_name} | 参数组合数: {total}")
 
+    # 构建回测用的 BacktestConfig（复用传入的 config，仅覆盖交易参数）
+    bt_config = BacktestConfig(
+        initial_cash=config.initial_cash,
+        commission_rate=config.commission_rate,
+        slippage_rate=config.slippage_rate,
+    )
+
     results = []
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
@@ -58,17 +65,12 @@ def grid_search_single_strategy(
             continue
 
         try:
-            config = BacktestConfig(
-                initial_cash=opt_cfg["initial_cash"],
-                commission_rate=opt_cfg["commission_rate"],
-                slippage_rate=opt_cfg["slippage_rate"],
-            )
-            runner = PyBrokerBacktestRunner(ds, config)
+            runner = PyBrokerBacktestRunner(ds, bt_config)
             runner.register_strategies([strategy_name])
 
             result = runner.run(
-                opt_cfg["full_start"],
-                opt_cfg["in_sample_end"],
+                config.full_start,
+                config.in_sample_end,
                 custom_params={strategy_name: params},
             )
             kpi = dict(result.metrics)
@@ -93,7 +95,7 @@ def grid_search_single_strategy(
     df_temp = df.sort_values("sharpe", ascending=False).head(top_n)
     for _, row in df_temp.iterrows():
         params_base = {k: row[k] for k in keys if k in row}
-        score = param_stability_test(strategy_name, params_base, ds, lib, opt_cfg)
+        score = param_stability_test(strategy_name, params_base, ds, lib, config)
         param_key = _params_to_key(params_base)
         stability_scores[param_key] = score
 
@@ -117,7 +119,7 @@ def param_stability_test(
     params: Dict[str, Any],
     ds,
     lib: StrategyLibrary,
-    opt_cfg: Dict[str, Any],
+    config: BacktestConfig,
     perturb_ratio: float = 0.10,
 ) -> float:
     """
@@ -128,7 +130,7 @@ def param_stability_test(
         params: 基准参数
         ds: 数据源
         lib: 策略库
-        opt_cfg: 优化配置
+        config: 回测配置（BacktestConfig）
         perturb_ratio: 扰动比例
 
     Returns:
@@ -137,16 +139,18 @@ def param_stability_test(
     base_sharpe = None
     sharpe_changes = []
 
+    # 构建回测用的 BacktestConfig
+    bt_config = BacktestConfig(
+        initial_cash=config.initial_cash,
+        commission_rate=config.commission_rate,
+        slippage_rate=config.slippage_rate,
+    )
+
     try:
-        config = BacktestConfig(
-            initial_cash=opt_cfg["initial_cash"],
-            commission_rate=opt_cfg["commission_rate"],
-            slippage_rate=opt_cfg["slippage_rate"],
-        )
-        runner = PyBrokerBacktestRunner(ds, config)
+        runner = PyBrokerBacktestRunner(ds, bt_config)
         runner.register_strategies([strategy_name])
         result = runner.run(
-            opt_cfg["full_start"], opt_cfg["in_sample_end"],
+            config.full_start, config.in_sample_end,
             custom_params={strategy_name: params},
         )
         base_sharpe = float(result.metrics.get("sharpe", 0))
@@ -169,15 +173,10 @@ def param_stability_test(
                     if test_params.get("entry_threshold", 0) <= test_params.get("exit_threshold", 999):
                         continue
 
-                config2 = BacktestConfig(
-                    initial_cash=opt_cfg["initial_cash"],
-                    commission_rate=opt_cfg["commission_rate"],
-                    slippage_rate=opt_cfg["slippage_rate"],
-                )
-                runner2 = PyBrokerBacktestRunner(ds, config2)
+                runner2 = PyBrokerBacktestRunner(ds, bt_config)
                 runner2.register_strategies([strategy_name])
                 result2 = runner2.run(
-                    opt_cfg["full_start"], opt_cfg["in_sample_end"],
+                    config.full_start, config.in_sample_end,
                     custom_params={strategy_name: test_params},
                 )
                 test_sharpe = float(result2.metrics.get("sharpe", 0))

@@ -11,12 +11,14 @@ from runner.validation.train_test import task2_train_test_split
 from runner.validation.monte_carlo import task3_monte_carlo
 from runner.validation.bootstrap import run_bootstrap_validation
 from runner.validation.factor_stability import factor_ic_stability_analysis
+from runner.validation.factor_alpha24 import factor_alpha24_screening
 
 _VALIDATOR_MAP: Dict[str, Callable] = {
     "train_test": task2_train_test_split,
     "monte_carlo": task3_monte_carlo,
     "bootstrap": run_bootstrap_validation,
     "factor_ic": factor_ic_stability_analysis,
+    "factor_alpha24": factor_alpha24_screening,
 }
 
 
@@ -44,5 +46,6 @@ __all__ = [
     "task3_monte_carlo",
     "run_bootstrap_validation",
     "factor_ic_stability_analysis",
+    "factor_alpha24_screening",
     "get_validator",
 ]
