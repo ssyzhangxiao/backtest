@@ -24,7 +24,13 @@
 from .factor_evaluator import FactorEvaluator, FactorEvalResult
 from .factor_transformer import FactorTransformer
 from .factor_selector import FactorSelector
-from .basic_factors import compute_factor_scores_from_ohlcv
+from .basic_factors import (
+    compute_factor_scores_from_ohlcv,
+    compute_ts_momentum,
+    compute_roll_yield,
+    compute_alpha019,
+    compute_alpha032,
+)
 from .capital_flow import CapitalFlowFactor
 from .term_structure import TermStructureFactor
 
@@ -74,6 +80,10 @@ __all__ = [
     "TermStructureFactor",
     # 基础因子
     "compute_factor_scores_from_ohlcv",
+    "compute_ts_momentum",
+    "compute_roll_yield",
+    "compute_alpha019",
+    "compute_alpha032",
     # 基础算子
     "safe_div",
     "delay",
