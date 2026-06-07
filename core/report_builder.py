@@ -854,7 +854,7 @@ def generate_report(
     best_metrics = best.get("metrics", {})
     best_equity = best.get("equity", [])
     best_dates = best.get("dates", [])
-    best_label = strategy_labels.get(best_exp, best_exp)
+    best_label = _label_for(best_exp)
 
     # ── KPI 卡片 HTML ──
     kpi_items = [

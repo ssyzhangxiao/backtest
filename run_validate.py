@@ -23,6 +23,12 @@ from datetime import datetime
 from loguru import logger
 
 
+def _set_log_level(verbose: bool) -> None:
+    """根据 --verbose 设置 loguru 输出级别（与 run_backtest.py 一致）。"""
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG" if verbose else "INFO")
+
+
 def main() -> None:
     """主执行入口：解析参数 → Pipeline 验证调用。"""
     parser = argparse.ArgumentParser(description="策略验证（Pipeline版）")
