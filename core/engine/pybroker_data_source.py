@@ -101,14 +101,14 @@ def create_hybrid_data_source(
     data_length: int = 2000,
 ) -> PyBrokerDataSource:
     """
-    混合数据源工厂：TqSdk 在线数据优先，本地 CSV 为 fallback。
+    混合数据源工厂：TqSdk 在线数据为主，本地 CSV 仅用于 spread（远月价差）补充。
 
     加载策略：
-      1. 若提供 phone + password + symbols → 尝试从 TqSdk 加载实时数据
-         → 成功则转为 PyBrokerDataSource 返回
-      2. TqSdk 加载失败（未提供凭证/网络错误/账号过期等）→ 回退到 DataLoader
-         → 从 data_dir 加载 CSV 数据
-      3. 两者均失败 → 抛出 RuntimeError
+      1. 必须提供 phone + password + symbols（凭证缺失则抛错，不静默回退）
+      2. 从 TqSdk 加载所有合约级数据（连续主力合约识别 + spread 构建）
+      3. CSV 仅在 TqSdk 缺失历史数据时做短时段补丁（仅 spread 字段），不做主回测源
+
+    不允许回退到纯 CSV 数据源（避免使用降级方案）。
     """
     phone = phone or os.environ.get("TQSDK_PHONE")
     password = password or os.environ.get("TQSDK_PASSWORD")
@@ -125,10 +125,39 @@ def create_hybrid_data_source(
         except Exception:
             pass
 
-    if phone and password and symbols:
-        try:
-            from core.data_loader import DataLoader
+    if not phone or not password:
+        raise RuntimeError(
+            "TqSdk 凭证未配置（TQSDK_PHONE / TQSDK_PASSWORD）。"
+            "规则1：禁止静默回退到本地 CSV。请配置天勤账号后重试。"
+        )
+    if not symbols:
+        raise RuntimeError(
+            "未指定品种列表（symbols）。规则1：禁止回退到全量本地 CSV。"
+        )
 
+    # ── 主路径：TqSdk 在线数据 ──
+    logger.info("从 TqSdk 加载在线数据（%d 品种, data_length=%d）...", len(symbols), data_length)
+    try:
+        from core.data_loader import DataLoader
+
+        tqsdk_loader = DataLoader(
+            data_source="tqsdk",
+            phone=phone,
+            password=password,
+            symbols=symbols,
+            data_length=data_length,
+        )
+        tqsdk_loader.load_from_tqsdk(show_progress=True)
+        tqsdk_loader.identify_dominant_contracts()
+        tqsdk_loader.build_continuous_series()
+        tqsdk_loader.build_spread_pairs()
+
+        tqsdk_df = tqsdk_loader.get_pybroker_df()
+        if tqsdk_df.empty:
+            raise RuntimeError("TqSdk 数据为空")
+
+        # 仅当 TqSdk 缺少 spread 字段时，从 CSV 补 spread 列（不补主数据）
+        if "spread" not in tqsdk_df.columns:
             data_dir = data_dir or os.environ.get("DATA_DIR", "./data")
             csv_loader = DataLoader(data_source="csv", data_dir=data_dir)
             target_csv_files = []
@@ -136,85 +165,27 @@ def create_hybrid_data_source(
                 csv_path = os.path.join(data_dir, f"{sym}.csv")
                 if os.path.exists(csv_path):
                     target_csv_files.append(csv_path)
-            if not target_csv_files:
-                raise RuntimeError(f"未找到目标品种的 CSV 文件: {symbols}")
-            csv_loader.load_csv_files_by_paths(target_csv_files)
-            csv_loader.build_continuous_series()
-            csv_df = csv_loader.get_pybroker_df()
-
-            if csv_df.empty:
-                raise RuntimeError("CSV 品种级数据为空")
-
-            logger.info("从 TqSdk 加载合约级数据（用于 spread 远月价差）...")
-            tqsdk_loader = DataLoader(
-                data_source="tqsdk",
-                phone=phone,
-                password=password,
-                symbols=symbols,
-                data_length=data_length,
-            )
-            tqsdk_loader.load_from_tqsdk(show_progress=True)
-            tqsdk_loader.identify_dominant_contracts()
-            tqsdk_loader.build_continuous_series()
-            tqsdk_loader.build_spread_pairs()
-
-            tqsdk_dom = tqsdk_loader.full_df[tqsdk_loader.full_df["is_dominant"]].copy()
-            if "product" in tqsdk_dom.columns and "spread" in tqsdk_dom.columns:
-                tqsdk_dom["exchange"] = tqsdk_dom["symbol"].str.split(".").str[0]
-                tqsdk_dom["symbol"] = (
-                    tqsdk_dom["exchange"] + "." + tqsdk_dom["product"].str.upper()
-                )
-                tqsdk_dom.drop(columns=["exchange"], inplace=True)
-
-                spread_cols = ["date", "symbol", "far_symbol", "far_close", "spread"]
-                available_cols = [c for c in spread_cols if c in tqsdk_dom.columns]
-                if available_cols:
-                    spread_df = tqsdk_dom[available_cols].copy()
-                    spread_df["date"] = pd.to_datetime(spread_df["date"]).dt.normalize()
-                    csv_df["date"] = pd.to_datetime(csv_df["date"]).dt.normalize()
-                    for col in ["far_symbol", "far_close", "spread"]:
-                        if col in csv_df.columns:
-                            csv_df.drop(columns=[col], inplace=True)
-                    csv_df = csv_df.merge(spread_df, on=["date", "symbol"], how="left")
-
-            logger.info(
-                "混合数据加载成功: CSV %d 行 + TqSdk spread, %d 品种",
-                len(csv_df),
-                csv_df["symbol"].nunique(),
-            )
-            return PyBrokerDataSource(csv_df)
-
-        except Exception as e:
-            logger.warning("TqSdk 混合模式失败 (%s)，回退到纯 CSV 数据源。", e)
-
-    data_dir = data_dir or os.environ.get("DATA_DIR", "./data")
-    logger.info("从本地 CSV 加载数据 (%s)...", data_dir)
-
-    try:
-        from core.data_loader import DataLoader
-
-        loader = DataLoader(data_source="csv", data_dir=data_dir)
-        if symbols:
-            target_csv_files = []
-            for sym in symbols:
-                csv_path = os.path.join(data_dir, f"{sym}.csv")
-                if os.path.exists(csv_path):
-                    target_csv_files.append(csv_path)
             if target_csv_files:
-                loader.load_csv_files_by_paths(target_csv_files)
-            else:
-                loader.load_all_csv()
-        else:
-            loader.load_all_csv()
+                csv_loader.load_csv_files_by_paths(target_csv_files)
+                csv_loader.build_continuous_series()
+                csv_df = csv_loader.get_pybroker_df()
+                spread_cols = ["date", "symbol", "far_symbol", "far_close", "spread"]
+                available_cols = [c for c in spread_cols if c in csv_df.columns]
+                if available_cols:
+                    spread_df = csv_df[available_cols].copy()
+                    spread_df["date"] = pd.to_datetime(spread_df["date"]).dt.normalize()
+                    tqsdk_df["date"] = pd.to_datetime(tqsdk_df["date"]).dt.normalize()
+                    tqsdk_df = tqsdk_df.merge(spread_df, on=["date", "symbol"], how="left")
+                    logger.info("已从 CSV 补充 spread 字段（%d 品种）", csv_df["symbol"].nunique())
 
-        loader.build_continuous_series()
-        df = loader.get_pybroker_df()
-
-        if df.empty:
-            raise RuntimeError("CSV 数据为空")
-
-        logger.info("CSV 数据加载成功: %d 行, %d 品种", len(df), df["symbol"].nunique())
-        return PyBrokerDataSource(df)
+        logger.info(
+            "TqSdk 数据加载成功: %d 行, %d 品种",
+            len(tqsdk_df),
+            tqsdk_df["symbol"].nunique(),
+        )
+        return PyBrokerDataSource(tqsdk_df)
 
     except Exception as e:
-        raise RuntimeError(f"CSV 数据加载失败: {e}") from e
+        raise RuntimeError(
+            f"TqSdk 数据加载失败: {e}。规则1：禁止回退到本地 CSV，请检查天勤账号/网络/品种代码。"
+        ) from e

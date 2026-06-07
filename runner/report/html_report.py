@@ -10,9 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
+import pandas as pd
 from loguru import logger
 
 from core.engine.backtest_runner import PyBrokerResult
+from utils.metrics import MetricsCalculator
 
 
 def generate_html_report(
@@ -138,9 +141,6 @@ def _convert_results(
     Returns:
         {策略名: {metrics: {...}, dates: [...], equity: [...]}} 字典
     """
-    import pandas as pd
-    import numpy as np
-
     strategies_data = {}
 
     for name, res in results.items():
@@ -245,17 +245,14 @@ def _convert_dataframe_result(
             break
 
     if group_col is None:
-        # 无分组列，计算整体统计
+        # 无分组列，计算整体统计（委托 MetricsCalculator.aggregate_stats，规则17）
         stats = {}
         for col in numeric_cols:
             if col in ["date", "time"]:
                 continue
-            col_data = df[col].dropna()
-            if len(col_data) > 0:
-                stats[f"{col}_mean"] = col_data.mean()
-                stats[f"{col}_std"] = col_data.std()
-                stats[f"{col}_min"] = col_data.min()
-                stats[f"{col}_max"] = col_data.max()
+            col_stats = MetricsCalculator.aggregate_stats(df[col])
+            for k, v in col_stats.items():
+                stats[f"{col}_{k}"] = v
         # 同时保留第一行数据
         row = df.iloc[0].to_dict()
         clean = {

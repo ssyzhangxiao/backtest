@@ -10,8 +10,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 from loguru import logger
+from dotenv import load_dotenv
 
-from core.config import BacktestConfig
+# 自动加载 .env 文件
+load_dotenv()
+
 from core.engine.pybroker_data_source import (
     PyBrokerDataSource,
     create_hybrid_data_source,
@@ -122,21 +125,3 @@ def get_tqsdk_credentials(
     if not phone or not password:
         logger.warning("TqSdk凭证未设置，将仅使用CSV数据")
     return phone, password
-
-
-def build_opt_cfg(cfg: Dict[str, Any]) -> BacktestConfig:
-    """
-    从原始配置字典构建 BacktestConfig。
-
-    规则2、17：统一使用 BacktestConfig，不再返回字典。
-    内部委托 BacktestConfig.from_yaml()，避免重复解析。
-
-    Args:
-        cfg: 原始配置字典（需包含 config_path 或已完整加载）
-
-    Returns:
-        BacktestConfig 实例
-    """
-    # 优先使用 config_path 重新加载（确保字段完整）
-    config_path = cfg.get("_config_path", "config.yaml")
-    return BacktestConfig.from_yaml(config_path)

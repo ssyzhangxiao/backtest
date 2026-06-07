@@ -16,13 +16,15 @@ from .constants import (
     get_default_stress_events,
 )
 from .factors_config import FactorModuleConfig
-from .adaptive_config import AdaptiveModuleConfig
-from .multi_tf_config import MultiTFModuleConfig
-from .position_config import PositionModuleConfig
 from .stop_config import StopOptimizationConfig
-from .instrument_config import InstrumentModuleConfig
 from .validation_config import ValidationModuleConfig
 from .backtest_config import BacktestConfig
+from .strategy_profiles import (
+    StrategyProfile,
+    StrategyLibrary,
+    STRATEGY_NAMES,
+    SUB_STRATEGY_NAMES,
+)
 
 __all__ = [
     "DATA_DIR",
@@ -31,11 +33,11 @@ __all__ = [
     "DEFAULT_FACTOR_WEIGHTS",
     "get_default_stress_events",
     "FactorModuleConfig",
-    "AdaptiveModuleConfig",
-    "MultiTFModuleConfig",
-    "PositionModuleConfig",
     "StopOptimizationConfig",
-    "InstrumentModuleConfig",
     "ValidationModuleConfig",
     "BacktestConfig",
+    "StrategyProfile",
+    "StrategyLibrary",
+    "STRATEGY_NAMES",
+    "SUB_STRATEGY_NAMES",
 ]

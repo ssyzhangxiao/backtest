@@ -171,13 +171,27 @@ def decay_linear(arr: np.ndarray, window: int) -> np.ndarray:
     """
     衰减线性加权：DECAYLINEAR(x, n)。
     权重从1到n线性递增，最近期权重最大。
+
+    P 整改（2026-06-07）：使用扩张窗口（min_periods=1）让早期就有
+    估计，避免前期大量 NaN；并显式归一化权重处理 NaN 跳过。
     """
     weights = np.arange(1, window + 1, dtype=float)
     weights = weights / weights.sum()
-    s = pd.Series(arr)
+
+    def _weighted_mean(x: np.ndarray) -> float:
+        # 跳过 NaN，按可用元素数量重归一化
+        mask = ~np.isnan(x)
+        if not mask.any():
+            return np.nan
+        w = weights[-int(mask.sum()):]
+        # 如果窗口不足（前期），用尾部子集权重并归一化
+        w = w / w.sum()
+        return float(np.dot(x[mask], w))
+
+    s = pd.Series(np.asarray(arr, dtype=float))
     return (
-        s.rolling(window=window, min_periods=window)
-        .apply(lambda x: np.dot(x, weights), raw=True)
+        s.rolling(window=window, min_periods=1)
+        .apply(_weighted_mean, raw=True)
         .values
     )
 

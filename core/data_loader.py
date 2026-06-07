@@ -239,7 +239,7 @@ class DataLoader(DataProvider):
 
         try:
             with open(cache_path, "rb") as f:
-                data = pickle.load(f, restrict=False)
+                data = pickle.load(f)
             _logger.info("缓存加载成功: %s", symbol)
             return data
         except Exception as e:

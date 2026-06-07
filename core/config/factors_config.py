@@ -24,7 +24,7 @@ class FactorModuleConfig:
     capital_flow_divergence_window: int = 20
     term_structure_enabled: bool = False
     term_structure_basis_window: int = 20
-    term_structure_roll_yield_smooth_window: int = 5
+    term_structure_roll_yield_smooth_window: int = 5  # 期限结构信号平滑窗口
 
     @staticmethod
     def from_yaml(raw: dict) -> "FactorModuleConfig":

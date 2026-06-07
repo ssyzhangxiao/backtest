@@ -17,32 +17,24 @@ from core.engine.backtest_runner import (
     PyBrokerResult,
 )
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from runner.common.errors import BacktestError
-
-# 回测配置缓存
-_bt_config_cache: Dict[str, BacktestConfig] = {}
 
 
 def build_backtest_config(config: Dict[str, Any]) -> BacktestConfig:
     """
-    构建 BacktestConfig 对象（带缓存）。
+    从完整配置字典构建 BacktestConfig 实例（无缓存，每次重新构造）。
 
-    消除重复#7：直接从 yaml 字典构建，与 BacktestConfig.from_yaml() 对齐。
+    规则2：字段命名与 config.yaml 保持一致（initial_capital / commission_rate / slippage_rate）。
 
     Args:
-        config: 完整配置字典
+        config: 完整配置字典（含 backtest / risk_management / factor_weights 等子段）
 
     Returns:
         BacktestConfig 实例
     """
-    cache_key = f"{id(config)}"
-    if cache_key in _bt_config_cache:
-        return _bt_config_cache[cache_key]
-
     bt_cfg = config["backtest"]
     risk_cfg: Dict[str, Any] = config.get("risk_management", {})
     bt_config = BacktestConfig(
-        initial_cash=bt_cfg.get("initial_cash", 1_000_000),
+        initial_cash=bt_cfg.get("initial_capital", 1_000_000),
         commission_rate=bt_cfg.get("commission_rate", bt_cfg.get("commission", 0.0001)),
         slippage_rate=bt_cfg.get("slippage_rate", bt_cfg.get("slippage", 0.0001)),
         stop_loss_pct=risk_cfg.get("stop_loss_pct", bt_cfg.get("stop_loss_pct", 0.03)),
@@ -55,10 +47,8 @@ def build_backtest_config(config: Dict[str, Any]) -> BacktestConfig:
         use_cross_section=bool(bt_cfg.get("use_cross_section", True)),
         use_rank_score=bool(bt_cfg.get("use_rank_score", True)),
         use_rolling_ic=bool(bt_cfg.get("use_rolling_ic", True)),
-        top_n_symbols=int(bt_cfg.get("top_n_symbols", 5)),
     )
     bt_config.rebalance_days = bt_cfg.get("rebalance_freq", 3)
-    _bt_config_cache[cache_key] = bt_config
     return bt_config
 
 
@@ -91,6 +81,7 @@ def safe_run_backtest(
     start_date: str,
     end_date: str,
     experiment_name: str,
+    initial_cash: Optional[float] = None,
     **kwargs,
 ) -> Optional[PyBrokerResult]:
     """
@@ -101,20 +92,29 @@ def safe_run_backtest(
         start_date: 开始日期
         end_date: 结束日期
         experiment_name: 实验名称（用于日志）
+        initial_cash: 可选的初始资金覆盖；为 None 时沿用 runner 配置
         **kwargs: 传给 runner.run 的额外参数
 
     Returns:
         回测结果，失败返回 None
     """
     try:
-        return runner.run(start_date=start_date, end_date=end_date, **kwargs)
+        run_kwargs = dict(kwargs)
+        if initial_cash is not None:
+            run_kwargs["initial_cash"] = initial_cash
+        return runner.run(start_date=start_date, end_date=end_date, **run_kwargs)
     except Exception as e:
         logger.error(f"{experiment_name} 回测执行失败: {e}", exc_info=True)
         return None
 
 
 def setup_logging(config: Dict[str, Any]) -> None:
-    """配置日志系统，失败时降级为控制台输出。"""
+    """
+    配置日志系统，失败时降级为控制台输出。
+
+    Args:
+        config: 完整配置字典（读取 logging 子段）
+    """
     log_config: Dict[str, Any] = config.get("logging", {})
     if not log_config:
         logger.add(sys.stdout, level="INFO")

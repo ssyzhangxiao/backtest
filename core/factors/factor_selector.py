@@ -58,8 +58,8 @@ class FactorSelector:
     用法:
         selector = FactorSelector()
         result = selector.select(
-            eval_results={"ts_momentum": result1, "roll_yield": result2},
-            factor_scores_dict={"ts_momentum": arr1, "roll_yield": arr2},
+            eval_results={"trend": result1, "term_structure": result2},
+            factor_scores_dict={"trend": arr1, "term_structure": arr2},
         )
     """
 

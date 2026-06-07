@@ -2,9 +2,8 @@
 性能基准测试脚本。
 
 对核心路径进行微基准测试：
-  - 因子得分计算
-  - 综合得分合成
-  - 调仓日判断
+  - 因子综合得分合成（带 symbol）
+  - 调仓日判断（基于日期）
   - 数据查询
 
 用法: PYTHONPATH=. python scripts/benchmark.py
@@ -18,10 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from core.engine.switch_engine import FactorScoringEngine, ScoringConfig
-from core.strategy_registry import StrategyLibrary
+from core.config.strategy_profiles import StrategyLibrary
 
 
 def generate_fake_data(n_bars: int = 1000) -> pd.DataFrame:
@@ -42,39 +40,50 @@ def generate_fake_data(n_bars: int = 1000) -> pd.DataFrame:
 
 
 def benchmark_composite_score(n_runs: int = 100000):
-    """综合得分计算基准测试。"""
+    """综合得分计算基准测试。
+
+    当前 API: FactorScoringEngine.compute_composite_score(symbol, factor_scores)
+    """
     library = StrategyLibrary()
     engine = FactorScoringEngine(library)
-    scores = {
-        "ts_momentum": 0.5,
-        "roll_yield": -0.3,
-        "alpha019": 0.8,
-        "alpha032": 0.1,
+    symbol = "SHFE.RB"
+    factor_scores = {
+        "trend": 0.5,
+        "term_structure": -0.3,
+        "mean_reversion": 0.8,
+        "vol_breakout": 0.1,
     }
 
     start = time.perf_counter()
     for _ in range(n_runs):
-        engine.compute_composite_score(scores)
+        engine.compute_composite_score(symbol, factor_scores)
     elapsed = time.perf_counter() - start
 
     ns_per_op = (elapsed / n_runs) * 1e9
     print(f"  compute_composite_score: {n_runs:,} 次 / {elapsed:.3f}s = {ns_per_op:.0f} ns/次")
 
 
-def benchmark_rebalance_check(n_runs: int = 1000000):
-    """调仓日判断基准测试。"""
+def benchmark_rebalance_check(n_runs: int = 100000):
+    """调仓日判断基准测试。
+
+    当前 API: FactorScoringEngine.is_rebalance_day(dt)，仅接受日期参数。
+    为了避免 pandas DatetimeIndex 纳秒级溢出（n_runs 个工作日 > 1677 年），
+    改用有限日期池 + 循环复用，仅测量纯判定开销。
+    """
     library = StrategyLibrary()
     config = ScoringConfig(rebalance_days=3)
     engine = FactorScoringEngine(library, config)
-    indices = np.arange(1, n_runs + 1)
+    # 1000 个工作日（≈ 4 年）足够覆盖调仓周期
+    dates = pd.date_range("2023-01-01", periods=1000, freq="B")
+    n_dates = len(dates)
 
     start = time.perf_counter()
-    for i in indices:
-        engine.is_rebalance_day(int(i))
+    for i in range(n_runs):
+        engine.is_rebalance_day(dates[i % n_dates])
     elapsed = time.perf_counter() - start
 
     ns_per_op = (elapsed / n_runs) * 1e9
-    print(f"  is_rebalance_day:     {n_runs:,} 次 / {elapsed:.3f}s = {ns_per_op:.0f} ns/次")
+    print(f"  is_rebalance_day:        {n_runs:,} 次 / {elapsed:.3f}s = {ns_per_op:.0f} ns/次")
 
 
 def benchmark_data_query(n_runs: int = 1000):
@@ -93,21 +102,6 @@ def benchmark_data_query(n_runs: int = 1000):
     print(f"  PyBrokerDataSource.query: {n_runs:,} 次 / {elapsed:.3f}s = {ms_per_op:.3f} ms/次")
 
 
-def benchmark_score_to_position(n_runs: int = 100000):
-    """得分转仓位基准测试。"""
-    library = StrategyLibrary()
-    engine = FactorScoringEngine(library)
-    scores = np.random.uniform(-1, 1, n_runs)
-
-    start = time.perf_counter()
-    for s in scores:
-        engine.score_to_position(float(s))
-    elapsed = time.perf_counter() - start
-
-    ns_per_op = (elapsed / n_runs) * 1e9
-    print(f"  score_to_position:    {n_runs:,} 次 / {elapsed:.3f}s = {ns_per_op:.0f} ns/次")
-
-
 def main():
     print("=" * 60)
     print("性能基准测试")
@@ -116,7 +110,6 @@ def main():
 
     benchmark_composite_score()
     benchmark_rebalance_check()
-    benchmark_score_to_position()
     benchmark_data_query()
 
     print()

@@ -140,6 +140,54 @@ class MetricsCalculator:
         return 0.0
 
     @staticmethod
+    def aggregate_stats(values: pd.Series) -> Dict[str, float]:
+        """
+        计算数值序列的统计指标：mean / std / min / max。
+
+        统一替代 html_report._convert_dataframe_result 中的手写 mean/std/min/max
+        统计逻辑（规则17）。
+
+        Args:
+            values: 数值 Series（NaN 会被自动 drop）
+
+        Returns:
+            {mean, std, min, max} 字典；空序列返回 4 个键为 0.0
+        """
+        clean = values.dropna()
+        if len(clean) == 0:
+            return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+        return {
+            "mean": float(clean.mean()),
+            "std": float(clean.std()) if len(clean) > 1 else 0.0,
+            "min": float(clean.min()),
+            "max": float(clean.max()),
+        }
+
+    @staticmethod
+    def format_metrics(metrics: Dict) -> Dict:
+        """
+        格式化绩效指标：四舍五入 float，NaN/Inf 改为 'N/A'。
+
+        统一替代 runner/common/utils.py 和 runner/common/__init__.py 中
+        重复的手写实现（规则17）。
+
+        Args:
+            metrics: 原始指标字典
+
+        Returns:
+            格式化后的指标字典
+        """
+        result: Dict = {}
+        for k, v in metrics.items():
+            if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+                result[k] = "N/A"
+            elif isinstance(v, float):
+                result[k] = round(v, 4)
+            else:
+                result[k] = v
+        return result
+
+    @staticmethod
     def format_metrics_card(metrics: Dict) -> List[Dict]:
         """
         将指标格式化为前端卡片数据。

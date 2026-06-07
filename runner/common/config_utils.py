@@ -84,8 +84,8 @@ def get_factors_list(config: Dict[str, Any]) -> List[str]:
     if "list" in factors_config:
         return factors_config["list"]
 
-    # 默认因子
-    return ["ts_momentum", "roll_yield", "alpha019", "alpha032"]
+    # 默认5子策略
+    return ["trend", "term_structure", "mean_reversion", "vol_breakout", "composite_resonance"]
 
 
 def get_missing_data_method(config: Dict[str, Any]) -> str:

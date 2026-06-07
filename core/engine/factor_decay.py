@@ -1,21 +1,30 @@
 """
-因子衰减监控。
+因子衰减监控（DEPRECATED 兼容层）。
 
-跟踪因子IC随时间的变化趋势，检测因子性能衰减：
-  - 滚动IC趋势检测：IC是否显著下滑
-  - 衰减告警：IC低于阈值或连续下降
-  - 衰减历史记录
+⚠️ P1-3整改（2026-06-07）：
+  本文件已合并到 core/factors/factor_evaluator.py 的 FactorEvaluator.detect_decay() 方法。
+  保留本文件仅作为向后兼容层：
+    - 旧导入路径仍可使用
+    - 所有计算委托给 FactorEvaluator
+    - 旧类的接口行为完全等价
 
-位置: core/engine/factor_decay.py
+新代码请直接使用:
+    from core.factors.factor_evaluator import FactorEvaluator
+    evaluator = FactorEvaluator(...)
+    decay_status = evaluator.detect_decay(ic_history, ...)
+
+位置: core/engine/factor_decay.py（仅作兼容层）
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
-from enum import Enum
-import logging
+from __future__ import annotations
 
-import pandas as pd
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional
+
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +32,10 @@ logger = logging.getLogger(__name__)
 class DecayStatus(Enum):
     """因子衰减状态。"""
 
-    HEALTHY = "healthy"         # 健康：IC稳定
-    WARNING = "warning"         # 警告：IC下降趋势
-    DECAYING = "decaying"       # 衰减：IC持续低于阈值
-    DEAD = "dead"               # 失效：IC趋近于零或为负
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    DECAYING = "decaying"
+    DEAD = "dead"
 
 
 @dataclass
@@ -36,42 +45,36 @@ class DecayAlert:
     factor_name: str
     status: DecayStatus
     current_ic: float
-    trend_slope: float           # IC趋势斜率
-    consecutive_decline: int     # 连续下降次数
+    trend_slope: float
+    consecutive_decline: int
     timestamp: str = ""
 
 
 @dataclass
 class FactorDecayConfig:
-    """衰减监控配置。"""
+    """衰减监控配置（兼容层）。"""
 
-    # 趋势检测窗口（交易日数）
     trend_window: int = 40
-
-    # IC健康阈值（绝对值低于此值视为衰减）
     ic_healthy_threshold: float = 0.03
-
-    # IC死区阈值（绝对值低于此值视为失效）
     ic_dead_threshold: float = 0.01
-
-    # 连续下降次数触发告警
     max_consecutive_decline: int = 5
-
-    # 衰减斜率阈值（负斜率绝对值超过此值视为趋势性衰减）
     decay_slope_threshold: float = -0.001
+
+
+_STATUS_MAP = {
+    "healthy": DecayStatus.HEALTHY,
+    "warning": DecayStatus.WARNING,
+    "decaying": DecayStatus.DECAYING,
+    "dead": DecayStatus.DEAD,
+}
 
 
 class FactorDecayMonitor:
     """
-    因子衰减监控器。
+    因子衰减监控器（DEPRECATED 兼容层）。
 
-    跟踪每个因子的滚动IC，检测性能衰减趋势。
-
-    使用方式:
-        monitor = FactorDecayMonitor()
-        for each bar:
-            monitor.update(factor_name, ic_value, date)
-        alerts = monitor.check_decay()
+    ⚠️ P1-3整改：核心逻辑已迁移到 FactorEvaluator.detect_decay()。
+    本类仅做兼容转发，行为完全等价。
     """
 
     def __init__(self, config: Optional[FactorDecayConfig] = None):
@@ -81,25 +84,21 @@ class FactorDecayMonitor:
         self._alerts: List[DecayAlert] = []
         self._current_status: Dict[str, DecayStatus] = {}
 
+        # 委托给 FactorEvaluator
+        from core.factors.factor_evaluator import FactorEvaluator
+        self._evaluator = FactorEvaluator()
+        logger.debug("FactorDecayMonitor 已委托给 FactorEvaluator.detect_decay")
+
     @property
     def current_status(self) -> Dict[str, DecayStatus]:
-        """各因子当前衰减状态。"""
         return dict(self._current_status)
 
     @property
     def alerts(self) -> List[DecayAlert]:
-        """告警列表。"""
         return list(self._alerts)
 
     def update(self, factor_name: str, ic_value: float, date: str = ""):
-        """
-        更新因子IC观测。
-
-        Args:
-            factor_name: 因子名称
-            ic_value: 当期IC值
-            date: 日期（可选）
-        """
+        """更新因子IC观测。"""
         if factor_name not in self._ic_history:
             self._ic_history[factor_name] = []
         self._ic_history[factor_name].append(float(ic_value))
@@ -109,89 +108,47 @@ class FactorDecayMonitor:
 
     def check_decay(self) -> List[DecayAlert]:
         """
-        检测各因子是否衰减。
+        检测各因子是否衰减（委托给 FactorEvaluator）。
 
-        Returns:
-            衰减告警列表
+        P1-3整改：实际计算全部交给 FactorEvaluator.detect_decay。
+        本方法仅负责历史告警记录与状态变更通知（兼容旧接口）。
         """
-        new_alerts: List[DecayAlert] = []
         config = self.config
+        decay_results = self._evaluator.detect_decay(
+            ic_history=self._ic_history,
+            trend_window=config.trend_window,
+            ic_healthy_threshold=config.ic_healthy_threshold,
+            ic_dead_threshold=config.ic_dead_threshold,
+            max_consecutive_decline=config.max_consecutive_decline,
+            decay_slope_threshold=config.decay_slope_threshold,
+        )
 
-        for name, ic_series in self._ic_history.items():
-            if len(ic_series) < config.trend_window:
-                continue
-
-            recent = ic_series[-config.trend_window:]
-            current_ic = recent[-1]
-            abs_ic = abs(current_ic)
-
-            # 1. 判断衰减状态
-            if abs_ic < config.ic_dead_threshold:
-                status = DecayStatus.DEAD
-            elif abs_ic < config.ic_healthy_threshold:
-                # 检查是否有下降趋势
-                if len(recent) >= 10:
-                    x = np.arange(len(recent))
-                    slope, _ = np.polyfit(x, recent, 1)
-                else:
-                    slope = 0.0
-
-                if slope < config.decay_slope_threshold:
-                    status = DecayStatus.DECAYING
-                else:
-                    status = DecayStatus.WARNING
-            else:
-                status = DecayStatus.HEALTHY
-
-            # 2. 检测连续下降
-            consecutive = self._count_consecutive_decline(recent)
-
-            if consecutive >= config.max_consecutive_decline:
-                if status == DecayStatus.HEALTHY:
-                    status = DecayStatus.WARNING
-
-            # 3. IC趋势斜率
-            if len(recent) >= 10:
-                x = np.arange(len(recent))
-                trend_slope, _ = np.polyfit(x, recent, 1)
-            else:
-                trend_slope = 0.0
-
+        new_alerts: List[DecayAlert] = []
+        for name, info in decay_results.items():
+            status = _STATUS_MAP[info["status"]]
             prev_status = self._current_status.get(name)
-
             if prev_status != status:
                 alert = DecayAlert(
                     factor_name=name,
                     status=status,
-                    current_ic=round(current_ic, 6),
-                    trend_slope=round(trend_slope, 6),
-                    consecutive_decline=consecutive,
+                    current_ic=info["current_ic"],
+                    trend_slope=info["trend_slope"],
+                    consecutive_decline=info["consecutive_decline"],
                     timestamp=self._date_history[-1] if self._date_history else "",
                 )
                 new_alerts.append(alert)
                 self._alerts.append(alert)
                 logger.warning(
                     "因子 %s 状态变更: %s -> %s (IC=%.4f, slope=%.6f)",
-                    name, prev_status.value if prev_status else "new",
-                    status.value, current_ic, trend_slope,
+                    name,
+                    prev_status.value if prev_status else "new",
+                    status.value,
+                    info["current_ic"],
+                    info["trend_slope"],
                 )
-
             self._current_status[name] = status
 
         return new_alerts
-
-    @staticmethod
-    def _count_consecutive_decline(series: List[float]) -> int:
-        """计算序列末尾连续下降次数。"""
-        if len(series) < 2:
-            return 0
-        count = 0
-        for i in range(len(series) - 1, 0, -1):
-            if series[i] < series[i - 1]:
-                count += 1
-            else:
-                break
-        return count
 
     def get_decay_summary(self) -> pd.DataFrame:
         """获取衰减监控摘要。"""
@@ -208,8 +165,8 @@ class FactorDecayMonitor:
             rows.append({
                 "因子": name,
                 "当前IC": round(ic_series[-1], 6),
-                "IC均值": round(np.mean(recent), 6),
-                "IC标准差": round(np.std(recent), 6),
+                "IC均值": round(float(np.mean(recent)), 6),
+                "IC标准差": round(float(np.std(recent)), 6),
                 "观测数": len(ic_series),
                 "状态": status.value,
             })

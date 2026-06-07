@@ -4,7 +4,8 @@ AlphaFutures24 因子IC/IR验证。
 对24个商品期货Alpha因子进行逐个IC/IR统计测试，
 筛选出符合规则9（IC>0.03且IR>0.5）的有效因子。
 
-委托 core/factors/AlphaFutures24 做因子计算。
+P0 整改：使用 core.factors.factor_evaluator.FactorEvaluator.evaluate_batch
+统一执行 IC/IR 计算，删除手写 corrcoef / 滚动 IC。
 """
 
 from pathlib import Path
@@ -16,17 +17,20 @@ from loguru import logger
 
 from core.config import BacktestConfig
 from core.factors import AlphaFutures24, AlphaFuturesConfig
-from core.strategy_registry import StrategyLibrary
+from core.factors.factor_evaluator import FactorEvaluator
+from core.config.strategy_profiles import StrategyLibrary
 from runner.common.utils import save_csv
 
 
 def factor_alpha24_screening(
-    data,
+    data_source,
     config: BacktestConfig,
-    lib: Optional[StrategyLibrary] = None,
-    output_dir: Optional[Path] = None,
+    lib: StrategyLibrary,
+    output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    cross_sectional: bool = False,
     do_winsorize: bool = True,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     对AlphaFutures24全部24个因子进行IC/IR统计测试。
@@ -34,7 +38,7 @@ def factor_alpha24_screening(
     规则9要求：IC > 0.03 且 IR > 0.5 的因子方可保留。
 
     Args:
-        data: 数据源（PyBrokerDataSource）
+        data_source: 数据源（PyBrokerDataSource）
         config: 回测配置
         lib: 策略库（本方法不使用，保留接口一致）
         output_dir: 输出目录
@@ -59,7 +63,7 @@ def factor_alpha24_screening(
 
     for symbol in symbols:
         try:
-            ohlcv = data.query(
+            ohlcv = data_source.query(
                 config.train_start, config.test_end, symbols=[symbol]
             )
             if ohlcv is None or len(ohlcv) < 100:
@@ -99,35 +103,30 @@ def factor_alpha24_screening(
                 close[fwd_period:] - close[:-fwd_period]
             ) / close[:-fwd_period]
 
-            # 逐个因子计算IC
-            for fname, fvalues in factors.items():
-                valid = ~(np.isnan(fvalues) | np.isnan(forward_ret))
-                if valid.sum() < 30:
-                    continue
-                fv = fvalues[valid]
-                fr = forward_ret[valid]
-                ic = np.corrcoef(fv, fr)[0, 1] if len(fv) > 2 else np.nan
+            # 委托 FactorEvaluator.evaluate_batch 批量计算 IC/IR/规则9 判定
+            dates_arr = (
+                pd.to_datetime(ohlcv["date"]).values
+                if "date" in ohlcv.columns else None
+            )
+            evaluator = FactorEvaluator(
+                forward_period=fwd_period,
+                ic_window=60,
+                min_observations=30,
+            )
+            eval_results = evaluator.evaluate_batch(
+                factor_scores_dict=factors,
+                forward_returns=forward_ret,
+                dates=dates_arr,
+            )
 
-                # 滚动IC（60天窗口）
-                rolling_ic = (
-                    pd.Series(fv, dtype=float)
-                    .rolling(60, min_periods=30)
-                    .corr(pd.Series(fr, dtype=float))
-                    .dropna()
-                    .values
-                )
-
-                mean_ic = np.nanmean(rolling_ic) if len(rolling_ic) > 10 else ic
-                std_ic = np.nanstd(rolling_ic) if len(rolling_ic) > 10 else np.nan
-                ir = mean_ic / std_ic if std_ic and std_ic > 0 else 0.0
-
+            for fname, er in eval_results.items():
                 all_rows.append({
                     "symbol": symbol,
                     "factor": fname,
-                    "mean_ic": round(float(mean_ic), 6),
-                    "std_ic": round(float(std_ic), 6) if not np.isnan(std_ic) else np.nan,
-                    "ir": round(float(ir), 4),
-                    "pass_rule9": abs(mean_ic) > 0.03 and abs(ir) > 0.5,
+                    "mean_ic": round(er.ic_mean, 6),
+                    "std_ic": round(er.ic_std, 6),
+                    "ir": round(er.ir, 4),
+                    "pass_rule9": er.is_valid,
                 })
 
         except Exception as e:

@@ -4,6 +4,13 @@
 基于 PyBroker 的回测能力实现参数网格搜索和滚动优化。
 使用自定义的网格搜索 + 滚动窗口优化策略。
 
+⚠️ 调用约定（规则17 - 不重复造轮子）：
+  ParameterOptimizer 属于底层基础设施，必须通过官方入口调用：
+    - 根目录脚本 run_optimize.py
+    - runner/optimization/ 下的优化子模块
+  禁止在业务代码、Streamlit 页面、tests 之外直接 new ParameterOptimizer()，
+  否则会绕过统一的配置加载、结果落盘、Pipeline 编排。
+
 优化流程：
 1. 定义参数搜索空间
 2. 对每组参数运行回测

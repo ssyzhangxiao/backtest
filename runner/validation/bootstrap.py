@@ -4,30 +4,35 @@ Bootstrap 置信区间验证模块。
 对回测收益序列进行 Bootstrap 重采样，
 估计 Sharpe 等指标的置信区间。
 委托 PyBrokerBacktestRunner.bootstrap_metrics 和
-utils/metrics.MetricsCalculator。
+utils/metrics.MetricsCalculator.bootstrap_confidence_interval，
+不重复实现 Bootstrap 重采样逻辑。
 """
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.config import BacktestConfig
 from core.engine.pybroker_data_source import PyBrokerDataSource
+from core.config.strategy_profiles import StrategyLibrary
 from runner.backtest.runner import get_pybroker_runner, safe_run_backtest
 from runner.common.utils import save_csv
-from runner.strategy.selector import get_strategy_names
 
 _DEFAULT_N_SAMPLES = 5000
 
 
 def run_bootstrap_validation(
     data_source: PyBrokerDataSource,
-    config: Dict[str, Any],
+    config: BacktestConfig,
+    lib: StrategyLibrary,
     output_dir: Path,
+    best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    cross_sectional: bool = False,
     n_samples: int = _DEFAULT_N_SAMPLES,
-) -> Tuple[List[float], pd.DataFrame]:
+    **kwargs,
+) -> Dict[str, Any]:
     """
     Bootstrap 置信区间验证。
 
@@ -36,27 +41,40 @@ def run_bootstrap_validation(
 
     Args:
         data_source: 数据源
-        config: 配置字典
+        config: 回测配置（BacktestConfig）
+        lib: 策略库
         output_dir: 输出目录
+        best_params: 优化后的最优参数
+        cross_sectional: 是否使用横截面打分模式
         n_samples: Bootstrap 采样次数
 
     Returns:
-        (sharpe_samples, 置信区间DataFrame)
+        {"sharpe_samples": ..., "confidence_intervals": ...} 字典
     """
     logger.info("Bootstrap 置信区间验证")
-    bt_cfg = config["backtest"]
-    strategy_names = get_strategy_names(config)
-    default_strategy = strategy_names[:1] if strategy_names else ["ts_momentum"]
+    strategy_names = config.strategy_names
+    default_strategy = strategy_names[:1] if strategy_names else ["trend"]
 
-    runner = get_pybroker_runner(data_source, config, strategies=default_strategy)
+    # 构建兼容的配置字典
+    config_dict = {
+        "backtest": {
+            "initial_cash": config.initial_cash,
+            "full_start_date": config.full_start,
+            "full_end_date": config.full_end,
+        },
+        "symbols": config.symbols,
+        "strategies": [{"name": s} for s in default_strategy],
+    }
+
+    runner = get_pybroker_runner(data_source, config_dict, strategies=default_strategy)
     result = safe_run_backtest(
-        runner, bt_cfg["full_start_date"], bt_cfg["full_end_date"],
+        runner, config.full_start, config.full_end,
         "Bootstrap_base",
     )
 
     if result is None or result.equity_curve is None or result.equity_curve.empty:
         logger.warning("Bootstrap: 无净值数据，跳过")
-        return [], pd.DataFrame()
+        return {"sharpe_samples": [], "confidence_intervals": pd.DataFrame()}
 
     # 优先使用系统 Bootstrap
     bootstrap_result = _try_system_bootstrap(runner, n_samples)
@@ -66,9 +84,10 @@ def run_bootstrap_validation(
         bootstrap_result = _try_metrics_calculator_bootstrap(result, n_samples)
 
     if bootstrap_result is None:
-        return [], pd.DataFrame()
+        return {"sharpe_samples": [], "confidence_intervals": pd.DataFrame()}
 
-    return _process_bootstrap_result(bootstrap_result, output_dir)
+    sharpe_samples, df_ci = _process_bootstrap_result(bootstrap_result, output_dir)
+    return {"sharpe_samples": sharpe_samples, "confidence_intervals": df_ci}
 
 
 def _try_system_bootstrap(
@@ -162,51 +181,3 @@ def _process_bootstrap_result(
             return sharpe_samples, df_samples
 
     return [], pd.DataFrame()
-
-
-def compute_bootstrap_ci(
-    values: np.ndarray,
-    n_samples: int = _DEFAULT_N_SAMPLES,
-    seed: int = 42,
-    ci_levels: Optional[List[float]] = None,
-) -> Dict[str, Dict[str, float]]:
-    """
-    计算通用 Bootstrap 置信区间。
-
-    对任意数值序列进行 Bootstrap 重采样，
-    输出均值和指定置信水平的区间。
-
-    Args:
-        values: 待采样的数值序列
-        n_samples: 采样次数
-        seed: 随机种子
-        ci_levels: 置信水平列表，默认 [0.05, 0.95]
-
-    Returns:
-        {"mean": {"value": ..., "ci_lower": ..., "ci_upper": ...}} 字典
-    """
-    if ci_levels is None:
-        ci_levels = [0.05, 0.95]
-
-    rng = np.random.default_rng(seed)
-    n = len(values)
-    boot_means = np.zeros(n_samples)
-
-    for i in range(n_samples):
-        sample = rng.choice(values, size=n, replace=True)
-        boot_means[i] = np.mean(sample)
-
-    result = {
-        "mean": {
-            "value": float(np.mean(boot_means)),
-            "ci_lower": float(np.percentile(boot_means, ci_levels[0] * 100)),
-            "ci_upper": float(np.percentile(boot_means, ci_levels[1] * 100)),
-        }
-    }
-
-    logger.info(
-        f"  Bootstrap CI: mean={result['mean']['value']:.4f}, "
-        f"[{result['mean']['ci_lower']:.4f}, {result['mean']['ci_upper']:.4f}]"
-    )
-
-    return result

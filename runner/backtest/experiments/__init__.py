@@ -62,6 +62,8 @@ def run_experiment(
     config,
     data_source,
     raw_config: Optional[Dict[str, Any]] = None,
+    cross_sectional: bool = False,
+    strategy: Optional[str] = None,
 ) -> Any:
     """
     执行指定实验。
@@ -71,6 +73,8 @@ def run_experiment(
         config: BacktestConfig 实例
         data_source: PyBrokerDataSource 实例
         raw_config: 原始配置字典（部分实验需要）
+        cross_sectional: 是否启用多策略横截面打分模式
+        strategy: 指定策略名称，None 表示自动选择
 
     Returns:
         实验结果
@@ -80,6 +84,9 @@ def run_experiment(
 
     if raw_config is None:
         raw_config = {}
+    # 将模式参数注入 raw_config，供实验函数使用
+    raw_config["_cross_sectional"] = cross_sectional
+    raw_config["_strategy"] = strategy
 
     output_dir = Path(raw_config.get("output", {}).get("output_dir", "results"))
     output_dir.mkdir(exist_ok=True)

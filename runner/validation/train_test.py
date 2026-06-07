@@ -14,17 +14,19 @@ from loguru import logger
 from core.config import BacktestConfig
 from core.engine.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from core.strategy_registry import StrategyLibrary
+from core.config.strategy_profiles import StrategyLibrary
 from runner.backtest.experiments import run_e6_walkforward, run_e7_out_of_sample
 from runner.common.utils import safe_float, save_csv
 
 
 def task2_train_test_split(
-    ds: PyBrokerDataSource,
+    data_source: PyBrokerDataSource,
     config: BacktestConfig,
     lib: StrategyLibrary,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    cross_sectional: bool = False,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     训练/验证期划分验证（P1-B）。
@@ -35,7 +37,7 @@ def task2_train_test_split(
     同时补充环境分布统计和按年切片验证。
 
     Args:
-        ds: 数据源
+        data_source: 数据源
         config: 回测配置（BacktestConfig）
         lib: 策略库
         output_dir: 输出目录
@@ -63,15 +65,15 @@ def task2_train_test_split(
 
     # WalkForward 滚动验证
     logger.info("\n  WalkForward 滚动验证:")
-    wf_df = run_e6_walkforward(ds, val_config, output_dir)
+    wf_df = run_e6_walkforward(data_source, val_config, output_dir)
 
     # 样本外验证
     logger.info("\n  样本外验证:")
-    oos_df = run_e7_out_of_sample(ds, val_config, output_dir)
+    oos_df = run_e7_out_of_sample(data_source, val_config, output_dir)
 
     # 环境分布统计
     logger.info("\n  环境分布统计:")
-    env_stats = _compute_environment_stats(ds, config)
+    env_stats = _compute_environment_stats(data_source, config)
     if not env_stats.empty:
         env_stats.to_csv(output_dir / "task2_env_stats.csv", index=False)
         logger.info(f"\n{env_stats.to_string(index=False)}")
@@ -79,18 +81,18 @@ def task2_train_test_split(
     # 训练期回测（固定参数 vs 环境感知参数）
     logger.info("\n  训练期回测（固定参数 vs 环境感知参数）:")
     train_fixed = _run_period_backtest(
-        strategy_names, ds, config, train_start, train_end, "fixed",
+        strategy_names, data_source, config, train_start, train_end, "fixed",
         best_params=best_params,
     )
     train_regime = _run_period_backtest(
-        strategy_names, ds, config, train_start, train_end, "regime",
+        strategy_names, data_source, config, train_start, train_end, "regime",
         best_params=best_params,
     )
 
     # 验证期按年切片
     logger.info("\n  验证期按年切片:")
     yearly_results = _run_yearly_validation(
-        strategy_names, ds, config, train_end, test_end, best_params,
+        strategy_names, data_source, config, train_end, test_end, best_params,
     )
     df_yearly = pd.DataFrame(yearly_results)
     df_yearly.to_csv(output_dir / "task2_yearly_validation.csv", index=False)
@@ -167,51 +169,11 @@ def _compute_environment_stats(
     """
     计算各品种的环境分布统计（5类环境）。
 
-    委托 scripts/analysis_runner.V3RegimeAwareRunner。
-
-    Args:
-        ds: 数据源
-        config: 回测配置
-
-    Returns:
-        环境分布统计 DataFrame
+    环境感知参数管理系统已废弃，因子打分调仓模式不再需要环境分布统计。
+    保留空函数以维持接口兼容性。
     """
-    try:
-        from scripts.analysis_runner import V3RegimeAwareRunner
-    except ImportError:
-        logger.warning("V3RegimeAwareRunner 不可用，跳过环境分布统计")
-        return pd.DataFrame()
-
-    regime_runner = V3RegimeAwareRunner()
-    all_stats = []
-
-    for sym in config.symbols:
-        try:
-            df = ds.to_pybroker_df()
-            if df is None or df.empty:
-                continue
-            sym_df = df[df["symbol"] == sym] if "symbol" in df.columns else df
-            if sym_df.empty or "close" not in sym_df.columns:
-                continue
-            if "high" not in sym_df.columns or "low" not in sym_df.columns:
-                logger.warning(f"  缺少 high/low 列 ({sym})，跳过环境检测")
-                continue
-
-            df_with_regime = regime_runner.detect_regime_series(sym_df)
-            dist = regime_runner.get_regime_distribution(df_with_regime)
-
-            row = {"symbol": sym}
-            all_regimes = [
-                "trend_up", "trend_down", "range_bound",
-                "high_volatility", "low_volatility",
-            ]
-            for regime in all_regimes:
-                row[regime] = round(dist.get(regime, 0.0), 4)
-            all_stats.append(row)
-        except Exception as e:
-            logger.warning(f"  环境统计计算失败 ({sym}): {e}")
-
-    return pd.DataFrame(all_stats)
+    logger.info("环境分布统计已废弃（因子打分模式），跳过")
+    return pd.DataFrame()
 
 
 def _run_period_backtest(
@@ -227,7 +189,7 @@ def _run_period_backtest(
     执行某时段的回测，返回各策略KPI。
 
     mode="fixed": 固定参数（或优化参数）回测
-    mode="regime": 环境感知回测，委托 V3RegimeAwareRunner
+    mode="regime": 环境感知回测（已废弃）
 
     Args:
         strategy_names: 策略名称列表
@@ -278,56 +240,13 @@ def _run_regime_backtest(
     end: str,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    环境感知回测，委托 V3RegimeAwareRunner。
+    环境感知回测（已废弃）。
 
-    Args:
-        strategy_names: 策略名称列表
-        ds: 数据源
-        config: 回测配置（BacktestConfig）
-        start: 开始日期
-        end: 结束日期
-
-    Returns:
-        回测结果字典
+    环境感知参数管理系统和 V3RegimeAwareRunner 已废弃，
+    系统已切换为因子打分调仓模式。保留空函数以维持接口兼容性。
     """
-    results = {}
-    try:
-        from core.param_manager import V3RegimeParamManager
-        from scripts.analysis_runner import V3RegimeAwareRunner
-
-        param_manager = V3RegimeParamManager()
-        regime_runner = V3RegimeAwareRunner(param_manager=param_manager)
-
-        df = ds.to_pybroker_df()
-        if df is None or df.empty:
-            logger.warning("  环境感知回测跳过：数据为空")
-            return results
-
-        bt_config = BacktestConfig(
-            initial_cash=config.initial_cash,
-            commission_rate=config.commission_rate,
-            slippage_rate=config.slippage_rate,
-        )
-        runner = PyBrokerBacktestRunner(ds, bt_config)
-        runner.register_strategies(strategy_names)
-
-        regime_result = regime_runner.run_with_regime_switch(
-            runner, df, strategy_names, start, end,
-        )
-        regime_metrics = regime_result.get("metrics", {})
-        if regime_metrics:
-            results["regime_combo"] = dict(regime_metrics)
-            logger.info(
-                f"  环境感知回测完成: {len(strategy_names)}策略, "
-                f"环境: {regime_result.get('regime', 'unknown')}"
-            )
-    except ImportError:
-        logger.warning("V3RegimeAwareRunner 不可用，跳过环境感知回测")
-    except Exception as e:
-        logger.warning(f"  环境感知回测失败 ({start}~{end}): {e}")
-        results["regime_combo"] = {}
-
-    return results
+    logger.info("环境感知回测已废弃（因子打分模式），跳过")
+    return {}
 
 
 def _run_yearly_validation(
@@ -390,23 +309,10 @@ def _run_yearly_validation(
 
 def _get_param_comparison_table(output_dir: Path) -> pd.DataFrame:
     """
-    获取参数对比表，委托 core/param_manager。
+    获取参数对比表（已废弃）。
 
-    Args:
-        output_dir: 输出目录
-
-    Returns:
-        参数对比表 DataFrame
+    环境感知参数管理系统已废弃，系统已切换为因子打分调仓模式。
+    保留空函数以维持接口兼容性。
     """
-    try:
-        from core.param_manager import V3RegimeParamManager
-        param_mgr = V3RegimeParamManager()
-        param_table = param_mgr.get_params_comparison_table()
-        param_table.to_csv(output_dir / "task2_param_comparison.csv", index=False)
-        return param_table
-    except ImportError:
-        logger.warning("V3RegimeParamManager 不可用，跳过参数对比表")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.warning(f"参数对比表生成失败: {e}")
-        return pd.DataFrame()
+    logger.info("参数对比表已废弃（因子打分模式），跳过")
+    return pd.DataFrame()

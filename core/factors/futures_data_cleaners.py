@@ -10,12 +10,18 @@
 确保输入数据无换月陷阱、无交割月干扰、无跳空污染。
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, TYPE_CHECKING, Union, Dict, Callable
 
 import numpy as np
 import pandas as pd
 
-from .futures_config import OIThresholdType
+if TYPE_CHECKING:
+    from .alpha_futures.config import OIThresholdType
+else:
+    OIThresholdType = Union[int, Dict[str, int], Callable[[str], int]]
+
 from .operators import delay, safe_div
 
 
@@ -35,6 +41,7 @@ def compute_open_adj(
 
     原始逻辑：OPEN_ADJ = OPEN*0.5 + DELAY(CLOSE,1)*0.5
     适用性改造：权重按品种历史跳空延续率自适应分配，非固定0.5。
+    若未提供 `gap_weight`，可调用 `compute_adaptive_gap_weight` 先算权重。
 
     Args:
         open_price: 开盘价序列（需向后复权或比例复权）
@@ -48,6 +55,57 @@ def compute_open_adj(
     prev_close = delay(close_price, 1)
     w = gap_weight if gap_weight is not None else default_weight
     return open_price * w + prev_close * (1 - w)
+
+
+def compute_adaptive_gap_weight(
+    open_price: np.ndarray,
+    close_price: np.ndarray,
+    window: int = 20,
+    default: float = 0.5,
+) -> np.ndarray:
+    """
+    基于历史跳空延续率的自适应跳空修复权重。
+
+    公式：w = P(日内收益方向 == 跳空方向)
+    即"跳空后日内价格继续同向运动"的滚动频率。品种若跳空后倾向
+    立即被回补（高反转），权重偏低（更信任 prev_close）；若跳空后
+    倾向延续（高动量），权重偏高（更信任 open）。
+
+    无前瞻性：使用与目标日同时刻及之前的数据，不引用未来值。
+
+    Args:
+        open_price: 开盘价序列（需复权后）
+        close_price: 收盘价序列（需复权后）
+        window: 滚动窗口（交易日），默认 20
+        default: 数据不足时的默认权重（默认 0.5）
+
+    Returns:
+        权重序列，范围裁剪到 [0.2, 0.8]
+    """
+    arr_open = np.asarray(open_price, dtype=float)
+    arr_close = np.asarray(close_price, dtype=float)
+    prev_close = delay(arr_close, 1)
+
+    gap = arr_open - prev_close
+    intraday = arr_close - arr_open
+    gap_dir = np.sign(gap)
+    intra_dir = np.sign(intraday)
+
+    # 仅在"跳空与日内振幅都显著"时定义方向一致性，避免微抖动噪声
+    valid = (
+        (np.abs(gap) > 1e-8)
+        & (np.abs(intraday) > 1e-8)
+        & ~np.isnan(gap)
+        & ~np.isnan(intraday)
+    )
+    consistent = np.where(valid, (intra_dir == gap_dir).astype(float), np.nan)
+
+    # 滚动平均一致性概率（min_periods=window//2 让早期也能有估计）
+    w = pd.Series(consistent).rolling(
+        window=window, min_periods=max(1, window // 2)
+    ).mean().fillna(default).values
+    w = np.clip(w, 0.2, 0.8)
+    return w.astype(float)
 
 
 def compute_intraday_ret(
@@ -160,6 +218,15 @@ def _orthogonalize_carry(
     取残差作为正交化后的Carry因子。这确保Carry的Alpha
     不是动量效应的"马甲"。
 
+    P2-1 整改（2026-06-07）：使用 pandas 滚动协方差/方差向量化，
+    避免 Python 循环中的重复 lstsq 调用。
+
+    推导：
+      beta = cov(x, y) / var(x)
+      intercept = mean(y) - beta * mean(x)
+      residual = y - (intercept + beta * x)
+                 = (y - mean(y)) - beta * (x - mean(x))
+
     Args:
         carry: 原始Carry因子序列
         close_price: 收盘价序列（用于计算动量）
@@ -172,38 +239,24 @@ def _orthogonalize_carry(
         close_price - delay(close_price, window),
         delay(close_price, window),
     )
-    # 滚动回归：carry = alpha + beta * momentum + epsilon
-    # 取残差 epsilon 作为正交化Carry
-    s_carry = pd.Series(carry)
-    s_mom = pd.Series(momentum)
 
-    def _rolling_resid(df: pd.DataFrame) -> float:
-        """滚动回归取残差"""
-        if len(df) < 3:
-            return np.nan
-        y = df.iloc[:, 0].values
-        x = df.iloc[:, 1].values
-        # 剔除NaN
-        valid = ~(np.isnan(y) | np.isnan(x))
-        if valid.sum() < 3:
-            return np.nan
-        y_v = y[valid]
-        x_v = x[valid]
-        # OLS: y = a + b*x
-        x_with_const = np.column_stack([np.ones(len(x_v)), x_v])
-        try:
-            beta = np.linalg.lstsq(x_with_const, y_v, rcond=None)[0]
-            resid = y_v[-1] - beta[0] - beta[1] * x_v[-1]
-            return resid
-        except np.linalg.LinAlgError:
-            return np.nan
+    carry_s = pd.Series(np.asarray(carry, dtype=float))
+    mom_s = pd.Series(np.asarray(momentum, dtype=float))
 
-    combined = pd.DataFrame({"carry": s_carry, "momentum": s_mom})
-    result = combined.rolling(window=window, min_periods=3).apply(
-        lambda df: _rolling_resid(df),
-        raw=False,
-    )
-    return result.iloc[:, 0].values
+    # 滚动统计：cov(x, y) / var(x)
+    rolling_window = carry_s.rolling(window=window, min_periods=3)
+    cov_xy = rolling_window.cov(mom_s)  # 滚动协方差（pandas 已向量化）
+    var_x = mom_s.rolling(window=window, min_periods=3).var()
+
+    beta = safe_div(cov_xy, var_x)
+
+    # 当前点的拟合值
+    mean_y = carry_s.rolling(window=window, min_periods=3).mean()
+    mean_x = mom_s.rolling(window=window, min_periods=3).mean()
+    fitted = mean_y + beta * (mom_s - mean_x)
+
+    residual = carry_s - fitted
+    return residual.to_numpy()
 
 
 # ──────────────────────────────────────────────

@@ -1,13 +1,13 @@
-# 量化回测系统 v3.0 — CTA + Alpha101 多因子策略
+# 量化回测系统 v3.2 — 5子策略体系 + 24因子库
 
 ## 概述
 
-基于 CTA 因子 + Alpha101 因子组合的多因子期货量化回测系统。
+基于 24 因子（5 大类）+ 5 子策略体系的多因子期货量化回测系统。
 
 核心特性：
-- **4因子策略**：时间序列动量、展期收益、Alpha#019、Alpha#032
-- **信号融合**：多策略加权信号合成，纯因子打分调仓
-- **环境模块降级**：市场环境检测保留为辅助分析工具，主流程不再依赖环境判断
+- **5子策略体系**：趋势、期限结构、均值回归、波动率突破、复合共振
+- **24因子库**：趋势 T_01~T_05、回归 R_01~R_05、波动率 V_01~V_04、资金流 M_01~M_05、高阶复合 H_01~H_05
+- **多策略集成**：支持4种信号合并方法（等权、波动率倒数、自适应、多数投票）
 - **完整回测链**：WalkForward、Bootstrap、蒙特卡洛、样本外验证
 
 ---
@@ -26,17 +26,12 @@ pip install -r requirements.txt
 
 ```yaml
 backtest:
-  initial_cash: 1000000
+  initial_capital: 1000000
   rebalance_freq: 3               # 每3个交易日调仓
   commission: 0.0003
   slippage: 0.0002
   stop_loss_pct: 0.05
-
-factor_weights:
-  ts_momentum: 0.25
-  roll_yield: 0.25
-  alpha019: 0.25
-  alpha032: 0.25
+  signal_merge_method: equal_weight  # 信号合并方法：equal_weight/volatility_inverse/adaptive/majority_vote
 
 symbols:
   - "SHFE.RB"   # 螺纹钢
@@ -48,17 +43,14 @@ symbols:
 ### 3. 运行回测
 
 ```bash
-# 完整回测（10个实验）
-python run_full_backtest.py
+# 完整回测
+python run_backtest.py
 
 # 参数优化
-python run_parameter_optimization.py
+python run_optimize.py
 
-# 验证（WalkForward + 样本外 + 蒙特卡洛）
-python run_validation.py
-
-# Streamlit 界面
-streamlit run app.py
+# 验证
+python run_validate.py
 ```
 
 ---
@@ -68,42 +60,40 @@ streamlit run app.py
 ```
 backtest/
 ├── config.yaml                  # 统一配置文件
-├── run_full_backtest.py         # 完整回测脚本（E1-E10实验）
-├── run_parameter_optimization.py # 参数优化脚本
-├── run_validation.py            # 验证脚本（WalkForward/样本外/蒙特卡洛）
-├── app.py                       # Streamlit Web 界面
+├── run_backtest.py              # 回测入口脚本
+├── run_optimize.py              # 参数优化脚本
+├── run_validate.py              # 验证脚本
 ├── core/
-│   ├── __init__.py              # 核心模块导出
-│   ├── config.py                # BacktestConfig 配置类
-│   ├── data_loader.py           # 数据加载与展期处理
-│   ├── environment.py           # 环境适配器
-│   ├── optimizer.py             # 参数优化器
-│   ├── portfolio.py             # 组合管理
-│   ├── report_builder.py        # 报告生成
-│   ├── risk_controller.py       # 风控逻辑（纯逻辑类）
-│   ├── risk_manager.py          # 风控兼容层（→ RiskManagerAdapter）
+│   ├── config/                  # 配置模块
+│   │   └── backtest_config.py   # BacktestConfig 配置类
 │   ├── strategy_registry.py     # 策略注册表 + 策略库
-│   ├── rollover.py              # 展期管理
-│   ├── market_regime/           # 市场环境检测（辅助分析工具）
 │   ├── strategies/              # 策略实现
 │   │   ├── base.py              # 策略基类
-│   │   ├── ts_momentum.py       # 时间序列动量策略
-│   │   ├── roll_yield.py        # 展期收益策略
-│   │   ├── alpha019.py          # Alpha#019 策略
-│   │   └── alpha032.py          # Alpha#032 策略
+│   │   ├── cross_sectional.py   # 横截面打分引擎
+│   │   └── sub_strategies/     # 5子策略目录
+│   │       ├── base.py         # 子策略基类
+│   │       ├── trend.py        # 趋势策略
+│   │       ├── term_structure.py  # 期限结构策略
+│   │       ├── mean_reversion.py  # 均值回归策略
+│   │       ├── vol_breakout.py    # 波动率突破策略
+│   │       └── composite.py     # 复合共振策略
 │   ├── engine/                  # 回测引擎
-│   │   ├── broker_adapter.py    # PyBroker 适配器（聚合导入层）
 │   │   ├── pybroker_data_source.py  # PyBroker 数据源
-│   │   ├── regime_indicator.py  # 环境指标
-│   │   ├── strategy_executor.py # 策略执行器 + 风控适配
+│   │   ├── strategy_executor.py # 策略执行器
 │   │   ├── backtest_runner.py   # PyBroker 回测运行器
-│   │   ├── runner.py            # 自研回测引擎
-│   │   └── switch_engine.py     # 因子打分调仓引擎
-│   └── performance/             # 绩效评估
-├── components/                  # Streamlit 组件
-├── pages/                       # Streamlit 页面
+│   │   ├── switch_engine.py     # 因子打分调仓引擎
+│   │   ├── top_level_integrator.py  # 顶层策略集成器
+│   │   └── sub_strategy_adapter.py  # 子策略适配器
+│   └── factors/                 # 因子模块
+│       ├── alpha_futures/      # 24因子库
+│       └── alpha_futures_24.py
+├── runner/                      # 编排层
+│   ├── pipeline.py             # Pipeline 编排器
+│   ├── data/
+│   ├── optimization/
+│   ├── validation/
+│   └── report/
 ├── utils/                       # 工具函数
-├── examples/                    # 示例脚本
 └── data/                        # 数据目录
 ```
 
@@ -111,23 +101,22 @@ backtest/
 
 ## 策略说明
 
-### CTA 侧（50%权重）
+### 5子策略体系
 
-| 策略 | 因子 | 信号逻辑 | 默认参数 |
-|------|------|---------|---------|
-| ts_momentum | 时间序列动量 | N日累计收益率>0做多，<0做空 | window=20 |
-| roll_yield | 展期收益 | 价差偏离均线超阈值反向开仓 | lookback=20, entry=2.0% |
+| 子策略名称 | 使用的因子 | 逻辑核心 | 信号方向 |
+|------------|------------|----------|-----------|
+| 趋势策略 | T_01, T_02, T_03, T_05, V_02, M_03 | 趋势确认 + 资金流向确认 | 顺势交易 |
+| 期限结构策略 | T_04, R_04, M_04, H_05 | Carry + 增仓/资金流共振 | Back做多，Contango做空 |
+| 均值回归策略 | R_01, R_02, R_03, R_05, H_03 | 增仓背离、持仓萎缩反转 | 逆势交易 |
+| 波动率突破策略 | V_01, V_03, V_04, H_04 | 持仓异动 + 价格加速度 | 突破跟进 |
+| 复合共振策略 | H_01, H_02, M_01, M_02, M_05 | 多维度高阶统计共振 | 综合打分 |
 
-### Alpha101 侧（50%权重）
+### 信号合并方法
 
-| 策略 | 因子 | 信号逻辑 | 默认参数 |
-|------|------|---------|---------|
-| alpha019 | Alpha#019 | 短期价格变化符号×长期累计收益排名 | short=7, long=250 |
-| alpha032 | Alpha#032 | 均线偏离+VWAP相关性 | ma=7, corr=230 |
-
-### 权重分配
-
-平衡型：CTA侧 50%（各25%）+ Alpha101侧 50%（各25%），固定权重。
+- **等权叠加**（默认）：`final_signal = (signal1 + ... + signal5) / 5`
+- **波动率倒数加权**：降低高波动子策略权重
+- **基于收益率的自适应权重**：使用滚动优化最大化综合 Sharpe 比
+- **多数投票**：取多数方向作为最终方向
 
 ---
 
@@ -149,15 +138,17 @@ backtest/
 ```
 数据加载（TqSdk优先 → CSV兜底）
     ↓
-策略实例化（4因子策略注册指标）
+因子计算（24因子库）
     ↓
-信号融合（加权合成 → 纯因子打分调仓）
+子策略信号生成（5子策略）
     ↓
-风控过滤（止损/手续费/涨跌停/持仓限制）
+多策略集成（信号合并）
     ↓
-绩效评估（Sharpe/最大回撤/胜率/盈亏比）
+风控过滤
     ↓
-稳健性验证（WalkForward/Bootstrap/蒙特卡洛）
+绩效评估
+    ↓
+稳健性验证
 ```
 
 ---
@@ -182,6 +173,17 @@ backtest/
 |----|------|
 | 配置清理 | 删除 fusion_mode、regime_filter_enabled、strategy_switching 等废弃字段 |
 | 策略注册合并 | 删除 core/strategies/registry.py 和 core/strategy_library/，合并为 core/strategy_registry.py |
+| 策略档案迁移 | 删除 core/strategy_registry.py，迁移至 core/config/strategy_profiles.py（更准确反映"元数据"本质） |
 | 风控统一 | 删除 RiskManager，保留 RiskController（纯逻辑）+ RiskManagerAdapter（PyBroker适配） |
 | 引擎拆分 | broker_adapter.py 拆分为 pybroker_data_source/regime_indicator/strategy_executor/backtest_runner |
 | 测试更新 | 删除过时测试（rebalance_frequency），更新配置测试 |
+
+### v3.2 (2026-06-06)
+
+| 项 | 说明 |
+|----|------|
+| 子策略体系 | 5子策略体系（趋势/期限结构/均值回归/波动率突破/复合共振） |
+| 顶层集成器 | `core/engine/top_level_integrator.py`，支持4种信号合并方法 |
+| 子策略适配器 | `core/engine/sub_strategy_adapter.py`，连接因子库和子策略 |
+| 旧体系移除 | 移除旧4因子体系（ts_momentum/roll_yield/alpha019/alpha032） |
+| 配置升级 | 新增 `signal_merge_method` 配置项，移除旧灰度开关 |

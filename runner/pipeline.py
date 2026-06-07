@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.strategy_registry import StrategyLibrary
+from core.config.strategy_profiles import StrategyLibrary
 from runner.common.errors import PipelineError, ConfigError
 
 
@@ -57,6 +57,27 @@ class Pipeline:
         """获取已执行的结果。"""
         return self._results
 
+    def reload_config(self) -> "Pipeline":
+        """
+        从磁盘重新加载配置文件（热重载）。
+
+        注意：已加载的数据和结果不会被重置，只有配置会更新。
+
+        Returns:
+            self（支持链式调用）
+        """
+        logger.info(f"重新加载配置: {self._config_path}")
+        self._config = BacktestConfig.from_yaml(self._config_path)
+        # 同时重新加载原始配置
+        if self._data is not None:
+            from runner.data.loader import DataLoader
+            loader = DataLoader(self._config_path)
+            self._raw_config = loader.raw_config
+        logger.info("配置热重载完成")
+        return self
+
+
+
     def load_data(self) -> "Pipeline":
         """
         加载数据（委托 runner/data/loader）。
@@ -74,12 +95,19 @@ class Pipeline:
         logger.info("数据加载完成")
         return self
 
-    def run_backtest(self, experiment: str = "all") -> "Pipeline":
+    def run_backtest(
+        self,
+        experiment: str = "all",
+        cross_sectional: bool = True,
+        strategy: Optional[str] = None,
+    ) -> "Pipeline":
         """
         执行指定实验（委托 runner/backtest/experiments/）。
 
         Args:
             experiment: 实验名称（"e1"~"e11" 或 "all"）
+            cross_sectional: 是否启用多策略横截面打分模式
+            strategy: 指定策略名称，None 表示自动选择
 
         Returns:
             self（支持链式调用）
@@ -93,6 +121,8 @@ class Pipeline:
             self._config,
             self._data,
             self._raw_config,
+            cross_sectional=cross_sectional,
+            strategy=strategy,
         )
         return self
 
@@ -101,6 +131,7 @@ class Pipeline:
         strategy: Optional[str] = None,
         tasks: Optional[List[str]] = None,
         symbol: Optional[str] = None,
+        save_to_config: bool = True,
     ) -> "Pipeline":
         """
         参数优化（委托 runner/optimization/）。
@@ -111,6 +142,7 @@ class Pipeline:
             strategy: 指定策略名称，None 表示全部策略
             tasks: 优化任务列表，默认 ["grid", "window", "oos"]
             symbol: 指定品种代码，None 表示全部品种
+            save_to_config: 是否自动保存优化后的参数到 config.yaml
 
         Returns:
             self（支持链式调用）
@@ -134,12 +166,22 @@ class Pipeline:
             self._config,
         )
         self._results["optimization"] = opt_results
+
+        # 自动保存优化后的参数到 config.yaml
+        if save_to_config and "best_params" in opt_results:
+            best_params = opt_results["best_params"]
+            if best_params:
+                logger.info("自动保存优化后的参数到 config.yaml")
+                self._config.update_strategy_params(best_params, self._config_path)
+                logger.info("参数保存成功！")
+
         return self
 
     def validate(
         self,
         method: str = "train_test",
         best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+        cross_sectional: bool = False,
     ) -> "Pipeline":
         """
         验证（委托 runner/validation/ + core/validation/）。
@@ -150,8 +192,12 @@ class Pipeline:
                 - "monte_carlo": 蒙特卡洛鲁棒性测试
                 - "bootstrap": Bootstrap置信区间
                 - "factor_ic": 因子IC稳定性分析
+                - "factor_alpha24": AlphaFutures24因子IC/IR验证
+                - "factor_review": 因子6项复核
+                - "cross_sectional": 多策略横截面打分验证
                 - "all": 执行全部验证方法
             best_params: 优化后的最优参数
+            cross_sectional: 是否启用多策略横截面打分模式
 
         Returns:
             self（支持链式调用）
@@ -169,6 +215,7 @@ class Pipeline:
                 self._config,
                 output_dir,
                 best_params,
+                cross_sectional=cross_sectional,
             )
         else:
             from runner.validation import get_validator
@@ -180,6 +227,7 @@ class Pipeline:
                 self._lib,
                 output_dir,
                 best_params=best_params,
+                cross_sectional=cross_sectional,
             )
 
         return self
@@ -207,10 +255,11 @@ class Pipeline:
         do_winsorize: bool = True,
     ) -> "Pipeline":
         """
-        因子筛选：对AlphaFutures24全部24因子做IC/IR统计测试。
+        因子筛选：对AlphaFutures全部30因子做IC/IR统计测试。
 
-        委托 core/factors/AlphaFutures24 做因子计算和IC分析，
-        筛选出通过规则9（IC>0.03且IR>0.5）的有效因子。
+        委托 runner.validation.factor_alpha24_screening（其内部已用
+        FactorEvaluator.evaluate_batch 批量评估），筛选出通过规则9
+        （|IC|>0.03且|IR|>0.5）的有效因子。
 
         Args:
             symbols: 测试品种列表，默认使用配置中的品种
@@ -226,27 +275,71 @@ class Pipeline:
             symbols = self._config.symbols
 
         logger.info("=" * 60)
-        logger.info("因子筛选: AlphaFutures24 24因子IC/IR测试")
+        logger.info("因子筛选: AlphaFutures 30因子IC/IR测试")
         logger.info(f"  品种: {symbols}")
         logger.info("=" * 60)
 
-        results = _run_factor_screening(
-            self._data,
-            symbols,
-            self._config,
+        from runner.validation.factor_alpha24 import factor_alpha24_screening
+
+        results = factor_alpha24_screening(
+            data_source=self._data,
+            config=self._config,
+            lib=self._lib,
+            output_dir=Path(self._config.output_dir),
             do_winsorize=do_winsorize,
         )
         self._results["factor_screening"] = results
         return self
 
-    def with_config(self, **overrides) -> "Pipeline":
+    def review_factors(
+        self,
+        symbols: Optional[List[str]] = None,
+    ) -> "Pipeline":
+        """
+        因子复核：对全部因子执行6项质量检查。
+
+        委托 runner.validation.factor_review.factor_review_validation，
+        执行数据存活率、缺失值占比、异常值抵抗、参数敏感性、
+        因子正交性、时序稳定性共6项复核。
+
+        Args:
+            symbols: 复核品种列表，默认使用配置中的品种
+
+        Returns:
+            self（支持链式调用）
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+
+        if symbols is None:
+            symbols = self._config.symbols
+
+        logger.info("=" * 60)
+        logger.info("因子复核: 6项质量检查")
+        logger.info(f"  品种: {symbols}")
+        logger.info("=" * 60)
+
+        from runner.validation.factor_review import factor_review_validation
+
+        results = factor_review_validation(
+            data_source=self._data,
+            config=self._config,
+            lib=self._lib,
+            output_dir=Path(self._config.output_dir),
+        )
+        self._results["factor_review"] = results
+        return self
+
+    def with_config(self, **overrides: Any) -> "Pipeline":
         """
         配置热更新，返回新实例。
 
-        不修改当前实例，确保线程安全。
+        不修改当前实例，确保线程安全。**overrides 必须是 BacktestConfig
+        合法字段**（如 initial_cash、symbols、train_start 等），任意键会
+        在 dataclasses.replace 时抛 TypeError，便于及时发现拼写错误。
 
         Args:
-            **overrides: 配置覆盖项
+            **overrides: BacktestConfig 字段覆盖项
 
         Returns:
             新的 Pipeline 实例
@@ -266,6 +359,77 @@ class Pipeline:
     def is_healthy(self) -> bool:
         """状态检查：数据已加载且无异常。"""
         return self._data is not None
+
+    def verify_chain(self) -> Dict[str, bool]:
+        """
+        P0-任务5整改：验证完整调用链是否正确连接。
+
+        调用链（自下而上）:
+          因子层 FactorEngine
+            → 评估层 FactorEvaluator
+            → 子策略合成层 SubStrategyAdapter / PortfolioManager
+            → 横截面打分层 FactorScoringEngine
+            → 执行层 PyBrokerExecutorBuilder（蓝图模式）
+            → 风控层 RiskController
+
+        Returns:
+            {组件名: 是否就位}
+        """
+        chain_status: Dict[str, bool] = {
+            "config_loaded": self._config is not None,
+            "data_loaded": self._data is not None,
+            "strategy_library": self._lib is not None,
+        }
+
+        # 验证 BacktestConfig 关键字段
+        if self._config is not None:
+            chain_status["backtest_config_has_symbols"] = bool(self._config.symbols)
+            chain_status["backtest_config_has_factor_weights"] = bool(self._config.factor_weights)
+
+        # 验证核心模块可导入且存在
+        try:
+            from core.engine.switch_engine import FactorScoringEngine
+            chain_status["factor_scoring_engine"] = FactorScoringEngine is not None
+        except ImportError:
+            chain_status["factor_scoring_engine"] = False
+
+        try:
+            from core.portfolio import PortfolioManager
+            chain_status["portfolio_manager"] = PortfolioManager is not None
+        except ImportError:
+            chain_status["portfolio_manager"] = False
+
+        try:
+            from core.engine.pybroker_data_source import create_hybrid_data_source
+            chain_status["hybrid_data_source"] = create_hybrid_data_source is not None
+        except ImportError:
+            chain_status["hybrid_data_source"] = False
+
+        try:
+            from core.engine.backtest_runner import PyBrokerBacktestRunner
+            chain_status["pybroker_runner"] = PyBrokerBacktestRunner is not None
+        except ImportError:
+            chain_status["pybroker_runner"] = False
+
+        # 验证数据加载策略：TqSdk 优先，CSV 仅用于 spread
+        try:
+            import inspect
+            from core.engine.pybroker_data_source import create_hybrid_data_source
+            source = inspect.getsource(create_hybrid_data_source)
+            chain_status["tqsdk_primary"] = "TqSdk" in source and "禁止静默回退" in source
+            chain_status["csv_only_for_spread"] = "spread" in source
+        except Exception:
+            chain_status["tqsdk_primary"] = False
+            chain_status["csv_only_for_spread"] = False
+
+        healthy = all(chain_status.values())
+        if not healthy:
+            failed = [k for k, v in chain_status.items() if not v]
+            logger.warning("调用链存在未就位组件: %s", failed)
+        else:
+            logger.info("完整调用链验证通过: %s", list(chain_status.keys()))
+
+        return chain_status
 
 
 def _run_optimization(
@@ -379,9 +543,10 @@ def _run_all_validations(
     config: BacktestConfig,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]],
+    cross_sectional: bool = False,
 ) -> Dict[str, Any]:
     """
-    执行全部验证方法。
+    执行全部验证方法（委托 runner.validation._VALIDATOR_MAP）。
 
     Args:
         data: 数据源
@@ -389,182 +554,21 @@ def _run_all_validations(
         config: 回测配置
         output_dir: 输出目录
         best_params: 优化参数
+        cross_sectional: 是否启用多策略横截面打分模式
 
     Returns:
         全部验证结果
     """
-    from runner.validation.train_test import task2_train_test_split
-    from runner.validation.monte_carlo import task3_monte_carlo
-    from runner.validation.factor_stability import factor_ic_stability_analysis
+    from runner.validation import _VALIDATOR_MAP
 
-    results = {}
-
-    logger.info("=" * 60)
-    logger.info("验证: 训练/测试分割")
-    results["train_test"] = task2_train_test_split(
-        data,
-        config,
-        lib,
-        output_dir,
-        best_params=best_params,
-    )
-
-    logger.info("=" * 60)
-    logger.info("验证: 蒙特卡洛")
-    results["monte_carlo"] = task3_monte_carlo(
-        data,
-        config,
-        lib,
-        output_dir,
-        best_params=best_params,
-    )
-
-    logger.info("=" * 60)
-    logger.info("验证: 因子IC稳定性")
-    results["factor_ic"] = factor_ic_stability_analysis(
-        data,
-        config,
-        output_dir,
-    )
-
+    common_kwargs = {
+        "best_params": best_params,
+        "cross_sectional": cross_sectional,
+    }
+    results: Dict[str, Any] = {}
+    for name, fn in _VALIDATOR_MAP.items():
+        logger.info("=" * 60)
+        logger.info(f"验证: {name}")
+        results[name] = fn(data, config, lib, output_dir, **common_kwargs)
     return results
 
-
-def _run_factor_screening(
-    data,
-    symbols: List[str],
-    config: BacktestConfig,
-    do_winsorize: bool = True,
-) -> Dict[str, Any]:
-    """
-    运行AlphaFutures24因子筛选（IC/IR测试）。
-
-    委托 core/factors/AlphaFutures24 做因子计算，
-    对每个因子计算IC、IR、Sharpe、胜率等指标。
-
-    Args:
-        data: 数据源
-        symbols: 测试品种列表
-        config: 回测配置
-        do_winsorize: 是否做缩尾后处理
-
-    Returns:
-        {
-            results_df: 因子测试结果DataFrame,
-            pass_count: 通过规则9的因子数,
-            best_factors: Top N因子列表,
-        }
-    """
-    import numpy as np
-    import pandas as pd
-    from core.factors import AlphaFutures24, AlphaFuturesConfig
-
-    calc = AlphaFutures24(AlphaFuturesConfig())
-    all_rows = []
-
-    for symbol in symbols:
-        try:
-            ohlcv = data.query(config.train_start, config.test_end, symbols=[symbol])
-            if ohlcv is None or len(ohlcv) < 100:
-                continue
-
-            ohlcv = ohlcv.sort_values("date").reset_index(drop=True)
-            close = ohlcv["close"].values.astype(float)
-            high = ohlcv["high"].values.astype(float)
-            low = ohlcv["low"].values.astype(float)
-            open_price = ohlcv["open"].values.astype(float)
-            oi = (
-                ohlcv["open_interest"].values.astype(float)
-                if "open_interest" in ohlcv.columns
-                else None
-            )
-            if oi is None:
-                continue
-
-            # 计算24个因子
-            factors = calc.compute_all(
-                close=close,
-                open_price=open_price,
-                high=high,
-                low=low,
-                open_interest=oi,
-            )
-
-            if do_winsorize:
-                factors = calc.post_process(factors, do_winsorize=True)
-
-            # 前瞻收益（5日）
-            forward_ret = np.full_like(close, np.nan, dtype=float)
-            fwd_period = 5
-            forward_ret[:-fwd_period] = (
-                close[fwd_period:] - close[:-fwd_period]
-            ) / close[:-fwd_period]
-
-            # 逐个因子计算IC
-            for fname, fvalues in factors.items():
-                valid = ~(np.isnan(fvalues) | np.isnan(forward_ret))
-                if valid.sum() < 30:
-                    continue
-                fv = fvalues[valid]
-                fr = forward_ret[valid]
-                ic = np.corrcoef(fv, fr)[0, 1] if len(fv) > 2 else np.nan
-
-                # 滚动IC
-                rolling_ic = (
-                    pd.Series(fv, dtype=float)
-                    .rolling(60, min_periods=30)
-                    .corr(pd.Series(fr, dtype=float))
-                    .dropna()
-                    .values
-                )
-
-                mean_ic = np.nanmean(rolling_ic) if len(rolling_ic) > 10 else ic
-                std_ic = np.nanstd(rolling_ic) if len(rolling_ic) > 10 else np.nan
-                ir = mean_ic / std_ic if std_ic and std_ic > 0 else 0.0
-
-                all_rows.append(
-                    {
-                        "symbol": symbol,
-                        "factor": fname,
-                        "mean_ic": round(float(mean_ic), 6),
-                        "ir": round(float(ir), 4),
-                        "pass": abs(mean_ic) > 0.03 and abs(ir) > 0.5,
-                    }
-                )
-
-        except Exception as e:
-            logger.warning(f"因子筛选 {symbol} 失败: {e}")
-
-    if not all_rows:
-        return {"results_df": pd.DataFrame(), "pass_count": 0, "best_factors": []}
-
-    df = pd.DataFrame(all_rows)
-    # 因子汇总：多品种平均IC
-    summary = (
-        df.groupby("factor")
-        .agg(
-            {
-                "mean_ic": "mean",
-                "ir": "mean",
-                "pass": "mean",
-            }
-        )
-        .reset_index()
-    )
-    summary["abs_ic"] = summary["mean_ic"].abs()
-    summary = summary.sort_values("abs_ic", ascending=False)
-
-    # 通过规则9的因子
-    pass_count = int((summary["pass"] > 0.5).sum())
-    best_factors = summary[summary["pass"] > 0.5]["factor"].tolist()
-
-    logger.info(f"因子筛选完成: {pass_count}/{len(summary)} 通过规则9")
-    if best_factors:
-        logger.info(f"  有效因子: {best_factors}")
-
-    return {
-        "results_df": df,
-        "summary_df": summary,
-        "pass_count": pass_count,
-        "best_factors": best_factors,
-    }

@@ -44,6 +44,59 @@ _SAFE_DECAY_THRESHOLD = 0.3
 
 
 # ============================================
+# E9：蒙特卡洛核心算法（纯函数，可测）
+# ============================================
+
+
+def _compute_monte_carlo_stats(
+    returns: np.ndarray,
+    n_simulations: int,
+    random_seed: int,
+    bankruptcy_threshold: float,
+) -> Dict[str, Any]:
+    """
+    蒙特卡洛模拟核心算法（E9 抽出，P2 整改可测）。
+
+    对历史日收益率做有放回重采样，生成 n_simulations 条模拟路径，
+    计算终值、最大回撤、破产概率等统计量。
+
+    Args:
+        returns: 日收益率序列
+        n_simulations: 模拟次数
+        random_seed: 随机种子
+        bankruptcy_threshold: 破产判定阈值（终值 < 阈值视为破产）
+
+    Returns:
+        {
+            "final_values": (n_simulations,) 终值数组,
+            "max_drawdowns": (n_simulations,) 最大回撤数组,
+            "bankruptcy_prob": float 破产概率,
+        }
+    """
+    n_days = len(returns)
+    rng = np.random.default_rng(random_seed)
+
+    sim_equities = np.zeros((n_simulations, n_days + 1))
+    sim_equities[:, 0] = 1.0
+    for i in range(n_simulations):
+        sampled = rng.choice(returns, size=n_days, replace=True)
+        sim_equities[i, 1:] = np.cumprod(1.0 + sampled)
+
+    final_values = sim_equities[:, -1]
+    peak_equities = np.maximum.accumulate(sim_equities, axis=1)
+    peak_equities_safe = np.where(peak_equities > 0, peak_equities, 1.0)
+    drawdowns = sim_equities / peak_equities_safe - 1.0
+    max_drawdowns = np.min(drawdowns, axis=1)
+    bankruptcy_prob = float(np.mean(final_values < bankruptcy_threshold))
+
+    return {
+        "final_values": final_values,
+        "max_drawdowns": max_drawdowns,
+        "bankruptcy_prob": bankruptcy_prob,
+    }
+
+
+# ============================================
 # E8：Bootstrap Result 数据类
 # ============================================
 
@@ -248,7 +301,7 @@ def run_e8_bootstrap(
     n_samples = int(bs_cfg.get("n_samples", 5000))
     random_seed = int(bs_cfg.get("random_seed", 42))
     strategy_names = get_strategy_names(config)
-    default_strategy = strategy_names[:1] if strategy_names else ["ts_momentum"]
+    default_strategy = strategy_names[:1] if strategy_names else ["trend"]
 
     runner = get_pybroker_runner(data_source, config, strategies=default_strategy)
     result = safe_run_backtest(
@@ -355,23 +408,16 @@ def run_e9_monte_carlo(
             logger.warning("E9：无有效收益率数据")
             return None
 
-        n_days = len(returns)
-        rng = np.random.default_rng(random_seed)
-        ret_array = returns.values
+        stats = _compute_monte_carlo_stats(
+            returns.values,
+            n_simulations=n_simulations,
+            random_seed=random_seed,
+            bankruptcy_threshold=bankruptcy_threshold,
+        )
+        final_values = stats["final_values"]
+        max_drawdowns = stats["max_drawdowns"]
+        bankruptcy_prob = stats["bankruptcy_prob"]
 
-        sim_equities = np.zeros((n_simulations, n_days + 1))
-        sim_equities[:, 0] = 1.0
-        for i in range(n_simulations):
-            sampled = rng.choice(ret_array, size=n_days, replace=True)
-            sim_equities[i, 1:] = np.cumprod(1.0 + sampled)
-
-        final_values = sim_equities[:, -1]
-        peak_equities = np.maximum.accumulate(sim_equities, axis=1)
-        peak_equities_safe = np.where(peak_equities > 0, peak_equities, 1.0)
-        drawdowns = sim_equities / peak_equities_safe - 1.0
-        max_drawdowns = np.min(drawdowns, axis=1)
-
-        bankruptcy_prob = float(np.mean(final_values < bankruptcy_threshold))
         logger.info(f"  模拟次数: {n_simulations}")
         logger.info(
             f"  终值均值: {np.mean(final_values):.4f}, 中位数: {np.median(final_values):.4f}"
@@ -487,7 +533,9 @@ def _run_factor_analysis_for_symbol(
     ic_rows: List[Dict[str, Any]] = []
     summary: Dict[str, Any] = {}
 
-    from core.factors.basic_factors import compute_factor_scores_from_ohlcv
+    from core.factors.alpha_futures.sub_strategy_aggregator import (
+        compute_sub_strategy_scores_from_ohlcv,
+    )
 
     sym_df = data_source.query(
         data_source.date_range[0], data_source.date_range[1], symbols=[sym]
@@ -496,7 +544,7 @@ def _run_factor_analysis_for_symbol(
         logger.warning(f"  {sym}: 数据不足，跳过")
         return pd.DataFrame(), pd.DataFrame(), summary
 
-    scored = compute_factor_scores_from_ohlcv(sym_df)
+    scored = compute_sub_strategy_scores_from_ohlcv(sym_df)
 
     ic_engine = RollingICWeightEngine(ic_config)
     decay_monitor = FactorDecayMonitor(decay_config)

@@ -12,6 +12,8 @@ from runner.validation.monte_carlo import task3_monte_carlo
 from runner.validation.bootstrap import run_bootstrap_validation
 from runner.validation.factor_stability import factor_ic_stability_analysis
 from runner.validation.factor_alpha24 import factor_alpha24_screening
+from runner.validation.factor_review import factor_review_validation
+from runner.validation.cross_sectional import cross_sectional_validation
 
 _VALIDATOR_MAP: Dict[str, Callable] = {
     "train_test": task2_train_test_split,
@@ -19,6 +21,8 @@ _VALIDATOR_MAP: Dict[str, Callable] = {
     "bootstrap": run_bootstrap_validation,
     "factor_ic": factor_ic_stability_analysis,
     "factor_alpha24": factor_alpha24_screening,
+    "factor_review": factor_review_validation,
+    "cross_sectional": cross_sectional_validation,
 }
 
 
@@ -47,5 +51,7 @@ __all__ = [
     "run_bootstrap_validation",
     "factor_ic_stability_analysis",
     "factor_alpha24_screening",
+    "factor_review_validation",
+    "cross_sectional_validation",
     "get_validator",
 ]

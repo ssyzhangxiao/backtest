@@ -20,23 +20,22 @@ import pandas as pd
 import numpy as np
 
 from core.config import BacktestConfig
-from core.market_regime import MarketRegimeDetector
-from core.strategy_registry import StrategyLibrary
+from core.config.strategy_profiles import StrategyLibrary
 from core.engine.switch_engine import FactorScoringEngine
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from core.engine.regime_indicator import RegimeIndicator
-from core.engine.strategy_executor import StrategyExecutorFactory
+from core.engine.pybroker_executor import PyBrokerExecutorBuilder  # P0-1 整改
+from core.portfolio import PortfolioManager  # P0-2 整改
+from core.risk_controller import RiskController, RiskConfig  # P0-3 整改
+from utils.indicators import compute_atr  # P0-1 整改：风险估计公共函数
 
 logger = logging.getLogger(__name__)
 
 try:
     import pybroker
-    from pybroker import ExecContext
     PYBROKER_AVAILABLE = True
 except ImportError:
     PYBROKER_AVAILABLE = False
     logger.warning("PyBroker 未安装。请运行: pip install pybroker>=1.0.0")
-    ExecContext = Any
 
 
 @dataclass
@@ -46,7 +45,6 @@ class PyBrokerResult:
     metrics: Dict[str, float]
     equity_curve: pd.DataFrame
     trades: pd.DataFrame
-    regime_history: pd.DataFrame
     switch_log: pd.DataFrame
     bootstrap_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
@@ -83,7 +81,7 @@ class WalkforwardResult:
         except ImportError:
             logger.warning("plotly 未安装，无法绘图。请运行: pip install plotly")
             for i, eq in enumerate(self.equity_curves):
-                logger.info(
+                logger.debug(
                     "Window %d: final equity = %.2f",
                     i + 1,
                     eq["equity"].iloc[-1],
@@ -98,7 +96,6 @@ class PyBrokerBacktestRunner:
       - run: PyBroker 主回测（PyBroker 不可用直接报错，不再回退）
       - walkforward: 向前滚动分析
       - bootstrap_metrics: 绩效指标置信区间
-      - _run_simplified: 自研简化引擎，仅用于交叉验证（并行运行对比结果）
     """
 
     def __init__(
@@ -112,27 +109,33 @@ class PyBrokerBacktestRunner:
         self.config = config or BacktestConfig()
         self.library = StrategyLibrary()
 
-        # 构建ScoringConfig，从BacktestConfig同步新参数
+        # 构建ScoringConfig，从BacktestConfig同步信号层参数
+        # P1-D1 整改：stop_loss_cooldown/commission_rate/slippage_rate 不属于信号层
+        # 已迁移到 RiskConfig（规则4 风险控制统一），不再透传到 ScoringConfig
         from core.engine.switch_engine import ScoringConfig
         scoring_config = ScoringConfig(
             rebalance_days=self.config.rebalance_days,
             factor_weights=self.config.factor_weights,
             entry_threshold=self.config.entry_threshold,
-            stop_loss_cooldown=self.config.stop_loss_cooldown,
-            commission_rate=self.config.commission_rate,
-            slippage_rate=self.config.slippage_rate,
             use_cross_section=self.config.use_cross_section,
             use_rank_score=self.config.use_rank_score,
             use_rolling_ic=self.config.use_rolling_ic,
             use_trend_filter=self.config.use_trend_filter,
-            top_n_symbols=self.config.top_n_symbols,
         )
         self.switch_engine = FactorScoringEngine(self.library, scoring_config)
-        self.regime_indicator = RegimeIndicator()
-        self.executor_factory = StrategyExecutorFactory(
-            self.library, self.switch_engine, self.config
+        # P0-1整改：不再使用 StrategyExecutorFactory，改为蓝图模式
+        # PortfolioManager / RiskController 由 _run_pybroker 内部按蓝图组装
+        self._portfolio = PortfolioManager(
+            total_allocation=min(
+                self.config.max_total_position_pct,
+                0.8,
+            ),
         )
-        self.executor_factory._total_symbols = len(self.target_symbols)
+        self._risk_controller = RiskController(RiskConfig(
+            stop_loss_pct=self.config.stop_loss_pct,
+            max_position_pct=self.config.max_position_pct,
+            max_total_position_pct=self.config.max_total_position_pct,
+        ))
 
         # 注入滚动IC引擎
         if self.config.use_rolling_ic:
@@ -141,17 +144,31 @@ class PyBrokerBacktestRunner:
                 window=60, forward_period=5, ema_alpha=0.1, min_observations=30
             )
             self._rolling_ic_engine = RollingICWeightEngine(ic_config)
-            self.executor_factory._rolling_ic_engine = self._rolling_ic_engine
         else:
             self._rolling_ic_engine = None
 
         self._registered_strategies: List[str] = []
         self._last_result: Optional[PyBrokerResult] = None
 
+        # 子策略适配器（新因子和子策略体系）
+        # 规则1+规则17整改：完整集成新因子/子策略体系，不允许静默降级
+        self._sub_strategy_adapter = None
+        if self.config.use_sub_strategies:
+            from core.engine.sub_strategy_adapter import SubStrategyAdapter
+
+            merge_method = self.config.signal_merge_method
+            self._sub_strategy_adapter = SubStrategyAdapter(
+                config=self.config,
+                use_new_factors=self.config.use_new_factors,
+                use_sub_strategies=True,
+                merge_method=merge_method,
+            )
+            logger.debug("子策略适配器初始化成功（use_new_factors=%s）", self.config.use_new_factors)
+
     def register_strategies(self, strategy_names: List[str]):
         """注册策略名称列表。"""
         self._registered_strategies = list(strategy_names)
-        logger.info("已注册策略: %s", strategy_names)
+        logger.debug("已注册策略: %s", strategy_names)
 
     @staticmethod
     def _compute_rsi(close_ser, period):
@@ -206,7 +223,6 @@ class PyBrokerBacktestRunner:
         if not PYBROKER_AVAILABLE:
             raise RuntimeError("PyBroker 不可用")
 
-        strategies = self._registered_strategies
         df = self.data_source.to_pybroker_df()
 
         df = df[
@@ -224,7 +240,7 @@ class PyBrokerBacktestRunner:
                     f"可用品种: {sorted(available)[:10]}..."
                 )
             df = df[df["symbol"].isin(matched)].copy()
-            logger.info(
+            logger.debug(
                 "过滤到目标品种: %s (%d 行)",
                 sorted(matched),
                 len(df),
@@ -234,18 +250,19 @@ class PyBrokerBacktestRunner:
             df = df[df["is_dominant"]].copy()
             if "product" in df.columns:
                 df["symbol"] = df["product"]
-            logger.info(
+            logger.debug(
                 "已过滤到主力合约: %d 行, %d 品种",
                 len(df),
                 df["symbol"].nunique(),
             )
         elif "is_dominant" not in df.columns:
-            logger.info("没有主力合约信息，使用全部数据 (%d 行)", len(df))
+            logger.debug("没有主力合约信息，使用全部数据 (%d 行)", len(df))
+        
+        # 计算新因子（如果启用）
+        if self._sub_strategy_adapter is not None and self.config.use_new_factors:
+            logger.debug("计算新因子...")
+            df = self._sub_strategy_adapter.compute_factors(df)
 
-        self.regime_indicator.fit(df)
-        regime_fn, regime_conf_fn, regime_stab_fn = (
-            self.regime_indicator.create_pybroker_regime_fn()
-        )
 
         pb_config = pybroker.StrategyConfig(
             initial_cash=initial_cash,
@@ -268,140 +285,47 @@ class PyBrokerBacktestRunner:
 
         custom_params = getattr(self, "_custom_params", None) or {}
 
-        ts_momentum_params = (
-            dict(self.library.get_profile("ts_momentum").default_params)
-            if self.library.get_profile("ts_momentum")
-            else {}
-        )
-        ts_momentum_params.update(custom_params.get("ts_momentum", {}))
-        _mom_window = int(ts_momentum_params.get("window", 20))
+        # ── 5子策略指标注册 ──
+        # 使用 StrategyIndicatorRegistry 替代硬编码指标构建
+        from core.engine.strategy_indicators import StrategyIndicatorRegistry
+        # P1-任务7整改：显式注册默认指标（不再依赖 import 时副作用）
+        from core.engine.sub_strategy_indicators import register_default_indicators
+        register_default_indicators()
 
-        roll_yield_params = (
-            dict(self.library.get_profile("roll_yield").default_params)
-            if self.library.get_profile("roll_yield")
-            else {}
-        )
-        roll_yield_params.update(custom_params.get("roll_yield", {}))
-        _ry_lookback = int(roll_yield_params.get("lookback", 20))
-        _ry_entry_threshold = float(roll_yield_params.get("entry_threshold", 2.0))
+        # 从策略注册表动态获取各子策略的参数
+        all_strategy_names = ["trend", "term_structure", "mean_reversion", "vol_breakout", "composite_resonance"]
+        sub_params = {}
+        for sname in all_strategy_names:
+            sp = self.library.get_profile(sname)
+            sub_params[sname] = dict(sp.default_params) if sp else {}
+            sub_params[sname].update(custom_params.get(sname, {}))
 
-        alpha019_params = (
-            dict(self.library.get_profile("alpha019").default_params)
-            if self.library.get_profile("alpha019")
-            else {}
-        )
-        alpha019_params.update(custom_params.get("alpha019", {}))
-        _a019_short_window = int(alpha019_params.get("short_window", 7))
-        _a019_long_window = int(alpha019_params.get("long_window", 250))
-
-        alpha032_params = (
-            dict(self.library.get_profile("alpha032").default_params)
-            if self.library.get_profile("alpha032")
-            else {}
-        )
-        alpha032_params.update(custom_params.get("alpha032", {}))
-        _a032_ma_window = int(alpha032_params.get("ma_window", 7))
-        _a032_corr_window = int(alpha032_params.get("corr_window", 230))
-
-        def _mom_ret(bar_data):
-            return pd.Series(bar_data.close).pct_change(periods=_mom_window).to_numpy()
-
-        def _roll_yield_ma(bar_data):
-            return (
-                pd.Series(bar_data.close)
-                .rolling(_ry_lookback, min_periods=_ry_lookback)
-                .mean()
-                .to_numpy()
-            )
-
-        def _regime(bar_data):
-            return regime_fn(bar_data)
-
-        def _regime_conf(bar_data):
-            return regime_conf_fn(bar_data)
-
-        def _regime_stab(bar_data):
-            return regime_stab_fn(bar_data)
-
-        def _alpha019(bar_data):
-            close = pd.Series(bar_data.close)
-            close_7d_ago = close.shift(_a019_short_window)
-            delta_7d = close.diff(_a019_short_window)
-            short_term = close - close_7d_ago + delta_7d
-            sign_component = -np.sign(short_term)
-            returns = close.pct_change()
-            cum_returns = pd.Series(np.nan, index=close.index)
-            for i in range(_a019_long_window, len(close) + 1):
-                window_returns = returns.iloc[i - _a019_long_window:i]
-                cum_returns.iloc[i - 1] = np.prod(1 + window_returns) - 1
-            cum_rank = cum_returns.rank(pct=True)
-            result = sign_component * (1 + cum_rank)
-            return result.values
-
-        def _alpha032(bar_data):
-            close = pd.Series(bar_data.close)
-            ma_7 = close.rolling(window=_a032_ma_window, min_periods=_a032_ma_window).mean()
-            price_deviation = ma_7 - close
-            vwap = close
-            if hasattr(bar_data, 'vwap') and bar_data.vwap is not None:
-                vwap = pd.Series(bar_data.vwap)
-            close_5d_ago = close.shift(5)
-            rolling_corr = vwap.rolling(
-                window=_a032_corr_window, min_periods=_a032_corr_window // 2
-            ).corr(close_5d_ago)
-            result = price_deviation + 20 * rolling_corr
-            return result.values
-
+        # 通过注册表构建指标（解耦：不再硬编码任何指标计算逻辑）
         _indicators = [
-            pybroker.indicator("mom_ret", _mom_ret),
-            pybroker.indicator("roll_yield_ma", _roll_yield_ma),
-            pybroker.indicator("alpha019_val", _alpha019),
-            pybroker.indicator("alpha032_val", _alpha032),
-            pybroker.indicator("regime", _regime),
-            pybroker.indicator("regime_confidence", _regime_conf),
-            pybroker.indicator("regime_stability", _regime_stab),
-            pybroker.indicator("sma_20", lambda d: pd.Series(d.close).rolling(20).mean().values),
+            pybroker.indicator(name, fn)
+            for name, fn in StrategyIndicatorRegistry.build_all(sub_params)
         ]
+        # 添加通用指标（非策略特定）
+        _indicators.append(
+            pybroker.indicator("sma_20", lambda d: pd.Series(d.close).rolling(20).mean().values)
+        )
 
         symbols = sorted(df["symbol"].unique().tolist())
-        primary_strategy = strategies[0] if strategies else "ts_momentum"
-        use_exec_fusion = getattr(self, "_use_execute_fusion", False)
 
-        if use_exec_fusion and len(strategies) > 1:
-            from core.strategies import create_strategy
-            strategy_instances = {}
-            for sname in strategies:
-                try:
-                    profile = self.library.get_profile(sname)
-                    params = dict(profile.default_params) if profile else {}
-                    params.update(custom_params.get(sname, {}))
-                    strategy_instances[sname] = create_strategy(sname, **params)
-                except Exception as e:
-                    logger.warning("创建策略实例 %s 失败: %s", sname, e)
-            if strategy_instances:
-                executor, fusion_indicators = self.executor_factory.create_fusion_executor(
-                    strategy_instances,
-                    use_weighted_fusion=True,
-                    use_regime_filter=True,
-                )
-                all_indicators = _indicators + fusion_indicators
-                strategy.add_execution(executor, symbols=symbols, indicators=all_indicators)
-            else:
-                executor = self.executor_factory.create_executor(
-                    primary_strategy,
-                    enable_switching=False,
-                    all_strategy_names=strategies,
-                    custom_params=custom_params,
-                )
-                strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
-        else:
-            executor = self.executor_factory.create_executor(
-                primary_strategy,
-                enable_switching=False,
-                all_strategy_names=strategies if len(strategies) > 1 else None,
-                custom_params=custom_params,
-            )
-            strategy.add_execution(executor, symbols=symbols, indicators=_indicators)
+        # ──────────────────────────────────────────────────────
+        # P0-1/P0-2/P0-3 整改：蓝图模式执行器
+        # ──────────────────────────────────────────────────────
+        blueprint_builder = PyBrokerExecutorBuilder(
+            scoring_engine=self.switch_engine,
+            portfolio_manager=self._portfolio,
+            risk_controller=self._risk_controller,
+            config=self.config,
+            total_symbols=len(symbols),
+            weight_method=getattr(self.config, "weight_method", "risk_parity"),
+            risk_estimates_provider=self._estimate_symbol_risk,
+        )
+        blueprint_executor = blueprint_builder.build(strategy_params=sub_params)
+        strategy.add_execution(blueprint_executor, symbols=symbols, indicators=_indicators)
 
         pb_result = strategy.backtest(
             start_date=start_date,
@@ -455,219 +379,76 @@ class PyBrokerBacktestRunner:
         else:
             metrics = {}
 
-        regime_df = self._run_regime_detection(df)
+        # 不再需要市场环境检测
+        # regime_df = self._run_regime_detection(df)
 
         return PyBrokerResult(
             metrics=metrics,
             equity_curve=equity_df,
             trades=trades,
-            regime_history=regime_df,
             switch_log=self.switch_engine.get_decision_summary(),
         )
 
-    def _run_fallback(
-        self, start_date: str, end_date: str, initial_cash: float
-    ) -> PyBrokerResult:
-        """自研简化引擎回测（PyBroker 不可用时的 fallback）。"""
-        return self._run_simplified(start_date, end_date, initial_cash)
+    # -----------------------------------------------------------------------
+    # P0-1整改：蓝图辅助方法
+    # -----------------------------------------------------------------------
+    def _estimate_symbol_risk(self, symbol: str) -> Optional[float]:
+        """
+        估计品种风险（用于 risk_parity 权重分配）。
 
-    def _run_simplified(
-        self, start_date: str, end_date: str, initial_cash: float
-    ) -> PyBrokerResult:
-        """简化回测引擎（fallback / 快速验证用）。"""
-        cfg = self.config
-        cost_rate = cfg.commission_rate + cfg.slippage_rate
-        position_size = cfg.max_position_pct
-        strategies = self._registered_strategies or ["ts_momentum"]
+        规则17整改：使用 utils.indicators.compute_atr 公共函数，避免重复造轮。
 
-        strategy_params = {}
-        for sname in strategies:
-            sp = self.library.get_profile(sname)
-            strategy_params[sname] = dict(sp.default_params) if sp else {}
+        计算逻辑：
+          1) 优先返回 ATR(14) / close，作为波动率代理
+          2) ATR 不可用时使用 60 日日收益率年化波动率
+          3) 数据不足时返回 None（risk_parity 会回退到等权）
 
-        df = self.data_source.to_pybroker_df()
-        df = df[
-            (df["date"] >= pd.Timestamp(start_date))
-            & (df["date"] <= pd.Timestamp(end_date))
+        Args:
+            symbol: 品种代码（如 'SHFE.RB'）
+
+        Returns:
+            风险估计值（>0），或 None（无法估计）
+        """
+        try:
+            sym_df = self.data_source.to_pybroker_df()
+            sym_df = sym_df[sym_df["symbol"] == symbol].sort_values("date")
+            if len(sym_df) < 60:
+                return None
+
+            high = pd.Series(sym_df["high"].values, dtype=float)
+            low = pd.Series(sym_df["low"].values, dtype=float)
+            close = pd.Series(sym_df["close"].values, dtype=float)
+
+            # 1) ATR(14) / close 路径
+            atr = compute_atr(high, low, close, period=14, method="simple")
+            last_close = float(close.iloc[-1])
+            last_atr = float(atr.iloc[-1])
+            if last_close > 0 and np.isfinite(last_atr) and last_atr > 0:
+                return last_atr / last_close
+
+            # 2) 回退：年化历史波动率（基于 60 日日收益率）
+            daily_ret = close.pct_change().dropna().tail(60)
+            if len(daily_ret) >= 20:
+                vol = float(daily_ret.std(ddof=0)) * float(np.sqrt(252))
+                if vol > 0 and np.isfinite(vol):
+                    return vol
+
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("估计品种风险失败 %s: %s", symbol, e)
+            return None
+
+    def _get_default_sub_params(self) -> Dict[str, Dict[str, Any]]:
+        """获取默认子策略参数（蓝图模式共用）。"""
+        all_strategy_names = [
+            "trend", "term_structure", "mean_reversion",
+            "vol_breakout", "composite_resonance",
         ]
-
-        regime_result = self._run_regime_detection(df)
-
-        symbols = self.data_source.symbols
-        all_equities = []
-        all_trades = []
-
-        for symbol in symbols:
-            sym_df = (
-                df[df["symbol"] == symbol].sort_values("date").reset_index(drop=True)
-            )
-            if len(sym_df) < 50:
-                continue
-
-            cash = initial_cash / len(symbols)
-            position = 0
-            entry_price = 0.0
-            shares = 0
-            last_signal_dir = 0
-            equity_list = []
-            trade_records = []
-
-            for i in range(len(sym_df)):
-                row = sym_df.iloc[i]
-                close = row["close"]
-                date = row["date"]
-
-                if position == 1:
-                    equity = cash + shares * close
-                elif position == -1:
-                    equity = cash - shares * close
-                else:
-                    equity = cash
-
-                stop_pct = cfg.stop_loss_pct
-                if i >= 14:
-                    h_window = sym_df["high"].iloc[i-13:i+1]
-                    l_window = sym_df["low"].iloc[i-13:i+1]
-                    c_shift = sym_df["close"].shift(1).iloc[i-13:i+1]
-                    tr_vals = pd.concat([
-                        (h_window - l_window).astype(float),
-                        (h_window - c_shift).abs(),
-                        (l_window - c_shift).abs()
-                    ], axis=1).max(axis=1)
-                    atr_val = tr_vals.mean()
-                    atr_stop_pct = 2.0 * atr_val / close if close > 0 else stop_pct
-                    effective_stop = max(stop_pct, atr_stop_pct)
-                else:
-                    effective_stop = stop_pct
-
-                if position == 1 and close < entry_price * (1 - effective_stop):
-                    base_pnl = shares * (close - entry_price)
-                    exit_cost = shares * close * cost_rate
-                    trade_records.append(
-                        {"date": date, "symbol": symbol, "side": "stop_loss_long",
-                         "price": close, "shares": shares, "pnl": base_pnl - exit_cost}
-                    )
-                    cash += shares * close * (1 - cost_rate)
-                    position = 0
-                    shares = 0
-
-                elif position == -1 and close > entry_price * (1 + effective_stop):
-                    base_pnl = shares * (entry_price - close)
-                    exit_cost = shares * close * cost_rate
-                    trade_records.append(
-                        {"date": date, "symbol": symbol, "side": "stop_loss_short",
-                         "price": close, "shares": shares, "pnl": base_pnl - exit_cost}
-                    )
-                    cash -= shares * close * (1 + cost_rate)
-                    position = 0
-                    shares = 0
-
-                signal = self._generate_simple_signal(sym_df, i, strategies[0], strategy_params)
-
-                if signal != 0:
-                    if last_signal_dir != signal:
-                        last_signal_dir = signal
-                        signal = 0
-
-                if signal == 1 and position != 1:
-                    if position == -1:
-                        base_pnl = shares * (entry_price - close)
-                        exit_cost = shares * close * cost_rate
-                        trade_records.append(
-                            {"date": date, "symbol": symbol, "side": "short_close",
-                             "price": close, "shares": shares, "pnl": base_pnl - exit_cost}
-                        )
-                        cash -= shares * close * (1 + cost_rate)
-                        position = 0
-                        shares = 0
-                    alloc = equity * position_size
-                    shares = int(alloc / close) if close > 0 else 0
-                    if shares > 0:
-                        cash -= shares * close * (1 + cost_rate)
-                        entry_price = close
-                        position = 1
-
-                elif signal == -1 and position != -1:
-                    if position == 1:
-                        base_pnl = shares * (close - entry_price)
-                        exit_cost = shares * close * cost_rate
-                        trade_records.append(
-                            {"date": date, "symbol": symbol, "side": "long_close",
-                             "price": close, "shares": shares, "pnl": base_pnl - exit_cost}
-                        )
-                        cash += shares * close * (1 - cost_rate)
-                        position = 0
-                        shares = 0
-                    alloc = equity * position_size
-                    shares = int(alloc / close) if close > 0 else 0
-                    if shares > 0:
-                        cash += shares * close * (1 - cost_rate)
-                        entry_price = close
-                        position = -1
-
-                if position == 1:
-                    equity = cash + shares * close
-                elif position == -1:
-                    equity = cash - shares * close
-                else:
-                    equity = cash
-
-                equity_list.append({"date": date, "symbol": symbol, "equity": equity})
-
-            all_equities.append(pd.DataFrame(equity_list))
-            all_trades.append(
-                pd.DataFrame(trade_records)
-                if trade_records
-                else pd.DataFrame(columns=["date", "symbol", "side", "price", "shares", "pnl"])
-            )
-
-        if not all_equities:
-            empty_metrics = {"error": "no_data"}
-            return PyBrokerResult(
-                metrics=empty_metrics,
-                equity_curve=pd.DataFrame(columns=["date", "equity"]),
-                trades=pd.DataFrame(),
-                regime_history=regime_result,
-                switch_log=self.switch_engine.get_decision_summary(),
-            )
-
-        if len(all_equities) > 1:
-            eq_curves: Dict[str, pd.Series] = {}
-            for eq_df in all_equities:
-                sym = eq_df["symbol"].iloc[0]
-                eq_curves[sym] = pd.Series(eq_df["equity"].values, index=eq_df["date"])
-
-            all_dates = sorted(set().union(*(e["date"] for e in all_equities)))
-            portfolio_data = []
-            for date in all_dates:
-                day_eq = 0.0
-                for eq_ser in eq_curves.values():
-                    mask = eq_ser.index <= date
-                    if mask.any():
-                        day_eq += eq_ser.loc[mask].iloc[-1]
-                portfolio_data.append({"date": date, "equity": day_eq})
-
-            combined_eq = pd.DataFrame(portfolio_data)
-        else:
-            combined_eq = all_equities[0][["date", "equity"]]
-
-        if len(combined_eq) > 1:
-            daily_ret = combined_eq["equity"].pct_change().dropna()
-            metrics = self._compute_simple_metrics(combined_eq["equity"], daily_ret)
-        else:
-            metrics = {"error": "insufficient_data"}
-
-        trades_df = (
-            pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
-        )
-
-        return PyBrokerResult(
-            metrics=metrics,
-            equity_curve=combined_eq,
-            trades=trades_df,
-            regime_history=regime_result,
-            switch_log=self.switch_engine.get_decision_summary(),
-        )
+        sub_params: Dict[str, Dict[str, Any]] = {}
+        for sname in all_strategy_names:
+            sp = self.library.get_profile(sname)
+            sub_params[sname] = dict(sp.default_params) if sp else {}
+        return sub_params
 
     def walkforward(
         self,
@@ -690,137 +471,6 @@ class PyBrokerBacktestRunner:
             start_date, end_date,
             train_ratio=_train_ratio, step_ratio=_step_ratio,
             train_bars=_train_bars, test_bars=_test_bars, step_bars=_step_bars,
-        )
-
-    def _walkforward_pybroker(
-        self, start_date: str, end_date: str, train_ratio: float
-    ) -> WalkforwardResult:
-        """使用 PyBroker 内置 walkforward 方法。"""
-        df = self.data_source.to_pybroker_df()
-        df = df[
-            (df["date"] >= pd.Timestamp(start_date))
-            & (df["date"] <= pd.Timestamp(end_date))
-        ]
-
-        if "is_dominant" in df.columns and df["is_dominant"].any():
-            df = df[df["is_dominant"]].copy()
-            if "product" in df.columns:
-                df["symbol"] = df["product"]
-
-        pb_config = pybroker.StrategyConfig(
-            initial_cash=self.config.initial_cash,
-            buy_delay=self.config.pybroker_buy_delay,
-            sell_delay=self.config.pybroker_sell_delay,
-        )
-        from pybroker.scope import StaticScope as _WFScope
-        _wf_scope = _WFScope.instance()
-        _wf_custom_cols = [
-            col for col in df.columns
-            if col not in _wf_scope.default_data_cols and col not in _wf_scope.custom_data_cols
-        ]
-        if _wf_custom_cols:
-            _wf_scope.register_custom_cols(_wf_custom_cols)
-        strategy = pybroker.Strategy(df, start_date, end_date, config=pb_config)
-
-        def _wf_sma_5(bar_data):
-            return pd.Series(bar_data.close).rolling(5).mean().to_numpy()
-
-        def _wf_sma_20(bar_data):
-            return pd.Series(bar_data.close).rolling(20).mean().to_numpy()
-
-        def _wf_rsi_14(bar_data):
-            close_ser = pd.Series(bar_data.close)
-            rsi = PyBrokerBacktestRunner._compute_rsi(close_ser, 14)
-            return rsi.fillna(50.0).to_numpy()
-
-        def _wf_bb_upper(bar_data):
-            close = pd.Series(bar_data.close)
-            atr = PyBrokerBacktestRunner._compute_atr(pd.Series(bar_data.high), pd.Series(bar_data.low), close, 14)
-            center = close.rolling(20, min_periods=1).mean()
-            return (center + 1.5 * atr).to_numpy()
-
-        def _wf_bb_lower(bar_data):
-            close = pd.Series(bar_data.close)
-            atr = PyBrokerBacktestRunner._compute_atr(pd.Series(bar_data.high), pd.Series(bar_data.low), close, 14)
-            center = close.rolling(20, min_periods=1).mean()
-            return (center - 1.5 * atr).to_numpy()
-
-        regime_fn, regime_conf_fn, _ = self.regime_indicator.create_pybroker_regime_fn()
-
-        def _wf_regime(bar_data):
-            return regime_fn(bar_data)
-
-        def _wf_regime_conf(bar_data):
-            return regime_conf_fn(bar_data)
-
-        _wf_indicators = [
-            pybroker.indicator("sma_5", _wf_sma_5),
-            pybroker.indicator("sma_20", _wf_sma_20),
-            pybroker.indicator("rsi_14", _wf_rsi_14),
-            pybroker.indicator("bb_upper", _wf_bb_upper),
-            pybroker.indicator("bb_lower", _wf_bb_lower),
-            pybroker.indicator("regime", _wf_regime),
-            pybroker.indicator("regime_confidence", _wf_regime_conf),
-        ]
-
-        symbols = sorted(df["symbol"].unique().tolist())
-        executor = self.executor_factory.create_executor("ts_momentum")
-        strategy.add_execution(executor, symbols=symbols, indicators=_wf_indicators)
-
-        n_windows = max(2, int(1.0 / (1.0 - train_ratio)))
-
-        wf_result = strategy.walkforward(
-            windows=n_windows,
-            train_size=train_ratio,
-            lookahead=self.config.pybroker_buy_delay,
-        )
-
-        windows = []
-        equity_curves = []
-
-        if hasattr(wf_result, "metrics_df") and isinstance(
-            wf_result.metrics_df, pd.DataFrame
-        ):
-            mdf = wf_result.metrics_df
-            for _, row in mdf.iterrows():
-                window_metrics = {
-                    k: v
-                    for k, v in row.items()
-                    if isinstance(v, (int, float)) and not pd.isna(v)
-                }
-                windows.append(
-                    {
-                        "train_start": str(row.get("train_start_date", "")),
-                        "train_end": str(row.get("train_end_date", "")),
-                        "test_start": str(row.get("test_start_date", "")),
-                        "test_end": str(row.get("test_end_date", "")),
-                        "metrics": window_metrics,
-                    }
-                )
-
-        if hasattr(wf_result, "portfolio") and isinstance(
-            wf_result.portfolio, pd.DataFrame
-        ):
-            pf = wf_result.portfolio.copy()
-            if "market_value" in pf.columns:
-                pf = pf.rename(columns={"market_value": "equity"})
-            equity_curves.append(pf)
-
-        overall = {}
-        if windows:
-            metric_keys = [
-                k
-                for k in windows[0]["metrics"]
-                if isinstance(windows[0]["metrics"][k], (int, float))
-            ]
-            for key in metric_keys:
-                vals = [w["metrics"][key] for w in windows]
-                overall[key] = round(float(np.mean(vals)), 4)
-
-        return WalkforwardResult(
-            windows=windows,
-            overall_metrics=overall,
-            equity_curves=equity_curves,
         )
 
     def _walkforward_custom(
@@ -866,25 +516,20 @@ class PyBrokerBacktestRunner:
             if len(train_dates) < 10 or len(test_dates) < 5:
                 continue
 
-            train_df = df[df["date"].isin(train_dates)]
             test_df = df[df["date"].isin(test_dates)]
 
-            window_regime = RegimeIndicator(MarketRegimeDetector())
-            window_regime.fit(train_df)
-            regime_test = window_regime.detect(test_df)
-
             wf_params = {}
-            for sname in (self._registered_strategies or ["ts_momentum"]):
+            for sname in (self._registered_strategies or ["trend"]):
                 sp = self.library.get_profile(sname)
                 wf_params[sname] = dict(sp.default_params) if sp else {}
 
             window_runner = _WindowRunner(
                 symbols=self.data_source.symbols,
-                strategies=self._registered_strategies or ["ts_momentum"],
+                strategies=self._registered_strategies or ["trend"],
                 config=self.config,
                 strategy_params=wf_params,
             )
-            test_result = window_runner.run(test_df, regime_test)
+            test_result = window_runner.run(test_df)
 
             windows.append(
                 {
@@ -1030,52 +675,63 @@ class PyBrokerBacktestRunner:
         self._last_result.bootstrap_metrics = result
         return result
 
-    def _run_regime_detection(self, df: pd.DataFrame) -> pd.DataFrame:
-        """执行环境检测并返回结果 DataFrame。"""
-        return self.regime_indicator.detect(df)
-
     @staticmethod
     def _generate_simple_signal(df: pd.DataFrame, idx: int, strategy_name: str, params: dict = None) -> int:
-        """简化信号生成（WalkForward fallback 引擎使用）。"""
+        """简化信号生成（WalkForward fallback 引擎使用）。5子策略版本。"""
         if params is None:
             params = {}
         close = df["close"]
         i = idx
 
-        if strategy_name == "ts_momentum":
+        # 5子策略信号映射
+        if strategy_name == "trend":
             window = params.get("window", 20)
             if i < window:
                 return 0
             ret = close.iloc[i] / close.iloc[max(0, i - window)] - 1
-            return 1 if ret > 0 else (-1 if ret < 0 else 0)
+            signal = np.tanh(ret * 5)
+            return 1 if signal > 0.2 else (-1 if signal < -0.2 else 0)
 
-        elif strategy_name == "roll_yield":
+        elif strategy_name == "term_structure":
             lookback = params.get("lookback", 20)
-            entry_threshold = params.get("entry_threshold", 2.0)
             if i < lookback:
                 return 0
-            ma = close.iloc[max(0, i - lookback) : i + 1].mean()
+            ma = close.iloc[max(0, i - lookback): i + 1].mean()
             if ma <= 0:
                 return 0
             spread_pct = (close.iloc[i] - ma) / ma * 100
-            if spread_pct > entry_threshold:
-                return -1
-            elif spread_pct < -entry_threshold:
-                return 1
-            return 0
+            signal = np.tanh(-spread_pct / 3.0)
+            return 1 if signal > 0.2 else (-1 if signal < -0.2 else 0)
 
-        elif strategy_name == "alpha019":
-            if i < 7:
+        elif strategy_name == "mean_reversion":
+            short_window = params.get("short_window", 7)
+            if i < short_window:
                 return 0
-            sign_val = -1 if close.iloc[i] < close.iloc[max(0, i - 7)] else 1
-            return sign_val if abs(close.iloc[i] / close.iloc[max(0, i - 7)] - 1) > 0.01 else 0
+            delta_n = close.iloc[i] - close.iloc[max(0, i - short_window)]
+            sign_val = -1 if delta_n > 0 else 1
+            return sign_val if abs(delta_n / close.iloc[i]) > 0.01 else 0
 
-        elif strategy_name == "alpha032":
-            if i < 7:
+        elif strategy_name == "vol_breakout":
+            ma_window = params.get("ma_window", 7)
+            if i < ma_window:
                 return 0
-            ma_7 = close.iloc[max(0, i - 7) : i + 1].mean()
-            deviation = ma_7 - close.iloc[i]
-            return 1 if deviation > 0 else (-1 if deviation < 0 else 0)
+            ma = close.iloc[max(0, i - ma_window): i + 1].mean()
+            deviation = ma - close.iloc[i]
+            signal = np.tanh(deviation * 0.1)
+            return 1 if signal > 0.2 else (-1 if signal < -0.2 else 0)
+
+        elif strategy_name == "composite_resonance":
+            # 复合共振：趋势+均值回归等权叠加
+            window = params.get("window", 20)
+            short_window = params.get("short_window", 7)
+            if i < max(window, short_window):
+                return 0
+            ret = close.iloc[i] / close.iloc[max(0, i - window)] - 1
+            trend_signal = np.tanh(ret * 5)
+            delta_n = close.iloc[i] - close.iloc[max(0, i - short_window)]
+            mr_signal = -1 if delta_n > 0 else 1
+            composite = (trend_signal + mr_signal * 0.5) / 2.0
+            return 1 if composite > 0.2 else (-1 if composite < -0.2 else 0)
 
         return 0
 
@@ -1130,7 +786,7 @@ class _WindowRunner:
         self.config = config
         self.strategy_params = strategy_params or {}
 
-    def run(self, df: pd.DataFrame, regime_df: pd.DataFrame) -> PyBrokerResult:
+    def run(self, df: pd.DataFrame) -> PyBrokerResult:
         """对单窗口执行简化回测。"""
         cfg = self.config
         cost_rate = cfg.commission_rate + cfg.slippage_rate
@@ -1139,7 +795,7 @@ class _WindowRunner:
         symbols = (
             sorted(df["symbol"].unique()) if "symbol" in df.columns else self.symbols
         )
-        strategy_name = self.strategies[0] if self.strategies else "ts_momentum"
+        strategy_name = self.strategies[0] if self.strategies else "trend"
 
         all_equities = []
         all_trades = []
@@ -1255,7 +911,6 @@ class _WindowRunner:
                 metrics={"error": "no_data"},
                 equity_curve=pd.DataFrame(columns=["date", "equity"]),
                 trades=pd.DataFrame(),
-                regime_history=regime_df,
                 switch_log=pd.DataFrame(),
             )
 
@@ -1287,38 +942,7 @@ class _WindowRunner:
             metrics=metrics,
             equity_curve=combined_eq,
             trades=trades_df,
-            regime_history=regime_df,
             switch_log=pd.DataFrame(),
         )
 
 
-def run_pybroker_backtest(
-    df,
-    start_date: str,
-    end_date: str,
-    strategy_names=None,
-    initial_cash: float = 1_000_000,
-    config=None,
-):
-    """
-    便捷函数：一行代码执行 PyBroker 回测。
-
-    Args:
-        df: 行情 DataFrame（需含 date, symbol, open, high, low, close, volume）
-        start_date: 回测开始日期
-        end_date: 回测结束日期
-        strategy_names: 策略名称列表，默认 ["ts_momentum"]
-        initial_cash: 初始资金
-        config: BacktestConfig 实例
-
-    Returns:
-        PyBrokerResult
-    """
-    from core.config import BacktestConfig
-    from core.engine.pybroker_data_source import PyBrokerDataSource
-
-    cfg = config or BacktestConfig()
-    ds = PyBrokerDataSource(df)
-    runner = PyBrokerBacktestRunner(ds, cfg)
-    runner.register_strategies(strategy_names or ["ts_momentum"])
-    return runner.run(start_date, end_date, initial_cash=initial_cash)

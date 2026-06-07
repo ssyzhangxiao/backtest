@@ -6,15 +6,25 @@
   - ATR倍数追踪：trail_price = highest - N * ATR
 
 规则13要求：追踪止损支持固定点数和ATR倍数两种模式。
+
+P1整改（2026-06-07）：多空状态分离，避免同一品种多空交替时状态被覆盖。
+  - 状态键使用 (symbol, direction) 组合，例如 ("rb2401", "long")
+  - 内部 _state: Dict[Tuple[str, str], TrailingState]
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, Optional, Tuple
 import logging
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
+
+
+class StopDirection(Enum):
+    """止损方向枚举。"""
+
+    LONG = "long"
+    SHORT = "short"
 
 
 @dataclass
@@ -29,6 +39,16 @@ class TrailingStopResult:
     direction: str = "long"
 
 
+@dataclass
+class _TrailingState:
+    """单方向追踪状态。"""
+
+    trailing_high: float = 0.0
+    trailing_low: float = 0.0
+    stop_price: float = 0.0
+    entry_price: float = 0.0
+
+
 class TrailingStop:
     """
     追踪止损管理器。
@@ -37,9 +57,18 @@ class TrailingStop:
     多头：止损价 = max(前止损价, 最高价 - 追踪距离)
     空头：止损价 = min(前止损价, 最低价 + 追踪距离)
 
+    P1整改：多空状态独立存储，避免同一品种多空交替时状态覆盖。
+    内部使用 (symbol, direction) 作为状态键。
+
     用法:
         ts = TrailingStop(mode="atr", atr_multiplier=2.0)
-        result = ts.check_long(entry_price=100, current_price=105, highest=108, atr=3.0)
+        result = ts.check_long(
+            symbol="rb2401",
+            entry_price=100,
+            current_price=105,
+            highest=108,
+            atr=3.0,
+        )
     """
 
     def __init__(
@@ -60,8 +89,13 @@ class TrailingStop:
         self.trail_pct = trail_pct
         self.atr_multiplier = atr_multiplier
 
-        # 持仓追踪状态：{symbol: (trailing_high, trailing_low, stop_price)}
-        self._state: Dict[str, Tuple[float, float, float]] = {}
+        # P1整改：多空状态独立存储
+        # 键: (symbol, direction), 值: _TrailingState
+        self._state: Dict[Tuple[str, str], _TrailingState] = {}
+
+    def _state_key(self, symbol: str, direction: StopDirection) -> Tuple[str, str]:
+        """生成状态键。"""
+        return (symbol, direction.value)
 
     def _compute_trail_distance(self, atr_value: Optional[float] = None) -> float:
         """计算追踪距离。"""
@@ -99,15 +133,23 @@ class TrailingStop:
             # ATR模式：追踪距离 = N * ATR
             stop_price = highest_since_entry - trail_dist
 
-        # 止损价只能上移不能下移
-        prev_state = self._state.get(symbol)
-        if prev_state is not None:
-            prev_stop = prev_state[2]
-            stop_price = max(stop_price, prev_stop)
+        # P1整改：使用 (symbol, direction) 键获取前状态
+        key = self._state_key(symbol, StopDirection.LONG)
+        prev = self._state.get(key)
+        if prev is not None:
+            # 止损价只能上移不能下移
+            stop_price = max(stop_price, prev.stop_price)
+            trailing_high = max(highest_since_entry, prev.trailing_high)
+        else:
+            trailing_high = max(highest_since_entry, entry_price)
 
         # 更新状态
-        trailing_high = max(highest_since_entry, prev_state[0] if prev_state else entry_price)
-        self._state[symbol] = (trailing_high, prev_state[1] if prev_state else entry_price, stop_price)
+        self._state[key] = _TrailingState(
+            trailing_high=trailing_high,
+            trailing_low=0.0,
+            stop_price=stop_price,
+            entry_price=entry_price,
+        )
 
         triggered = current_price <= stop_price
 
@@ -148,14 +190,23 @@ class TrailingStop:
         else:
             stop_price = lowest_since_entry + trail_dist
 
-        # 止损价只能下移不能上移
-        prev_state = self._state.get(symbol)
-        if prev_state is not None:
-            prev_stop = prev_state[2]
-            stop_price = min(stop_price, prev_stop)
+        # P1整改：使用 (symbol, direction) 键获取前状态
+        key = self._state_key(symbol, StopDirection.SHORT)
+        prev = self._state.get(key)
+        if prev is not None:
+            # 止损价只能下移不能上移
+            stop_price = min(stop_price, prev.stop_price)
+            trailing_low = min(lowest_since_entry, prev.trailing_low)
+        else:
+            trailing_low = min(lowest_since_entry, entry_price)
 
-        trailing_low = min(lowest_since_entry, prev_state[1] if prev_state else entry_price)
-        self._state[symbol] = (prev_state[0] if prev_state else entry_price, trailing_low, stop_price)
+        # 更新状态
+        self._state[key] = _TrailingState(
+            trailing_high=0.0,
+            trailing_low=trailing_low,
+            stop_price=stop_price,
+            entry_price=entry_price,
+        )
 
         triggered = current_price >= stop_price
 
@@ -169,9 +220,19 @@ class TrailingStop:
         )
 
     def clear(self, symbol: str) -> None:
-        """清除品种的追踪状态。"""
-        self._state.pop(symbol, None)
+        """清除品种的所有方向追踪状态。"""
+        keys_to_remove = [k for k in self._state if k[0] == symbol]
+        for k in keys_to_remove:
+            self._state.pop(k, None)
+
+    def clear_direction(self, symbol: str, direction: StopDirection) -> None:
+        """清除品种指定方向的追踪状态。"""
+        self._state.pop(self._state_key(symbol, direction), None)
 
     def reset(self) -> None:
         """重置所有状态。"""
         self._state.clear()
+
+    def get_state(self, symbol: str, direction: StopDirection) -> Optional[_TrailingState]:
+        """查询品种指定方向的追踪状态（调试用）。"""
+        return self._state.get(self._state_key(symbol, direction))

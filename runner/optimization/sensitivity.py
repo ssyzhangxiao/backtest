@@ -92,7 +92,7 @@ def print_optimization_suggestions(
 
     logger.info("\n  方式1（推荐）: 通过 StrategyLibrary.update_default_params() 运行时更新")
     logger.info("    示例代码:")
-    logger.info("      from core.strategy_registry import StrategyLibrary")
+    logger.info("      from core.config.strategy_profiles import StrategyLibrary")
     logger.info("      lib = StrategyLibrary()")
     for sname, params in best_params_all.items():
         logger.info(f"      lib.update_default_params('{sname}', {params})")

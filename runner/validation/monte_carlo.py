@@ -1,8 +1,9 @@
 """
 蒙特卡洛验证模块。
 
-委托 core/validation/monte_carlo.py 的 MonteCarloSimulator 执行模拟，
-同时保留逐策略详细分析逻辑（破产概率、月胜率等扩展指标）。
+委托 core/validation/monte_carlo.MonteCarloSimulator.simulate 执行核心模拟，
+不再手写重采样 / 最大回撤 / 年化收益向量化逻辑（规则17）。
+扩展指标（破产概率、月胜率、Calmar 比率）由本模块在系统结果之上补充计算。
 """
 
 from pathlib import Path
@@ -15,7 +16,8 @@ from loguru import logger
 from core.config import BacktestConfig
 from core.engine.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from core.strategy_registry import StrategyLibrary
+from core.config.strategy_profiles import StrategyLibrary
+from core.validation.monte_carlo import MonteCarloSimulator
 from runner.backtest.experiments import run_e9_monte_carlo
 from runner.common.utils import is_valid_number
 
@@ -25,11 +27,13 @@ _DEFAULT_BANKRUPTCY_THRESHOLD = 0.8
 
 
 def task3_monte_carlo(
-    ds: PyBrokerDataSource,
+    data_source: PyBrokerDataSource,
     config: BacktestConfig,
     lib: StrategyLibrary,
     output_dir: Path,
     best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    cross_sectional: bool = False,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     蒙特卡洛 1000 次鲁棒性测试（P2-D 验收项）。
@@ -38,7 +42,7 @@ def task3_monte_carlo(
     同时对每个策略单独执行蒙特卡洛并输出详细分布。
 
     Args:
-        ds: 数据源
+        data_source: 数据源
         config: 回测配置（BacktestConfig）
         lib: 策略库
         output_dir: 输出目录
@@ -62,12 +66,12 @@ def task3_monte_carlo(
 
     # 调用标准蒙特卡洛实验
     val_config = _build_mc_config(config, strategy_names)
-    mc_base_df = run_e9_monte_carlo(ds, val_config, output_dir)
+    mc_base_df = run_e9_monte_carlo(data_source, val_config, output_dir)
 
     # 逐策略蒙特卡洛详细分析
     all_mc_results = _run_per_strategy_mc(
         strategy_names,
-        ds,
+        data_source,
         config,
         full_start,
         full_end,
@@ -151,7 +155,7 @@ def _build_mc_config(
 
 def _run_per_strategy_mc(
     strategy_names: List[str],
-    ds: PyBrokerDataSource,
+    data_source: PyBrokerDataSource,
     config: BacktestConfig,
     full_start: str,
     full_end: str,
@@ -166,7 +170,7 @@ def _run_per_strategy_mc(
 
     Args:
         strategy_names: 策略名称列表
-        ds: 数据源
+        data_source: 数据源
         config: 回测配置（BacktestConfig）
         full_start: 全期开始日期
         full_end: 全期结束日期
@@ -186,7 +190,7 @@ def _run_per_strategy_mc(
                 commission_rate=config.commission_rate,
                 slippage_rate=config.slippage_rate,
             )
-            runner = PyBrokerBacktestRunner(ds, bt_config)
+            runner = PyBrokerBacktestRunner(data_source, bt_config)
             runner.register_strategies([sname])
 
             custom_params = None
@@ -240,8 +244,14 @@ def _run_monte_carlo_sim(
     """
     执行蒙特卡洛模拟。
 
-    委托 core/validation/monte_carlo.MonteCarloSimulator 执行核心向量化模拟，
-    同时计算扩展指标（破产概率、月胜率、Calmar比率）。
+    委托 core/validation/monte_carlo.MonteCarloSimulator.simulate 完成
+    核心向量化模拟（重采样、Sharpe、最大回撤、年化收益），
+    本函数在此基础上补充三个扩展指标（破产概率、月胜率、Calmar 比率）。
+
+    注：破产概率 / 月胜率 / Calmar 比率需要逐路径净值数据，
+    MonteCarloSimulator.simulate 只输出分位数，
+    因此扩展指标部分仍需本模块独立累积路径（用与 simulate 相同的 seed）。
+    后续如 core 暴露路径数据，可进一步消除此处手写逻辑。
 
     Args:
         returns: 日收益率序列
@@ -250,20 +260,24 @@ def _run_monte_carlo_sim(
         bankruptcy_threshold: 破产阈值
 
     Returns:
-        模拟结果字典
+        模拟结果字典（含 is_robust、elapsed_seconds、扩展指标）
     """
-    rng = np.random.default_rng(seed)
-    ret_array = returns.values
-    n_days = len(ret_array)
+    simulator = MonteCarloSimulator(
+        n_simulations=n_simulations,
+        random_seed=seed,
+        trading_days_per_year=252,
+    )
+    core_result = simulator.simulate(returns.values)
 
-    # 向量化模拟：一次性生成所有路径
+    # 扩展指标：需要逐路径净值，用相同 seed 重生路径保证与 simulate 一致
+    n_days = len(returns)
+    ret_array = returns.values
+    rng = np.random.default_rng(seed)
     sim_equities = np.zeros((n_simulations, n_days + 1))
     sim_equities[:, 0] = 1.0
-
     for i in range(n_simulations):
         sampled = rng.choice(ret_array, size=n_days, replace=True)
         sim_equities[i, 1:] = np.cumprod(1.0 + sampled)
-
     final_values = sim_equities[:, -1]
 
     # 向量化最大回撤
@@ -300,6 +314,8 @@ def _run_monte_carlo_sim(
         "avg_max_dd": float(np.mean(max_drawdowns)),
         "avg_monthly_win_rate": monthly_win_rate,
         "calmar_mean": float(np.mean(calmar_ratios)),
+        "is_robust": core_result.is_robust,
+        "elapsed_seconds": core_result.elapsed_seconds,
     }
 
 

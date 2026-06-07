@@ -6,18 +6,15 @@
 """
 
 from itertools import product
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig
 from core.engine.backtest_runner import PyBrokerBacktestRunner
-from core.strategy_registry import StrategyLibrary
-from runner.common.utils import safe_float
-
-_MAX_OPT_PROGRESS = 5
+from core.config.strategy_profiles import StrategyLibrary
+from runner.optimization import copy_config
 
 
 def grid_search_single_strategy(
@@ -60,8 +57,8 @@ def grid_search_single_strategy(
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
 
-        # roll_yield 策略的入场/出场阈值合法性检查
-        if strategy_name == "roll_yield" and params.get("entry_threshold", 0) <= params.get("exit_threshold", 999):
+        # 期限结构策略的入场/出场阈值合法性检查
+        if strategy_name == "term_structure" and params.get("entry_threshold", 0) <= params.get("exit_threshold", 999):
             continue
 
         try:
@@ -139,12 +136,8 @@ def param_stability_test(
     base_sharpe = None
     sharpe_changes = []
 
-    # 构建回测用的 BacktestConfig
-    bt_config = BacktestConfig(
-        initial_cash=config.initial_cash,
-        commission_rate=config.commission_rate,
-        slippage_rate=config.slippage_rate,
-    )
+    # 构建回测用的 BacktestConfig（完整复制所有字段）
+    bt_config = copy_config(config)
 
     try:
         runner = PyBrokerBacktestRunner(ds, bt_config)
@@ -169,7 +162,7 @@ def param_stability_test(
             try:
                 test_params = dict(params)
                 test_params[key] = orig + delta * direction
-                if strategy_name == "roll_yield":
+                if strategy_name == "term_structure":
                     if test_params.get("entry_threshold", 0) <= test_params.get("exit_threshold", 999):
                         continue
 

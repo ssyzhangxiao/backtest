@@ -7,7 +7,7 @@
 
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -87,11 +87,15 @@ def save_csv(df: pd.DataFrame, path: Path) -> None:
         logger.error(f"保存CSV失败 {path}: {e}")
 
 
+from utils.metrics import MetricsCalculator
+
+
 def format_metrics(m: dict) -> dict:
     """
     格式化绩效指标：四舍五入 float，NaN/Inf 改为 'N/A'。
 
-    委托 utils/metrics.MetricsCalculator，此处保留轻量版本用于简单场景。
+    委托 utils.metrics.MetricsCalculator.format_metrics（规则17）。
+    此处保留为薄包装以兼容现有 import 路径。
 
     Args:
         m: 原始指标字典
@@ -99,15 +103,7 @@ def format_metrics(m: dict) -> dict:
     Returns:
         格式化后的指标字典
     """
-    result: dict = {}
-    for k, v in m.items():
-        if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
-            result[k] = "N/A"
-        elif isinstance(v, float):
-            result[k] = round(v, 4)
-        else:
-            result[k] = v
-    return result
+    return MetricsCalculator.format_metrics(m)
 
 
 def sanitize_filename(name: str) -> str:
@@ -143,8 +139,15 @@ def save_equity_curve(
         equity: 净值曲线 DataFrame
         output_dir: 输出目录
         prefix: 文件名前缀
+
+    Raises:
+        TypeError: equity 不是 pd.DataFrame 实例
     """
-    if equity is None or equity.empty:
+    if not isinstance(equity, pd.DataFrame):
+        raise TypeError(
+            f"save_equity_curve 要求 pd.DataFrame，实际收到 {type(equity).__name__}"
+        )
+    if equity.empty:
         logger.warning(f"净值曲线为空，跳过保存: {prefix}")
         return
     save_csv(equity, output_dir / f"{prefix}.csv")

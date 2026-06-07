@@ -1,17 +1,12 @@
-"""回测运行页面模块。"""
+"""
+P0 整改（2026-06-07）：core/strategies/ 已整体删除，
+create_strategy 接口已废弃。本页面改为调用 Pipeline 编排器
+（规则17、规则18 公共入口），具体回测由 run_backtest.py + core.engine.backtest_runner
+公共系统执行。
+"""
 import logging
 
 import streamlit as st
-import pandas as pd
-from pybroker import Strategy, StrategyConfig
-from pybroker.common import FeeMode
-
-from core.rollover import RolloverManager, RolloverMode
-from core.engine.strategy_executor import RiskManagerAdapter
-from core.portfolio import PortfolioManager
-from core.strategies import create_strategy
-
-from utils.session_state import register_pybroker_columns
 
 logger = logging.getLogger("backtest_app")
 
@@ -21,80 +16,39 @@ def run_backtest(config: dict):
         st.error("请先加载数据！")
         return None
 
-    register_pybroker_columns()
-
-    df = st.session_state.pybroker_df.copy()
-
-    if df.empty:
-        st.error("数据为空！请检查数据加载和筛选设置。")
-        return None
-
-    symbols = df["symbol"].unique().tolist()
-    date_min = str(df["date"].min().date()) if "date" in df.columns else "N/A"
-    date_max = str(df["date"].max().date()) if "date" in df.columns else "N/A"
-    filter_status = "✅ 已筛选" if st.session_state.get("data_filtered") else "⚠️ 全量数据"
-    logger.info(
-        "回测数据确认 | %s | 品种数=%d | 日期=%s~%s | 行数=%d",
-        filter_status, len(symbols), date_min, date_max, len(df),
-    )
-    st.info(f"当前回测范围：{len(symbols)} 个品种 | {date_min} ~ {date_max} | {filter_status} | {len(df):,} 行")
-
-    initial_cash = st.session_state.get("initial_cash", 1_000_000)
-    commission = config.get("commission", 0.0001)
-    slippage = config.get("slippage", 0.0002)
-    fee_amount = commission + slippage
-    pybroker_config = StrategyConfig(
-        initial_cash=initial_cash,
-        fee_mode=FeeMode.ORDER_PERCENT,
-        fee_amount=fee_amount,
-    )
-
-    start_date = str(df["date"].min().date())
-    end_date = str(df["date"].max().date())
-    strategy = Strategy(df, start_date, end_date, pybroker_config)
-
-    risk_manager = RiskManagerAdapter(**config["risk_params"])
-
+    # P0 整改：所有回测执行均委托 Pipeline.run_backtest() 公共入口
+    # 不再在 UI 层直接构造 PyBroker Strategy / create_strategy
     try:
-        rollover_mode = RolloverMode(config["rollover_mode"])
-    except ValueError:
-        st.error(f"无效展期模式: {config['rollover_mode']}")
-        return None
+        from runner.pipeline import Pipeline
 
-    rollover_manager = RolloverManager(mode=rollover_mode, **config["rollover_params"])
+        pipe = Pipeline(config.get("config_path", "config.yaml"))
 
-    if config.get("dynamic_weighting") and len(config["selected_strategies"]) > 1:
-        portfolio_mgr = PortfolioManager(total_allocation=config.get("total_allocation", 0.8))
-        for strat_name in config["selected_strategies"]:
-            params = config["strategy_params"].get(strat_name, {})
-            strat_instance = create_strategy(strat_name, **params)
-            portfolio_mgr.add_strategy(strat_name, strat_instance)
-        portfolio_mgr.register_all_to_pybroker(
-            pybroker_strategy=strategy,
-            symbols=symbols,
-            rollover_wrapper=rollover_manager.create_rollover_exec_fn,
+        # 应用 UI 侧参数到 Pipeline（统一 with_config 热更新接口）
+        pipe.with_config(
+            initial_cash=config.get("initial_cash", 1_000_000),
+            commission=config.get("commission", 0.0001),
+            slippage=config.get("slippage", 0.0002),
+            rollover_mode=config.get("rollover_mode", "auto"),
+            selected_strategies=config.get("selected_strategies", []),
+            strategy_params=config.get("strategy_params", {}),
+            risk_params=config.get("risk_params", {}),
+            dynamic_weighting=config.get("dynamic_weighting", False),
+            total_allocation=config.get("total_allocation", 0.8),
         )
-    else:
-        for strat_name in config["selected_strategies"]:
-            params = config["strategy_params"].get(strat_name, {})
-            strat_instance = create_strategy(strat_name, **params)
 
-            indicators = []
-            if hasattr(strat_instance, "register_indicators"):
-                indicators = strat_instance.register_indicators()
+        # 应用已优化参数（如有）
+        applied_params = st.session_state.get("applied_optimized_params")
+        if applied_params:
+            pipe.with_config(optimized_params=applied_params)
 
-            exec_fn = strat_instance.execute
-            exec_fn = rollover_manager.create_rollover_exec_fn(exec_fn)
-            exec_fn = risk_manager.wrap_with_risk_control(exec_fn)
+        with st.spinner("回测执行中（Pipeline.run_backtest）..."):
+            result = pipe.run_backtest()
 
-            strategy.add_execution(fn=exec_fn, symbols=symbols, indicators=indicators)
-
-    try:
-        result = strategy.backtest()
+        st.success("回测完成！")
         return result
+
     except Exception as e:
         st.error(f"回测执行失败: {e}")
         import traceback
-
         st.code(traceback.format_exc())
         return None

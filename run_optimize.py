@@ -3,13 +3,17 @@
 参数优化薄壳入口。
 
 委托 runner.Pipeline 编排器执行参数优化流程。
-原 run_parameter_optimization.py 保留兼容。
+支持多策略横截面打分模式优化。
 
 用法:
   python run_optimize.py                     # 全部策略优化
-  python run_optimize.py --strategy ts_mom   # 单策略优化
+  python run_optimize.py --strategy trend    # 单策略优化
+  python run_optimize.py --cross-sectional   # 多策略横截面打分模式优化
   python run_optimize.py --skip-grid         # 跳过网格搜索
-  python run_optimize.py --factor-screen     # 先筛选AlphaFutures24因子再优化
+  python run_optimize.py --factor-review     # 先因子复核再优化
+  python run_optimize.py --factor-screen     # 先筛选AlphaFutures因子再优化
+  python run_optimize.py --symbol SHFE.RB    # 仅优化指定品种
+  python run_optimize.py --verbose           # DEBUG 级别日志
 """
 
 import argparse
@@ -17,6 +21,12 @@ import sys
 from datetime import datetime
 
 from loguru import logger
+
+
+def _set_log_level(verbose: bool) -> None:
+    """根据 --verbose 设置 loguru 输出级别（与 run_backtest.py 一致）。"""
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG" if verbose else "INFO")
 
 
 def main() -> None:
@@ -30,7 +40,11 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default=None,
-        help="指定策略名称，默认全部策略",
+        help="指定策略名称（trend/term_structure/mean_reversion/vol_breakout/composite_resonance/cross_sectional），默认全部策略",
+    )
+    parser.add_argument(
+        "--cross-sectional", action="store_true",
+        help="启用多策略横截面打分模式优化",
     )
     parser.add_argument(
         "--skip-grid",
@@ -38,15 +52,33 @@ def main() -> None:
         help="跳过网格搜索，仅执行窗口搜索和OOS选择",
     )
     parser.add_argument(
+        "--factor-review",
+        action="store_true",
+        help="先运行因子6项复核，再执行优化",
+    )
+    parser.add_argument(
         "--factor-screen",
         action="store_true",
         help="先运行AlphaFutures24因子筛选（IC/IR测试），再执行优化",
     )
+    parser.add_argument(
+        "--symbol", default=None,
+        help="指定品种代码（如 SHFE.RB），仅优化该品种",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="启用 DEBUG 级别日志，便于排错（默认 INFO）",
+    )
 
     args = parser.parse_args()
 
+    # 应用日志级别
+    _set_log_level(args.verbose)
+
     print("=" * 80)
     print("  参数优化 — Pipeline 版")
+    if args.cross_sectional:
+        print("  模式: 多策略横截面打分")
     print(f"  开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
 
@@ -55,14 +87,24 @@ def main() -> None:
 
         pipe = Pipeline(args.config).load_data()
 
+        # 因子6项复核
+        if args.factor_review:
+            logger.info("执行因子6项复核...")
+            pipe.review_factors()
+
         # AlphaFutures24 因子筛选
         if args.factor_screen:
             logger.info("执行AlphaFutures24因子筛选...")
             pipe.screen_factors()
 
+        # 确定优化策略
+        strategy = args.strategy
+        if args.cross_sectional and not strategy:
+            strategy = "cross_sectional"
+
         # 构建优化任务列表
         tasks = ["window", "oos"] if args.skip_grid else ["grid", "window", "oos"]
-        pipe.optimize(strategy=args.strategy, tasks=tasks)
+        pipe.optimize(strategy=strategy, tasks=tasks, symbol=args.symbol)
 
         # 输出优化结果
         opt_results = pipe.results.get("optimization", {})

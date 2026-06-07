@@ -1,6 +1,6 @@
 """侧边栏策略配置模块。"""
 import streamlit as st
-from core.strategies import STRATEGY_REGISTRY
+from core.config.strategy_profiles import STRATEGY_NAMES
 
 
 def render_strategy_config() -> dict:
@@ -9,91 +9,100 @@ def render_strategy_config() -> dict:
 
     selected_strategies = st.sidebar.multiselect(
         "选择策略",
-        list(STRATEGY_REGISTRY.keys()),
-        default=["ts_momentum"],
+        list(STRATEGY_NAMES),
+        default=["trend"],
         format_func=lambda x: {
-            "ts_momentum": "📈 时序动量",
-            "roll_yield": "🔄 展期收益",
-            "alpha019": "📉 Alpha019",
-            "alpha032": "📊 Alpha032",
+            "trend": "📈 趋势策略",
+            "term_structure": "🔄 期限结构",
+            "mean_reversion": "📉 均值回归",
+            "vol_breakout": "📊 波动率突破",
+            "composite_resonance": "🎯 复合共振",
         }.get(x, x),
     )
 
     strategy_params = {}
 
-    if "ts_momentum" in selected_strategies:
-        st.sidebar.subheader("时序动量参数")
+    if "trend" in selected_strategies:
+        st.sidebar.subheader("趋势策略参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "ts_momentum"
-        strategy_params["ts_momentum"] = {
+        _is_applied = st.session_state.get("optimized_strategy") == "trend"
+        strategy_params["trend"] = {
             "window": st.sidebar.slider(
                 "动量窗口", 5, 60,
                 int(_applied.get("window", 20)) if _is_applied else 20,
-                key="tsm_window"
+                key="trend_window"
             ),
             "position_size": st.sidebar.slider(
-                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="tsm_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="trend_pos"
             ),
         }
 
-    if "roll_yield" in selected_strategies:
-        st.sidebar.subheader("展期收益参数")
+    if "term_structure" in selected_strategies:
+        st.sidebar.subheader("期限结构参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "roll_yield"
-        strategy_params["roll_yield"] = {
+        _is_applied = st.session_state.get("optimized_strategy") == "term_structure"
+        strategy_params["term_structure"] = {
             "lookback": st.sidebar.slider(
                 "回看窗口", 5, 60,
                 int(_applied.get("lookback", 20)) if _is_applied else 20,
-                key="ry_lookback"
+                key="ts_lookback"
             ),
             "entry_threshold": st.sidebar.slider(
-                "入场阈值(%)", 0.5, 5.0, 2.0, 0.5, key="ry_entry"
+                "入场阈值(%)", 0.5, 5.0, 2.0, 0.5, key="ts_entry"
             ),
             "exit_threshold": st.sidebar.slider(
-                "出场阈值(%)", 0.1, 2.0, 0.5, 0.1, key="ry_exit"
+                "出场阈值(%)", 0.1, 2.0, 0.5, 0.1, key="ts_exit"
             ),
             "position_size": st.sidebar.slider(
-                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="ry_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="ts_pos"
             ),
         }
 
-    if "alpha019" in selected_strategies:
-        st.sidebar.subheader("Alpha019参数")
+    if "mean_reversion" in selected_strategies:
+        st.sidebar.subheader("均值回归参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "alpha019"
-        strategy_params["alpha019"] = {
+        _is_applied = st.session_state.get("optimized_strategy") == "mean_reversion"
+        strategy_params["mean_reversion"] = {
             "short_window": st.sidebar.slider(
                 "短期窗口", 3, 20,
                 int(_applied.get("short_window", 7)) if _is_applied else 7,
-                key="a019_short"
+                key="mr_short"
             ),
             "long_window": st.sidebar.slider(
                 "长期窗口", 60, 360,
                 int(_applied.get("long_window", 250)) if _is_applied else 250,
-                key="a019_long"
+                key="mr_long"
             ),
             "position_size": st.sidebar.slider(
-                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="a019_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="mr_pos"
             ),
         }
 
-    if "alpha032" in selected_strategies:
-        st.sidebar.subheader("Alpha032参数")
+    if "vol_breakout" in selected_strategies:
+        st.sidebar.subheader("波动率突破参数")
         _applied = st.session_state.get("applied_optimized_params", {})
-        _is_applied = st.session_state.get("optimized_strategy") == "alpha032"
-        strategy_params["alpha032"] = {
+        _is_applied = st.session_state.get("optimized_strategy") == "vol_breakout"
+        strategy_params["vol_breakout"] = {
             "ma_window": st.sidebar.slider(
                 "均线窗口", 3, 20,
                 int(_applied.get("ma_window", 7)) if _is_applied else 7,
-                key="a032_ma"
+                key="vb_ma"
             ),
             "corr_window": st.sidebar.slider(
                 "相关性窗口", 60, 360,
                 int(_applied.get("corr_window", 230)) if _is_applied else 230,
-                key="a032_corr"
+                key="vb_corr"
             ),
             "position_size": st.sidebar.slider(
-                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="a032_pos"
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="vb_pos"
+            ),
+        }
+
+    if "composite_resonance" in selected_strategies:
+        st.sidebar.subheader("复合共振参数")
+        strategy_params["composite_resonance"] = {
+            "position_size": st.sidebar.slider(
+                "仓位比例", 0.05, 0.5, 0.2, 0.05, key="cr_pos"
             ),
         }
 

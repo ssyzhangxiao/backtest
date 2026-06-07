@@ -25,6 +25,10 @@ from runner.common.utils import (
     handle_backtest_errors,
 )
 from runner.common.config_utils import get_missing_data_method
+from runner.common.portfolio_utils import (
+    calculate_risk_parity_fusion,
+    calculate_risk_parity_weights,
+)
 from runner.strategy.selector import get_strategy_names
 
 
@@ -56,21 +60,35 @@ _CONFIG_KEY_FULL_END = "full_end_date"
 # ============================================
 
 
-def _run_equal_weight(
-    data_source: PyBrokerDataSource, config: Dict[str, Any], output_dir: Path
+def _run_weighted_fusion(
+    data_source: PyBrokerDataSource,
+    config: Dict[str, Any],
+    output_dir: Path,
+    use_dynamic: bool,
 ) -> pd.DataFrame:
     """
-    执行等权融合实验（E2）。
+    等权/动态加权融合回测通用实现（E2/E3 共享）。
+
+    P1 整改（2026-06-07）：合并原 _run_equal_weight 与 _run_dynamic_weight，
+    差异仅在 use_execute_fusion 与 regime_history 保存。
 
     Args:
         data_source: 数据源
         config: 配置字典
         output_dir: 输出目录
+        use_dynamic: True=E3 动态加权；False=E2 等权
 
     Returns:
         汇总指标 DataFrame
     """
-    logger.info("执行等权融合实验")
+    if use_dynamic:
+        label = "E3_动态权重"
+        prefix = "e3"
+    else:
+        label = "E2_等权融合"
+        prefix = "e2"
+    logger.info(f"执行{label}实验")
+
     symbols: List[str] = config.get(_CONFIG_KEY_SYMBOLS, [])
     strategy_names = get_strategy_names(config)
     bt_cfg = config[_CONFIG_KEY_BACKTEST]
@@ -83,8 +101,8 @@ def _run_equal_weight(
             runner,
             bt_cfg[_CONFIG_KEY_FULL_START],
             bt_cfg[_CONFIG_KEY_FULL_END],
-            f"E2_{sym}",
-            use_execute_fusion=False,
+            f"{label[:2]}_{sym}",
+            use_execute_fusion=use_dynamic,
         )
 
         if result is None:
@@ -92,7 +110,7 @@ def _run_equal_weight(
                 {
                     "symbol": sym,
                     "strategy": None,
-                    "experiment": "E2_等权融合",
+                    "experiment": label,
                     "error": "回测失败",
                 }
             )
@@ -102,14 +120,14 @@ def _run_equal_weight(
         result_row: Dict[str, Any] = {
             "symbol": sym,
             "strategy": None,
-            "experiment": "E2_等权融合",
+            "experiment": label,
             "error": None,
         }
         result_row.update(m)
         all_results.append(result_row)
 
         logger.info(
-            f"  等权融合: return={m.get('total_return_pct', 'N/A')} "
+            f"  {label}: return={m.get('total_return_pct', 'N/A')} "
             f"sharpe={m.get('sharpe', 'N/A')}"
         )
 
@@ -118,182 +136,33 @@ def _run_equal_weight(
             save_equity_curve(
                 eq.assign(symbol=sym),
                 output_dir,
-                f"e2_equity_{sanitize_filename(sym.replace('.', '_'))}",
+                f"{prefix}_equity_{sanitize_filename(sym.replace('.', '_'))}",
             )
 
         if result.switch_log is not None and not result.switch_log.empty:
             save_csv(
                 result.switch_log.assign(symbol=sym),
                 output_dir
-                / f"e2_switch_log_{sanitize_filename(sym.replace('.', '_'))}.csv",
+                / f"{prefix}_switch_log_{sanitize_filename(sym.replace('.', '_'))}.csv",
             )
             logger.info(f"  {sym}: 已保存 {len(result.switch_log)} 条调仓决策记录")
 
-    df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
-    save_csv(df, output_dir / "e2_equal_weight_metrics.csv")
-    return df
-
-
-def _run_dynamic_weight(
-    data_source: PyBrokerDataSource, config: Dict[str, Any], output_dir: Path
-) -> pd.DataFrame:
-    """
-    执行动态加权融合实验（E3）。
-
-    Args:
-        data_source: 数据源
-        config: 配置字典
-        output_dir: 输出目录
-
-    Returns:
-        汇总指标 DataFrame
-    """
-    logger.info("执行动态加权融合实验")
-    symbols: List[str] = config.get(_CONFIG_KEY_SYMBOLS, [])
-    strategy_names = get_strategy_names(config)
-    bt_cfg = config[_CONFIG_KEY_BACKTEST]
-    all_results: List[Dict[str, Any]] = []
-
-    for sym in symbols:
-        logger.info(f"  品种: {sym}")
-        runner = get_pybroker_runner(data_source, config, strategies=strategy_names)
-        result = safe_run_backtest(
-            runner,
-            bt_cfg[_CONFIG_KEY_FULL_START],
-            bt_cfg[_CONFIG_KEY_FULL_END],
-            f"E3_{sym}",
-            use_execute_fusion=True,
-        )
-
-        if result is None:
-            all_results.append(
-                {
-                    "symbol": sym,
-                    "strategy": None,
-                    "experiment": "E3_动态权重",
-                    "error": "回测失败",
-                }
-            )
-            continue
-
-        m = format_metrics(result.metrics)
-        result_row: Dict[str, Any] = {
-            "symbol": sym,
-            "strategy": None,
-            "experiment": "E3_动态权重",
-            "error": None,
-        }
-        result_row.update(m)
-        all_results.append(result_row)
-
-        logger.info(
-            f"  动态权重: return={m.get('total_return_pct', 'N/A')} "
-            f"sharpe={m.get('sharpe', 'N/A')}"
-        )
-
-        eq = result.equity_curve
-        if eq is not None and not eq.empty:
-            save_equity_curve(
-                eq.assign(symbol=sym),
-                output_dir,
-                f"e3_equity_{sanitize_filename(sym.replace('.', '_'))}",
-            )
-
-        if result.switch_log is not None and not result.switch_log.empty:
-            save_csv(
-                result.switch_log.assign(symbol=sym),
-                output_dir
-                / f"e3_switch_log_{sanitize_filename(sym.replace('.', '_'))}.csv",
-            )
-            logger.info(f"  {sym}: 已保存 {len(result.switch_log)} 条调仓决策记录")
-
-        if result.regime_history is not None and not result.regime_history.empty:
+        # 仅动态加权（E3）保存 regime_history
+        if use_dynamic and result.regime_history is not None and not result.regime_history.empty:
             save_csv(
                 result.regime_history,
                 output_dir
-                / f"e3_regime_{sanitize_filename(sym.replace('.', '_'))}.csv",
+                / f"{prefix}_regime_{sanitize_filename(sym.replace('.', '_'))}.csv",
             )
 
     df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
-    save_csv(df, output_dir / "e3_dynamic_weight_metrics.csv")
+    save_csv(df, output_dir / f"{prefix}_{label.split('_')[1]}_weight_metrics.csv")
     return df
 
 
 # ============================================
 # E4：风险平价融合
 # ============================================
-
-
-class WeightedSignalFusion:
-    """加权信号融合类"""
-
-    def __init__(self, weights: Dict[str, float]):
-        self.weights = weights
-
-    def combine(self, signals: Dict[str, float]) -> float:
-        """
-        融合信号。
-
-        Args:
-            signals: 策略信号字典
-
-        Returns:
-            融合后的信号
-        """
-        total = 0.0
-        weight_sum = 0.0
-        for name, signal in signals.items():
-            weight = self.weights.get(name, 0.0)
-            total += signal * weight
-            weight_sum += weight
-        return total / weight_sum if weight_sum > 0 else 0.0
-
-
-def _calculate_rolling_volatility(returns: pd.Series, window: int = 60) -> pd.Series:
-    """
-    计算滚动波动率。
-
-    Args:
-        returns: 收益率序列
-        window: 滚动窗口
-
-    Returns:
-        滚动波动率序列
-    """
-    return returns.rolling(window=window, min_periods=window // 2).std()
-
-
-def _calculate_risk_parity_weights(
-    strategy_returns: Dict[str, pd.Series], window: int = 60
-) -> pd.DataFrame:
-    """
-    计算风险平价权重。
-
-    Args:
-        strategy_returns: 策略收益率字典
-        window: 滚动窗口
-
-    Returns:
-        权重 DataFrame
-    """
-    # 合并所有策略收益率
-    df_returns = pd.DataFrame(strategy_returns)
-    df_returns = df_returns.fillna(0.0)
-
-    # 计算滚动波动率
-    df_vol = pd.DataFrame(index=df_returns.index)
-    for name in df_returns.columns:
-        df_vol[name] = _calculate_rolling_volatility(df_returns[name], window)
-
-    # 填充初始波动率（使用 ffill 和 bfill 替代 deprecated 的 method）
-    df_vol = df_vol.ffill().bfill()
-
-    # 向量化计算风险平价权重（更高效，避免逐行赋值问题）
-    inv_vol = 1.0 / (df_vol + 1e-10)
-    sum_inv_vol = inv_vol.sum(axis=1)
-    df_weights = inv_vol.div(sum_inv_vol, axis=0)
-
-    return df_weights
 
 
 @handle_backtest_errors(return_value=pd.DataFrame())
@@ -557,7 +426,7 @@ def run_e3_dynamic_weight(
         汇总指标 DataFrame
     """
     logger.info("E3：环境动态加权回测（execute 融合模式）")
-    return _run_dynamic_weight(data_source, config, output_dir)
+    return _run_weighted_fusion(data_source, config, output_dir, use_dynamic=True)
 
 
 @handle_backtest_errors(return_value=None)

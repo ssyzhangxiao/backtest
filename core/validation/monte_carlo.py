@@ -10,6 +10,8 @@
 
 v2: 向量化优化，使用NumPy矩阵运算替代Python for循环，
     1000次模拟从~2s降至~50ms，内存占用可控。
+P2 整改（2026-06-07）：
+    - trading_days_per_year 参数化（默认 252，支持加密货币 365 等）
 """
 
 from dataclasses import dataclass, field
@@ -22,6 +24,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEFAULT_N_SIMULATIONS = 1000
+DEFAULT_TRADING_DAYS_PER_YEAR = 252
 
 QUANTILES = [0.05, 0.25, 0.50, 0.75, 0.95]
 
@@ -37,6 +40,8 @@ class MonteCarloResult:
     is_robust: bool = False
     # 性能数据（向量化优化后新增）
     elapsed_seconds: float = 0.0
+    # P2 整改：记录交易日参数，便于不同市场对比
+    trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR
 
     def summary(self) -> str:
         """返回模拟摘要。"""
@@ -49,7 +54,8 @@ class MonteCarloResult:
 
         robust_str = "✅稳健" if self.is_robust else "⚠️不稳健"
         return (
-            f"蒙特卡洛{self.n_simulations}次({self.elapsed_seconds:.3f}s) | "
+            f"蒙特卡洛{self.n_simulations}次({self.elapsed_seconds:.3f}s, "
+            f"年化基数={self.trading_days_per_year}) | "
             f"Sharpe: [{sharpe_5:.2f}, {sharpe_50:.2f}, {sharpe_95:.2f}] | "
             f"MDD@95%: {dd_95:.1%} | "
             f"Return: [{ret_5:.1%}, {ret_95:.1%}] | "
@@ -70,7 +76,7 @@ class MonteCarloSimulator:
       - 避免Python for循环，利用NumPy底层C加速
 
     用法:
-        mc = MonteCarloSimulator(n_simulations=1000)
+        mc = MonteCarloSimulator(n_simulations=1000, trading_days_per_year=365)
         result = mc.simulate(daily_returns)
         if result.is_robust:
             print("策略稳健")
@@ -80,17 +86,26 @@ class MonteCarloSimulator:
         self,
         n_simulations: int = DEFAULT_N_SIMULATIONS,
         random_seed: Optional[int] = None,
+        trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
     ):
+        if trading_days_per_year <= 0:
+            raise ValueError(
+                f"trading_days_per_year 必须为正数，实际: {trading_days_per_year}"
+            )
         self.n_simulations = n_simulations
         self.random_seed = random_seed
+        self.trading_days_per_year = int(trading_days_per_year)
 
     @staticmethod
-    def _vectorized_sharpe(samples: np.ndarray) -> np.ndarray:
+    def _vectorized_sharpe(
+        samples: np.ndarray, trading_days_per_year: int
+    ) -> np.ndarray:
         """
-        向量化计算年化Sharpe。
+        向量化计算年化Sharpe（P2 整改：年化基数参数化）。
 
         Args:
             samples: (n_sim, n_days) 重采样矩阵
+            trading_days_per_year: 年化交易日数（252=A股, 365=加密货币）
 
         Returns:
             (n_sim,) Sharpe数组
@@ -100,7 +115,7 @@ class MonteCarloSimulator:
         # 避免除零：std<1e-10时Sharpe=0
         valid = std_r > 1e-10
         sharpes = np.zeros(samples.shape[0])
-        sharpes[valid] = mean_r[valid] / std_r[valid] * np.sqrt(252)
+        sharpes[valid] = mean_r[valid] / std_r[valid] * np.sqrt(trading_days_per_year)
         return sharpes
 
     @staticmethod
@@ -125,19 +140,22 @@ class MonteCarloSimulator:
         return max_dd
 
     @staticmethod
-    def _vectorized_annual_return(samples: np.ndarray) -> np.ndarray:
+    def _vectorized_annual_return(
+        samples: np.ndarray, trading_days_per_year: int
+    ) -> np.ndarray:
         """
-        向量化计算年化收益。
+        向量化计算年化收益（P2 整改：年化基数参数化）。
 
         Args:
             samples: (n_sim, n_days) 重采样矩阵
+            trading_days_per_year: 年化交易日数
 
         Returns:
             (n_sim,) 年化收益数组
         """
         # 累积收益
         total = np.prod(1 + samples, axis=1)
-        n_years = samples.shape[1] / 252
+        n_years = samples.shape[1] / trading_days_per_year
         # 避免除零和负数开方
         annual_ret = np.where(
             n_years > 1e-6,
@@ -161,7 +179,11 @@ class MonteCarloSimulator:
 
         if n < 20:
             logger.warning("收益率序列过短，蒙特卡洛模拟结果不可靠")
-            return MonteCarloResult(n_simulations=0, is_robust=False)
+            return MonteCarloResult(
+                n_simulations=0,
+                is_robust=False,
+                trading_days_per_year=self.trading_days_per_year,
+            )
 
         t0 = time.perf_counter()
 
@@ -172,10 +194,12 @@ class MonteCarloSimulator:
         indices = rng.integers(0, n, size=(self.n_simulations, n))
         samples = ret[indices]
 
-        # 向量化计算三个指标
-        sharpes = self._vectorized_sharpe(samples)
+        # 向量化计算三个指标（P2 整改：传入年化基数）
+        sharpes = self._vectorized_sharpe(samples, self.trading_days_per_year)
         max_dds = self._vectorized_max_drawdown(samples)
-        annual_rets = self._vectorized_annual_return(samples)
+        annual_rets = self._vectorized_annual_return(
+            samples, self.trading_days_per_year
+        )
 
         elapsed = time.perf_counter() - t0
 
@@ -194,6 +218,7 @@ class MonteCarloSimulator:
             annual_return_quantiles=ret_q,
             is_robust=is_robust,
             elapsed_seconds=elapsed,
+            trading_days_per_year=self.trading_days_per_year,
         )
 
         logger.info(result.summary())
@@ -213,10 +238,15 @@ class MonteCarloSimulator:
         n = len(ret)
 
         if n < 20:
-            return MonteCarloResult(n_simulations=0, is_robust=False)
+            return MonteCarloResult(
+                n_simulations=0,
+                is_robust=False,
+                trading_days_per_year=self.trading_days_per_year,
+            )
 
         t0 = time.perf_counter()
         rng = np.random.default_rng(self.random_seed)
+        tdp = self.trading_days_per_year  # P2 整改
 
         sharpes = np.zeros(self.n_simulations)
         max_dds = np.zeros(self.n_simulations)
@@ -228,7 +258,7 @@ class MonteCarloSimulator:
             mean_r = np.mean(sample)
             std_r = np.std(sample)
             if std_r > 1e-10:
-                sharpes[i] = mean_r / std_r * np.sqrt(252)
+                sharpes[i] = mean_r / std_r * np.sqrt(tdp)
             # 最大回撤
             equity = np.cumprod(1 + sample)
             peak = np.maximum.accumulate(equity)
@@ -236,7 +266,7 @@ class MonteCarloSimulator:
             max_dds[i] = -np.min(dd)
             # 年化收益
             total = np.prod(1 + sample)
-            n_years = n / 252
+            n_years = n / tdp
             if n_years > 1e-6:
                 annual_rets[i] = total ** (1 / n_years) - 1
 
@@ -253,4 +283,5 @@ class MonteCarloSimulator:
             annual_return_quantiles=ret_q,
             is_robust=sharpe_q.get(0.05, 0.0) > 0,
             elapsed_seconds=elapsed,
+            trading_days_per_year=tdp,
         )

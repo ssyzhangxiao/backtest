@@ -6,7 +6,7 @@
 """
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from loguru import logger
@@ -19,17 +19,24 @@ from core.engine.factor_decay import (
     DecayStatus,
 )
 from core.engine.pybroker_data_source import PyBrokerDataSource
+from core.config.strategy_profiles import StrategyLibrary
 from runner.common.utils import is_valid_number, save_csv
-from core.factors.basic_factors import compute_factor_scores_from_ohlcv
+from core.factors.alpha_futures.sub_strategy_aggregator import (
+    compute_sub_strategy_scores_from_ohlcv,
+)
 
-_DEFAULT_FACTOR_NAMES = ["ts_momentum", "roll_yield", "alpha019", "alpha032"]
+_DEFAULT_FACTOR_NAMES = ["trend", "term_structure", "mean_reversion", "vol_breakout", "composite_resonance"]
 
 
 def factor_ic_stability_analysis(
-    ds: PyBrokerDataSource,
+    data_source: PyBrokerDataSource,
     config: BacktestConfig,
+    lib: StrategyLibrary,
     output_dir: Path,
+    best_params: Optional[Dict[str, Any]] = None,
+    cross_sectional: bool = False,
     factor_names: List[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     因子IC稳定性分析：对比训练期和验证期的因子IC变化。
@@ -41,7 +48,7 @@ def factor_ic_stability_analysis(
     不重复实现IC计算逻辑。
 
     Args:
-        ds: 数据源
+        data_source: 数据源
         config: 回测配置（BacktestConfig）
         output_dir: 输出目录
         factor_names: 待分析因子名称列表
@@ -122,7 +129,7 @@ def factor_ic_stability_analysis(
 
 def _analyze_single_symbol(
     symbol: str,
-    ds: PyBrokerDataSource,
+    data_source: PyBrokerDataSource,
     factor_names: List[str],
     ic_config: RollingICConfig,
     decay_config: FactorDecayConfig,
@@ -136,7 +143,7 @@ def _analyze_single_symbol(
 
     Args:
         symbol: 品种代码
-        ds: 数据源
+        data_source: 数据源
         factor_names: 因子名称列表
         ic_config: 滚动IC配置
         decay_config: 衰减监控配置
@@ -148,13 +155,13 @@ def _analyze_single_symbol(
     Returns:
         {rows: [...], details: {...}} 或 None
     """
-    sym_df = ds.query(train_start, test_end, symbols=[symbol])
+    sym_df = data_source.query(train_start, test_end, symbols=[symbol])
     if sym_df is None or len(sym_df) < 60:
         logger.warning(f"    {symbol}: 数据不足，跳过")
         return None
 
-    # 委托公共因子得分计算
-    scored = compute_factor_scores_from_ohlcv(sym_df)
+    # 委托公共因子得分计算（P0 整改：使用新因子引擎聚合，废弃 basic_factors）
+    scored = compute_sub_strategy_scores_from_ohlcv(sym_df)
 
     # 全期滚动IC + 衰减监控
     ic_engine = RollingICWeightEngine(ic_config)

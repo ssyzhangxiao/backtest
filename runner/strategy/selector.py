@@ -1,7 +1,7 @@
 """
 策略选择模块。
 
-委托 core/strategy_registry.py 的 StrategyLibrary，
+委托 core/config/strategy_profiles.py 的 StrategyLibrary，
 消除重复#4、#5。
 """
 
@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from loguru import logger
 
-from core.strategy_registry import StrategyLibrary, StrategyProfile
+from core.config.strategy_profiles import StrategyLibrary
 
 
 def get_strategy_names(config: Dict[str, Any]) -> List[str]:
@@ -28,7 +28,7 @@ def get_strategy_names(config: Dict[str, Any]) -> List[str]:
     names = [s["name"] for s in strategies if isinstance(s, dict) and "name" in s]
     if not names:
         lib = StrategyLibrary()
-        names = [p.name for p in lib.list_all() if not p.disabled]
+        names = [p.name for p in lib.list_all()]
     return names
 
 

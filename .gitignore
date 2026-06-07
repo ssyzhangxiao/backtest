@@ -17,9 +17,6 @@ __pycache__/
 # 日志文件
 *.log
 
-# 测试输出
-test_*.py
-
 # 回测结果目录
 backtest_results_*/
 new_strategy_results_*/

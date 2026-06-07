@@ -1,9 +1,9 @@
 """
 多格式导出模块。
 
-提供 CSV、PDF 等格式的结果导出功能。
-CSV 导出委托 runner/common/utils.save_csv，
-PDF 导出使用 matplotlib 的 PdfPages。
+提供 CSV 导出能力（委托 runner/common/utils.save_csv）。
+PDF 导出已下线：原计划基于 matplotlib.backends.backend_pdf.PdfPages，
+当前需求未触发，由 runner/report/html_report.py 提供 HTML 报告代替。
 """
 
 from pathlib import Path

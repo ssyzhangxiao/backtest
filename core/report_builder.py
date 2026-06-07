@@ -17,7 +17,7 @@
     generate_report(
         output_dir="output_backtest_pybroker",
         strategies_data={
-            "E1_ts_momentum": {"metrics": {...}, "equity": [...], "dates": [...]},
+            "E1_trend": {"metrics": {...}, "equity": [...], "dates": [...]},
             ...
         },
     )
@@ -35,8 +35,54 @@ import pandas as pd
 
 from loguru import logger
 
+from core.config.strategy_profiles import StrategyLibrary, STRATEGY_NAMES
+
 TRADING_DAYS_PER_YEAR = 252
 RISK_FREE_RATE = 0.02
+
+
+# ---------------------------------------------------------------------------
+# 策略标签：P2 优化 - 改为动态从 StrategyLibrary 读取
+# ---------------------------------------------------------------------------
+def _short_label_from_description(description: str) -> str:
+    """
+    从 StrategyProfile.description 中提取简短标签。
+
+    description 形如 "趋势策略。基于动量和均线趋势跟踪。"，
+    取第一个 "。" 之前的部分作为简短标签。
+    """
+    if not description:
+        return ""
+    sep = description.find("。")
+    return description[:sep] if sep > 0 else description
+
+
+def _build_strategy_label(name: str, library: StrategyLibrary) -> str:
+    """
+    动态构造策略标签。
+
+    规则：
+      1. 若 name 形如 "E1_trend" / "E4_Switching" 等实验名，按下划线拆分，
+         用后半段的子策略档案 description 构造标签。
+      2. 若 name 本身就是档案名（trend / term_structure ...），直接用档案 description。
+      3. 若 name 命中登记的中文名（如"策略切换"），保留原值。
+      4. 兜底返回 name 本身。
+    """
+    if not name:
+        return ""
+
+    sub = name.split("_", 1)[1] if "_" in name else name
+    profile = library.get_profile(sub)
+    if profile is not None:
+        return _short_label_from_description(profile.description)
+
+    return name
+
+
+def _get_strategy_label(name: str, library: Optional[StrategyLibrary] = None) -> str:
+    """对外的薄封装：缺省构造一个 StrategyLibrary。"""
+    lib = library or StrategyLibrary()
+    return _build_strategy_label(name, lib)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -337,19 +383,20 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
 
     # 有效的策略实验名称（只有这些才出现在报告中）
     valid_experiments = {
-        "E1_ts_momentum",
-        "E1_roll_yield",
-        "E1_alpha019",
-        "E1_alpha032",
+        "E1_trend",
+        "E1_term_structure",
+        "E1_mean_reversion",
+        "E1_vol_breakout",
+        "E1_composite_resonance",
         "E2_Fusion",
     }
 
     # 策略键映射表
     strategy_map = {
-        "ts_momentum": "E1_ts_momentum",
-        "roll_yield": "E1_roll_yield",
-        "alpha019": "E1_alpha019",
-        "alpha032": "E1_alpha032",
+        "trend": "E1_trend",
+        "term_structure": "E1_term_structure",
+        "mean_reversion": "E1_mean_reversion",
+        "vol_breakout": "E1_vol_breakout",
         "fusion": "E2_Fusion",
     }
 
@@ -499,10 +546,10 @@ def collect_from_validation(output_dir: Path) -> Dict[str, Any]:
     data_source = "validation"
 
     strategy_map = {
-        "ts_momentum": "E1_ts_momentum",
-        "roll_yield": "E1_roll_yield",
-        "alpha019": "E1_alpha019",
-        "alpha032": "E1_alpha032",
+        "trend": "E1_trend",
+        "term_structure": "E1_term_structure",
+        "mean_reversion": "E1_mean_reversion",
+        "vol_breakout": "E1_vol_breakout",
     }
 
     # 从 task1_grid_*.csv 读取策略指标，选择夏普最高的行
@@ -759,14 +806,19 @@ def generate_report(
     total_years = total_days / TRADING_DAYS_PER_YEAR if total_days > 0 else 0
 
     # ── 为每个策略计算衍生指标 ──
-    strategy_labels = {
-        "E1_ts_momentum": "E1 时序动量",
-        "E1_roll_yield": "E1 展期收益",
-        "E1_alpha019": "E1 Alpha019",
-        "E1_alpha032": "E1 Alpha032",
-        "E2_Fusion": "E2 融合策略",
-        "E4_Switching": "E4 策略切换",
-    }
+    # P2 优化：策略标签改为动态从 StrategyLibrary 构造，避免硬编码 5 子策略名
+    strategy_label_lib = StrategyLibrary()
+
+    def _label_for(name: str) -> str:
+        # 解析实验前缀（E1 / E2 / E4 / E9 ...），保留前缀 + 动态中文标签
+        if "_" in name:
+            prefix, sub = name.split("_", 1)
+            profile = strategy_label_lib.get_profile(sub)
+            if profile is not None:
+                short = _short_label_from_description(profile.description)
+                if short:
+                    return f"{prefix} {short}"
+        return _get_strategy_label(name, strategy_label_lib)
 
     for name, sd in strategies_data.items():
         metrics = sd.get("metrics", {})
@@ -784,7 +836,7 @@ def generate_report(
         metrics["ann_return"] = ann_ret
         metrics["calmar"] = calmar
         metrics["total_years"] = years_exp
-        sd["label"] = strategy_labels.get(name, name)
+        sd["label"] = _label_for(name)
 
     # ── 选最佳策略（正收益优先） ──
     best_exp = strategy_names[0]
@@ -1081,20 +1133,19 @@ def generate_report(
                 }
 
     # 所有策略样本内/外绩效对比表
-    strategy_labels_map = {
-        "E1_ts_momentum": "时序动量",
-        "E1_roll_yield": "展期收益",
-        "E1_alpha019": "Alpha019",
-        "E1_alpha032": "Alpha032",
-        "E2_Fusion": "融合策略",
-        "E4_Switching": "策略切换",
-    }
+    # P2 优化：标签动态从 StrategyLibrary 构造
+    strategy_label_lib_2 = StrategyLibrary()
     strategy_oos_rows = ""
     for name in strategy_names:
         sd = strategies_data[name]
         eq = sd.get("equity", [])
         dates = sd.get("dates", [])
-        label = strategy_labels_map.get(name, name)
+        if "_" in name:
+            _, sub = name.split("_", 1)
+            profile = strategy_label_lib_2.get_profile(sub)
+            label = _short_label_from_description(profile.description) if profile else name
+        else:
+            label = _get_strategy_label(name, strategy_label_lib_2)
         if not eq or not dates or not in_sample_dates or not out_sample_dates:
             continue
         for split_label, split_eq, split_dates in [
@@ -1734,8 +1785,8 @@ _HTML_TEMPLATE = (
 <script>
 var CHART_FONT = "-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif";
 var COLORS = {
-    ts_momentum: '#3b82f6', roll_yield: '#f59e0b', alpha019: '#8b5cf6',
-    alpha032: '#06b6d4',
+    trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+    vol_breakout: '#06b6d4',
     fusion: '#10b981', switching: '#ef4444'
 };
 var reportData = """
@@ -1781,16 +1832,16 @@ var reportData = """
     var keys = Object.keys(ad);
     if (!keys.length) return;
     var DD_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var DD_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var DD_BG = {
-        E1_ts_momentum: 'rgba(59,130,246,0.08)', E1_roll_yield: 'rgba(245,158,11,0.08)',
-        E1_alpha019: 'rgba(139,92,246,0.08)', E1_alpha032: 'rgba(6,182,212,0.08)',
+        E1_trend: 'rgba(59,130,246,0.08)', E1_term_structure: 'rgba(245,158,11,0.08)',
+        E1_mean_reversion: 'rgba(139,92,246,0.08)', E1_vol_breakout: 'rgba(6,182,212,0.08)',
         E2_Fusion: 'rgba(16,185,129,0.08)', E4_Switching: 'rgba(239,68,68,0.08)'
     };
     var firstKey = keys[0];
@@ -1937,12 +1988,12 @@ var reportData = """
     var keys = Object.keys(ahm);
     if (!keys.length) return;
     var HM_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var HM_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
     var container = document.getElementById('allHeatmapsContainer');
@@ -2027,12 +2078,12 @@ var reportData = """
     var keys = Object.keys(ars);
     if (!keys.length) return;
     var RS_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var RS_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var firstKey = keys[0];
     var labels = ars[firstKey].dates;
@@ -2070,16 +2121,16 @@ var reportData = """
     var keys = Object.keys(ard);
     if (!keys.length) return;
     var RDD_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var RDD_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var RDD_BG = {
-        E1_ts_momentum: 'rgba(59,130,246,0.06)', E1_roll_yield: 'rgba(245,158,11,0.06)',
-        E1_alpha019: 'rgba(139,92,246,0.06)', E1_alpha032: 'rgba(6,182,212,0.06)',
+        E1_trend: 'rgba(59,130,246,0.06)', E1_term_structure: 'rgba(245,158,11,0.06)',
+        E1_mean_reversion: 'rgba(139,92,246,0.06)', E1_vol_breakout: 'rgba(6,182,212,0.06)',
         E2_Fusion: 'rgba(16,185,129,0.06)', E4_Switching: 'rgba(239,68,68,0.06)'
     };
     var firstKey = keys[0];
@@ -2147,12 +2198,12 @@ var reportData = """
     var keys = Object.keys(aie);
     if (!keys.length) return;
     var IS_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var IS_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var firstKey = keys[0];
     var labels = aie[firstKey].dates;
@@ -2189,12 +2240,12 @@ var reportData = """
     var keys = Object.keys(aoe);
     if (!keys.length) return;
     var OS_COLORS = {
-        E1_ts_momentum: '#3b82f6', E1_roll_yield: '#f59e0b', E1_alpha019: '#8b5cf6',
-        E1_alpha032: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
+        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
     };
     var OS_LABELS = {
-        E1_ts_momentum: '时序动量', E1_roll_yield: '展期收益', E1_alpha019: 'Alpha019',
-        E1_alpha032: 'Alpha032', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
+        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
     };
     var firstKey = keys[0];
     var labels = aoe[firstKey].dates;
@@ -2694,14 +2745,14 @@ _FALLBACK_EVALUATION_HTML = """
         </div>
         <div class="eval-problem">
             <div class="eval-problem-title">2. 最大回撤偏高，风控不足</div>
-            <p>回撤最小的 E1_ts_momentum 也有较大回撤，而 E2_Fusion 回撤更高。在长达10年的回测中，这样的回撤幅度对实盘资金管理是很大考验。</p>
+            <p>回撤最小的 E1_trend 也有较大回撤，而 E2_Fusion 回撤更高。在长达10年的回测中，这样的回撤幅度对实盘资金管理是很大考验。</p>
         </div>
         <div class="eval-problem">
             <div class="eval-problem-title">3. 收益率与交易频率不匹配</div>
             <ul>
-                <li><strong>E1_alpha019</strong> 收益较高，但回撤也较高，年化收益率需关注。</li>
-                <li><strong>E1_ts_momentum</strong> 和 <strong>E4_Switching</strong> 交易频率较高，换手频繁但收益需优化。</li>
-                <li><strong>E1_roll_yield</strong> 收益偏低，需调整参数。</li>
+                <li><strong>E1_mean_reversion</strong> 收益较高，但回撤也较高，年化收益率需关注。</li>
+                <li><strong>E1_trend</strong> 和 <strong>E4_Switching</strong> 交易频率较高，换手频繁但收益需优化。</li>
+                <li><strong>E1_term_structure</strong> 收益偏低，需调整参数。</li>
             </ul>
         </div>
         <div class="eval-problem">

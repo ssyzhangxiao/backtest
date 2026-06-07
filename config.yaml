@@ -1,315 +1,127 @@
-# =============================================================================
-# 量化回测系统配置文件（CTA + Alpha101 多因子策略）
-# =============================================================================
-# 所有参数统一在此配置，代码中通过 BacktestConfig.from_yaml() 读取
-
-# =============================================================================
-# 回测参数
-# =============================================================================
 backtest:
   initial_capital: 1000000
-  commission: 0.0001            # 双边手续费率（降低交易成本）
-  slippage: 0.0001              # 滑点费率（降低滑点假设）
-  full_start_date: "2016-01-01"
-  full_end_date: "2025-05-31"
-  in_sample_end_date: "2023-01-01"
-  out_sample_start_date: "2023-01-01"
-  rebalance_freq: 5             # 调仓周期：每5个交易日
-  stop_loss_pct: 0.03           # 单品种止损-3%强制平仓（收紧止损）
-  max_position_pct: 0.15        # 单品种最大仓位占比（降低集中度）
-  max_total_position_pct: 0.60  # 总仓位上限
-  min_position_pct: 0.0         # 最小仓位比例
-  entry_threshold: 0.07         # 开仓阈值（当前最佳参数）
-  top_n_symbols: 4              # 品种轮动：4个品种
-  use_cross_section: true       # 启用横截面标准化
-  use_rank_score: true          # 启用排名叠加
-  use_trend_filter: true        # 启用趋势过滤（仅顺趋势交易）
-  use_rolling_ic: true          # 启用滚动IC动态权重
-
-# =============================================================================
-# 品种配置（扩展至10+品种，覆盖黑色、化工、有色、农产品、能源）
-# =============================================================================
+  commission: 0.0001
+  slippage: 0.0001
+  full_start_date: '2016-01-01'
+  full_end_date: '2025-05-31'
+  in_sample_end_date: '2023-01-01'
+  out_sample_start_date: '2023-01-01'
+  rebalance_freq: 5
+  stop_loss_pct: 0.03
+  max_position_pct: 0.15
+  max_total_position_pct: 0.6
+  min_position_pct: 0.0
+  entry_threshold: 0.07
+  use_cross_section: true
+  use_rank_score: true
+  use_trend_filter: true
+  use_rolling_ic: true
+  use_sub_strategies: true
+  use_new_factors: true
+  signal_merge_method: equal_weight
 symbols:
-  - "SHFE.RB"   # 螺纹钢
-  - "DCE.M"     # 豆粕
-  - "CZCE.MA"   # 甲醇（郑商所）
-  - "CZCE.TA"   # PTA
-  - "SHFE.AU"   # 黄金
-  - "DCE.I"     # 铁矿石
-  - "INE.SC"   # 原油
-  - "SHFE.CU"   # 铜
-  - "DCE.J"     # 焦炭
-  - "CZCE.CF"   # 棉花
-
-# =============================================================================
-# 因子权重配置（平衡型：CTA侧50% + Alpha101侧50%，内部等权）
-# =============================================================================
+- SHFE.RB
+- DCE.M
+- CZCE.MA
+- CZCE.TA
+- SHFE.AU
+- DCE.I
+- INE.SC
+- SHFE.CU
+- DCE.J
+- CZCE.CF
 factor_weights:
-  ts_momentum: 0.30
-  # roll_yield: 0.15
-  # alpha019: 0.15
-  alpha032: 0.70
-
-# =============================================================================
-# 策略参数配置（4个因子策略：CTA侧 + Alpha101侧）
-# =============================================================================
+  trend: 0.20
+  term_structure: 0.20
+  mean_reversion: 0.20
+  vol_breakout: 0.20
+  composite_resonance: 0.20
 strategies:
-  - name: "ts_momentum"
-    params:
-      window: 20
-      position_size: 0.2
-
-  # - name: "roll_yield"
-  #   params:
-  #     lookback: 20
-  #     entry_threshold: 2.0
-  #     exit_threshold: 0.5
-  #     position_size: 0.2
-
-  # - name: "alpha019"
-  #   params:
-  #     short_window: 5
-  #     long_window: 120
-  #     position_size: 0.2
-
-  - name: "alpha032"
-    params:
-      ma_window: 5
-      corr_window: 120
-      position_size: 0.2
-
-# =============================================================================
-# 市场环境检测配置（仅辅助分析，不参与策略决策）
-# =============================================================================
-market_regime:
-  volatility_window: 20
-  adx_period: 14
-  trend_threshold: 25
-  vol_high_percentile: 0.7
-  vol_low_percentile: 0.3
-
-# =============================================================================
-# 风控配置
-# =============================================================================
+- name: trend
+  params: {}
+- name: term_structure
+  params: {}
+- name: mean_reversion
+  params: {}
+- name: vol_breakout
+  params: {}
+- name: composite_resonance
+  params: {}
+- name: cross_sectional
+  params:
+    entry_threshold: 0.02
+    top_n: 3
+    rebalance_days: 1
 risk_management:
-  stop_loss_pct: 0.03           # 单品种止损-3%强制平仓（收紧止损）
-  max_drawdown_pct: 0.20        # 最大回撤-20%清盘（收紧）
-  position_limit_pct: 0.15      # 单品种保证金占比15%
-  total_position_limit: 0.8     # 总仓位80%
-  max_positions: 10             # 最大持仓品种数（扩展品种后增加）
-  commission_filter_pct: 0.0    # 手续费过滤：关闭（不再过滤低收益信号）
-  limit_up_down_protection: true # 涨跌停保护：触及不开新仓
-
-# =============================================================================
-# Walk-Forward配置
-# =============================================================================
+  stop_loss_pct: 0.03
+  max_drawdown_pct: 0.2
+  position_limit_pct: 0.15
+  total_position_limit: 0.8
+  max_positions: 10
+  commission_filter_pct: 0.0
+  limit_up_down_protection: true
 walk_forward:
-  train_bars: 252               # 训练窗口（交易日）
-  test_bars: 63                 # 测试窗口（交易日）
-  step_bars: 21                 # 步进长度（交易日）
+  train_bars: 252
+  test_bars: 63
+  step_bars: 21
   parallel: true
   max_workers: 4
-
-# =============================================================================
-# Bootstrap配置
-# =============================================================================
 bootstrap:
   n_samples: 5000
-  confidence_level: 0.90
-
-# =============================================================================
-# 蒙特卡洛模拟配置
-# =============================================================================
+  confidence_level: 0.9
 monte_carlo:
   n_simulations: 1000
   random_seed: 42
-
-# =============================================================================
-# 数据加载配置
-# =============================================================================
 data:
-  tqsdk_phone: "13600198250"
-  tqsdk_password: "lg123456789"
+  tqsdk_phone: ${TQSDK_PHONE}
+  tqsdk_password: ${TQSDK_PASSWORD}
   tqsdk_data_length: 4000
-  csv_data_dir: "./data"
+  csv_data_dir: ./data
   csv_backup_enabled: true
-
-# =============================================================================
-# 日志配置
-# =============================================================================
 logging:
-  log_dir: "./logs"
-  log_level: "INFO"
-  log_file: "backtest.log"
-  error_file: "error.log"
-  rotation: "10 MB"
-  retention: "30 days"
-
-# =============================================================================
-# 因子模块灰度开关与参数配置（规则9：IC驱动，先验证后集成）
-# =============================================================================
+  log_dir: ./logs
+  log_level: INFO
+  log_file: backtest.log
+  error_file: error.log
+  rotation: 10 MB
+  retention: 30 days
 factors:
-  enabled: false                # 灰度开关：默认关闭
-  ic_threshold: 0.03            # IC阈值
-  ir_threshold: 0.5             # IR阈值
-  max_correlation: 0.7          # 因子间最大相关性
-  target_avg_ic: 0.04           # 目标平均IC
-  target_max_correlation: 0.6   # 目标最大互相关
-
-  # 资金流因子配置
+  enabled: false
+  ic_threshold: 0.03
+  ir_threshold: 0.5
+  max_correlation: 0.7
+  target_avg_ic: 0.04
+  target_max_correlation: 0.6
   capital_flow:
-    enabled: false              # 灰度开关
-    oi_change_window: 10       # 持仓量变化窗口
-    flow_window: 20            # 资金流计算窗口
-    divergence_window: 20      # 价量背离窗口
-
-  # 期限结构因子配置
+    enabled: false
+    oi_change_window: 10
+    flow_window: 20
+    divergence_window: 20
   term_structure:
-    enabled: false              # 灰度开关
-    basis_window: 20           # 基差率窗口
-    roll_yield_smooth_window: 5 # 展期收益平滑窗口
-
-# =============================================================================
-# 自适应参数模块配置（规则10：切换频率受限，防止过拟合）
-# =============================================================================
-adaptive:
-  enabled: false                # 灰度开关：默认关闭
-
-  # 波动率监测配置
-  vol_monitor:
-    hv_windows: [20, 60, 120]   # 历史波动率窗口
-    atr_window: 14              # ATR窗口
-    low_percentile: 0.25        # 低波动率分位数阈值
-    high_percentile: 0.75       # 高波动率分位数阈值
-    min_switch_interval_days: 21 # regime最短切换间隔（约1个月）
-
-  # EMA自适应配置
-  ema_adapter:
-    base_window: 5              # 基准窗口
-    low_vol_window: 10          # 低波动率窗口
-    medium_vol_window: 5        # 中波动率窗口
-    high_vol_window: 3          # 高波动率窗口
-    max_step: 2                 # 单次最大调整步长
-
-  # ATR自适应配置
-  atr_adapter:
-    base_mult: 1.5              # 基准ATR倍数
-    low_vol_mult: 0.5           # 低波动率ATR倍数
-    medium_vol_mult: 1.5        # 中波动率ATR倍数
-    high_vol_mult: 3.0          # 高波动率ATR倍数
-
-  # 参数变更日志
-  param_logger:
-    log_path: "logs/param_changes.jsonl"
-
-# =============================================================================
-# 多时间框架模块配置（规则11：过滤优先，降逆势交易）
-# =============================================================================
-multi_tf:
-  enabled: false                # 灰度开关：默认关闭
-  weekly_weight: 0.6            # 周频权重
-  daily_weight: 0.4             # 日频权重
-  conflict_position_scale: 0.33 # 冲突时仓位比例
-
-  # 趋势判断配置
-  trend_filter:
-    adx_period: 14              # ADX周期
-    adx_threshold: 25.0         # ADX趋势阈值
-    ma_short: 5                 # 短期均线
-    ma_medium: 20               # 中期均线
-    ma_long: 60                 # 长期均线
-
-# =============================================================================
-# 动态仓位模块配置（规则12：调幅受限，预警触发）
-# =============================================================================
-position:
-  enabled: false                # 灰度开关：默认关闭
-
-  # 滚动Sharpe配置
-  rolling_sharpe:
-    window: "3M"                # 窗口类型：1M/3M/6M
-    risk_free_rate: 0.0         # 无风险利率
-
-  # 动态权重配置
-  dynamic_weight:
-    max_adjustment: 0.20        # 单次最大调整幅度
-    min_weight: 0.0             # 单策略最小权重
-    max_weight: 1.0             # 单策略最大权重
-
-  # 策略预警配置
-  strategy_guard:
-    sharpe_warning_threshold: 0.0    # Sharpe预警阈值
-    sharpe_danger_threshold: -0.5    # Sharpe危险阈值
-    consecutive_warning_days: 20     # 连续低Sharpe预警天数
-    consecutive_danger_days: 10      # 连续低Sharpe危险天数
-    drawdown_suspension_ratio: 1.5   # 回撤暂停倍数
-
-# =============================================================================
-# 止损优化模块配置（规则13：分层叠加，效果可量化）
-# =============================================================================
+    enabled: false
+    basis_window: 20
+    roll_yield_smooth_window: 5
 risk:
-  stop_optimization_enabled: false  # 灰度开关：默认关闭
-
-  # 追踪止损配置
+  stop_optimization_enabled: false
   trailing_stop:
-    mode: "pct"                 # 模式：pct（百分比）或 atr（ATR倍数）
-    trail_pct: 0.03             # 追踪百分比
-    atr_multiplier: 2.0         # ATR倍数
-
-  # 时间止损配置
+    mode: pct
+    trail_pct: 0.03
+    atr_multiplier: 2.0
   time_stop:
-    max_holding_days: 10        # 最大持仓天数（3~20）
-    target_return: 0.01         # 目标收益率
-
-  # 复合止损配置
+    max_holding_days: 10
+    target_return: 0.01
   composite_stop:
-    fixed_stop_pct: 0.05        # 固定止损百分比
-
-# =============================================================================
-# 品种选择模块配置（规则14：适配评分，动态进出）
-# =============================================================================
-instrument:
-  enabled: false                # 灰度开关：默认关闭
-
-  # 品种评估配置
-  evaluator:
-    volume_min: 10000           # 最低日均成交量
-    turnover_min: 100000000     # 最低日均成交额
-    hv_ideal_low: 0.10          # 理想波动率下限
-    hv_ideal_high: 0.30         # 理想波动率上限
-    adx_trend_threshold: 25.0   # ADX趋势阈值
-    cost_max_pct: 0.002         # 最大成本占比
-
-  # 适应度评分配置
-  fitness_scorer:
-    sharpe_weight: 0.3          # Sharpe权重
-    drawdown_weight: 0.25       # 最大回撤权重
-    win_rate_weight: 0.2        # 胜率权重
-    plr_weight: 0.15            # 盈亏比权重
-    calmar_weight: 0.1          # Calmar权重
-    min_trades: 10              # 最少交易次数
-
-# =============================================================================
-# 回测验证模块配置（规则15：多阶段验证，鲁棒性优先）
-# =============================================================================
+    fixed_stop_pct: 0.05
 validation:
-  enabled: false                # 灰度开关：默认关闭
-
-  # 蒙特卡洛配置
+  enabled: false
   monte_carlo:
-    n_simulations: 1000         # 模拟次数
-    random_seed: 42             # 随机种子
-
-  # 敏感性分析配置
+    n_simulations: 1000
+    random_seed: 42
   sensitivity:
-    perturbation: 0.20          # 扰动比例
-    high_sensitivity_threshold: 0.30  # 高敏感阈值
-
-# =============================================================================
-# 输出配置
-# =============================================================================
+    perturbation: 0.2
+    high_sensitivity_threshold: 0.3
 output:
-  output_dir: "./output_backtest_pybroker"
+  output_dir: ./output_backtest_pybroker
   generate_html: true
   generate_png: true
   chart_dpi: 300
