@@ -31,11 +31,11 @@ symbols:
 - DCE.J
 - CZCE.CF
 factor_weights:
-  trend: 0.20
-  term_structure: 0.20
-  mean_reversion: 0.20
-  vol_breakout: 0.20
-  composite_resonance: 0.20
+  trend: 0.2
+  term_structure: 0.2
+  mean_reversion: 0.2
+  vol_breakout: 0.2
+  composite_resonance: 0.2
 strategies:
 - name: trend
   params: {}
@@ -50,8 +50,8 @@ strategies:
 - name: cross_sectional
   params:
     entry_threshold: 0.02
-    top_n: 3
-    rebalance_days: 1
+    top_n: 3.0
+    rebalance_days: 1.0
 risk_management:
   stop_loss_pct: 0.03
   max_drawdown_pct: 0.2

@@ -64,3 +64,7 @@ skills-lock.json
 .trae/skills/sparc-refine/SKILL.md
 .trae/skills/unit-test-generator/SKILL.md
 .trae/skills/agent-refinement/SKILL.md
+results/cross_sectional_full/equity_curve.csv
+results/cross_sectional_full/metrics.json
+results/cross_sectional_full/trades.csv
+results/optimization/all_results.json
