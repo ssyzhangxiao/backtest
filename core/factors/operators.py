@@ -237,6 +237,48 @@ def clipping(arr: np.ndarray, lower: float, upper: float) -> np.ndarray:
     return np.clip(np.asarray(arr, dtype=float), lower, upper)
 
 
+def ema(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    指数移动平均（EMA）。
+
+    递归定义：EMA_t = (x_t - EMA_{t-1}) * k + EMA_{t-1}，其中 k = 2/(window+1)。
+    NaN 安全：遇到 NaN 输入跳过（保持前值），下一个非 NaN 重新初始化。
+    常用于因子时序平滑（半衰期 ≈ window/2）。
+
+    Args:
+        arr: 输入数组
+        window: 窗口（半衰期参考值，越大越平滑）
+
+    Returns:
+        EMA 平滑后的数组（首部可能含 NaN，未达到窗口时不输出有效值）
+    """
+    a = np.asarray(arr, dtype=float)
+    if window <= 0 or len(a) == 0:
+        return a.copy()
+    k = 2.0 / (window + 1)
+    out = np.full_like(a, np.nan, dtype=float)
+    prev = np.nan
+    for i in range(len(a)):
+        v = a[i]
+        if not np.isfinite(v):
+            out[i] = prev if np.isfinite(prev) else np.nan
+            continue
+        if not np.isfinite(prev):
+            # 用前 N 个非 NaN 均值初始化（warm-up）
+            j = i
+            cnt = 0
+            s = 0.0
+            while j >= 0 and cnt < window:
+                if np.isfinite(a[j]):
+                    s += a[j]
+                    cnt += 1
+                j -= 1
+            prev = s / cnt if cnt > 0 else v
+        prev = (v - prev) * k + prev
+        out[i] = prev
+    return out
+
+
 def sma_ema(arr: np.ndarray, n: int, m: int) -> np.ndarray:
     """
     EMA变体：SMA(x, n, m) = (x*m + prev_SMA*(n-m)) / n。

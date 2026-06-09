@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument(
         "--method", default="all",
         help="验证方法: train_test, monte_carlo, bootstrap, factor_ic, "
-             "factor_alpha24, factor_review, cross_sectional, all（默认: all）",
+             "factor_alpha24, factor_combo_ic, factor_review, cross_sectional, all（默认: all）",
     )
     parser.add_argument(
         "--cross-sectional", action="store_true",

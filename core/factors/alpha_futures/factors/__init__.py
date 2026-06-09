@@ -47,6 +47,9 @@ from .ts_01 import TS_01
 from .ts_02 import TS_02
 from .ts_03 import TS_03
 
+# 期限结构合成因子 TS_composite（TS_01/02/03 合并 + EMA 平滑）
+from .ts_composite import TS_composite
+
 __all__ = [
     "T_01", "T_02", "T_03", "T_04", "T_05",
     "R_01", "R_02", "R_03", "R_04", "R_05",
@@ -54,5 +57,5 @@ __all__ = [
     "M_01", "M_02", "M_03", "M_04", "M_05",
     "H_01", "H_02", "H_03", "H_04", "H_05",
     "CF_01", "CF_02", "CF_03",
-    "TS_01", "TS_02", "TS_03",
+    "TS_01", "TS_02", "TS_03", "TS_composite",
 ]

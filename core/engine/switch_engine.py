@@ -40,9 +40,9 @@ _logger = logging.getLogger(__name__)
 class RebalanceReason(Enum):
     """调仓原因。"""
 
-    SCHEDULED = "scheduled"           # 定期调仓
-    STOP_LOSS = "stop_loss"           # 止损触发
-    SCORE_REVERSAL = "score_reversal" # 得分反转
+    SCHEDULED = "scheduled"  # 定期调仓
+    STOP_LOSS = "stop_loss"  # 止损触发
+    SCORE_REVERSAL = "score_reversal"  # 得分反转
 
 
 @dataclass
@@ -53,7 +53,9 @@ class ScoringConfig:
     rebalance_days: int = 3
 
     # 因子权重（默认等权，统一从 config.DEFAULT_FACTOR_WEIGHTS 引用）
-    factor_weights: Dict[str, float] = field(default_factory=DEFAULT_FACTOR_WEIGHTS.copy)
+    factor_weights: Dict[str, float] = field(
+        default_factory=DEFAULT_FACTOR_WEIGHTS.copy
+    )
 
     # 横截面标准化开关
     use_cross_section: bool = True
@@ -78,8 +80,8 @@ class RebalanceDecision:
 
     timestamp: str
     symbol: str
-    factor_scores: Dict[str, float]       # 各因子得分
-    composite_score: float                 # 综合得分 [-1, 1]
+    factor_scores: Dict[str, float]  # 各因子得分
+    composite_score: float  # 综合得分 [-1, 1]
     reason: RebalanceReason
 
 
@@ -99,7 +101,9 @@ class FactorScoringEngine:
       5. 顶层将综合得分交给 PortfolioManager 分配权重
     """
 
-    def __init__(self, library: StrategyLibrary, config: Optional[ScoringConfig] = None):
+    def __init__(
+        self, library: StrategyLibrary, config: Optional[ScoringConfig] = None
+    ):
         self.library = library
         self.config = config or ScoringConfig()
         self._decision_log: List[RebalanceDecision] = []
@@ -112,8 +116,24 @@ class FactorScoringEngine:
         self._finalized_scores: Dict[str, Dict[str, float]] = {}
         # 排名叠加结果
         self._rank_scores: Dict[str, float] = {}
+        # 激活的子策略集合：None 表示全部 5 个；列表则只取列表内的
+        # 修复 register_strategies 失效 bug：runner 把 _registered_strategies
+        # 同步过来，extract_factor_scores 据此过滤 indicator_map
+        self._active_strategies: Optional[List[str]] = None
         # 当前横截面收集的调仓日期
         self._cross_section_date: Any = None
+
+    def set_active_strategies(self, strategies: Optional[List[str]]) -> None:
+        """
+        设置激活的子策略集合。
+
+        修复 register_strategies 失效 bug：runner 在 _run_pybroker 入口
+        把 self._registered_strategies 同步过来；为 None 时表示全 5 子策略。
+
+        Args:
+            strategies: 激活的子策略名列表；None/空表示全部
+        """
+        self._active_strategies = list(strategies) if strategies else None
 
     @property
     def decision_log(self) -> List[RebalanceDecision]:
@@ -178,6 +198,7 @@ class FactorScoringEngine:
         # 从 StrategyIndicatorRegistry 获取指标名→因子名映射
         try:
             from core.engine.strategy_indicators import StrategyIndicatorRegistry
+
             indicator_map = StrategyIndicatorRegistry.get_indicator_to_factor_map()
         except ImportError:
             # 模块加载失败时使用默认映射（仅作为兜底，不掩盖错误）
@@ -191,6 +212,14 @@ class FactorScoringEngine:
             }
 
         for indicator_name, factor_name in indicator_map.items():
+            # 修复 register_strategies 失效 bug：按 _active_strategies 过滤
+            # 未注册子策略的指标被跳过，executor 只看注册过的信号
+            # 双保险：strategy_params 存在时也用来推导 active set
+            active = self._active_strategies
+            if active is None and strategy_params:
+                active = list(strategy_params.keys())
+            if active is not None and factor_name not in active:
+                continue
             val = self.extract_indicator(ctx, indicator_name)
             if val is not None and np.isfinite(val):
                 # tanh压缩确保在 [-1, 1] 区间
@@ -212,6 +241,7 @@ class FactorScoringEngine:
             return False
 
         from datetime import date, datetime
+
         date_key = dt.date() if hasattr(dt, "date") else dt
 
         if self._last_rebalance_date is None:
@@ -221,7 +251,9 @@ class FactorScoringEngine:
         if isinstance(date_key, (date, datetime)):
             days_diff = (date_key - self._last_rebalance_date).days
         else:
-            days_diff = (pd.Timestamp(date_key) - pd.Timestamp(self._last_rebalance_date)).days
+            days_diff = (
+                pd.Timestamp(date_key) - pd.Timestamp(self._last_rebalance_date)
+            ).days
 
         return days_diff >= self.config.rebalance_days
 
@@ -235,6 +267,7 @@ class FactorScoringEngine:
         if dt is None:
             return
         from datetime import date, datetime
+
         date_key = dt.date() if hasattr(dt, "date") else dt
         if isinstance(date_key, (date, datetime, pd.Timestamp)):
             self._last_rebalance_date = date_key
@@ -350,6 +383,7 @@ class FactorScoringEngine:
         # P2-1 整改：横截面Z-Score标准化 — 委托给 FactorEvaluator
         if self.config.use_cross_section and len(scores_df) > 1:
             from core.factors.factor_evaluator import FactorEvaluator
+
             _evaluator = FactorEvaluator()
             for col in factor_names:
                 col_scores = scores_df[col].to_dict()
@@ -381,7 +415,9 @@ class FactorScoringEngine:
 
         _logger.debug(
             "finalize: %d 个品种, %d 个因子, rank_scores非空=%s",
-            len(scores_df), len(factor_names), bool(self._rank_scores),
+            len(scores_df),
+            len(factor_names),
+            bool(self._rank_scores),
         )
 
     def set_ic_weights(self, weights: Dict[str, float]) -> None:
@@ -430,4 +466,3 @@ class FactorScoringEngine:
             reason=reason,
         )
         self._decision_log.append(decision)
-

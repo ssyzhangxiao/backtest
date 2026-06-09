@@ -95,7 +95,7 @@ def factor_ic_stability_analysis(
         try:
             sym_result = _analyze_single_symbol(
                 symbol,
-                ds,
+                data_source,
                 factor_names,
                 ic_config,
                 decay_config,

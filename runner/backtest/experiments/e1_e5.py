@@ -96,7 +96,10 @@ def _run_weighted_fusion(
 
     for sym in symbols:
         logger.info(f"  品种: {sym}")
-        runner = get_pybroker_runner(data_source, config, strategies=strategy_names)
+        # 修复 per-symbol 隔离 bug：仅对当前品种做回测，不再用全 30 品种组合
+        runner = get_pybroker_runner(
+            data_source, config, strategies=strategy_names, target_symbols=[sym]
+        )
         result = safe_run_backtest(
             runner,
             bt_cfg[_CONFIG_KEY_FULL_START],
@@ -148,7 +151,11 @@ def _run_weighted_fusion(
             logger.info(f"  {sym}: 已保存 {len(result.switch_log)} 条调仓决策记录")
 
         # 仅动态加权（E3）保存 regime_history
-        if use_dynamic and result.regime_history is not None and not result.regime_history.empty:
+        if (
+            use_dynamic
+            and getattr(result, "regime_history", None) is not None
+            and not result.regime_history.empty
+        ):
             save_csv(
                 result.regime_history,
                 output_dir
@@ -156,7 +163,12 @@ def _run_weighted_fusion(
             )
 
     df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
-    save_csv(df, output_dir / f"{prefix}_{label.split('_')[1]}_weight_metrics.csv")
+    # filename 与历史一致（en 短码），不再用中文 label 段
+    save_csv(
+        df,
+        output_dir
+        / f"{prefix}_{('equal' if not use_dynamic else 'dynamic')}_weight_metrics.csv",
+    )
     return df
 
 
@@ -196,7 +208,10 @@ def run_e4_risk_parity(
         strategy_equities = {}
 
         for sname in strategy_names:
-            runner = get_pybroker_runner(data_source, config, strategies=[sname])
+            # 修复 per-symbol 隔离 bug：仅对当前品种做回测
+            runner = get_pybroker_runner(
+                data_source, config, strategies=[sname], target_symbols=[sym]
+            )
             result = safe_run_backtest(
                 runner,
                 bt_cfg[_CONFIG_KEY_FULL_START],
@@ -216,7 +231,7 @@ def run_e4_risk_parity(
             continue
 
         # 步骤2：计算风险平价权重
-        df_weights = _calculate_risk_parity_weights(strategy_returns, window=60)
+        df_weights = calculate_risk_parity_weights(strategy_returns, window=60)
         save_csv(
             df_weights,
             output_dir / f"e4_weights_{sanitize_filename(sym.replace('.', '_'))}.csv",
@@ -337,7 +352,10 @@ def run_e1_single_strategy_baselines(
     for sym in symbols:
         logger.info(f"  品种: {sym}")
         for sname in strategy_names:
-            runner = get_pybroker_runner(data_source, config, strategies=[sname])
+            # 修复 per-symbol 隔离 bug：仅对当前品种做回测
+            runner = get_pybroker_runner(
+                data_source, config, strategies=[sname], target_symbols=[sym]
+            )
             result = safe_run_backtest(
                 runner,
                 bt_cfg[_CONFIG_KEY_FULL_START],
@@ -403,7 +421,7 @@ def run_e2_equal_weight(
         汇总指标 DataFrame
     """
     logger.info("E2：等权信号融合回测")
-    return _run_equal_weight(data_source, config, output_dir)
+    return _run_weighted_fusion(data_source, config, output_dir, use_dynamic=False)
 
 
 @handle_backtest_errors(return_value=pd.DataFrame())
@@ -459,7 +477,10 @@ def run_e5_multi_symbol(
 
     for sym in symbols:
         logger.info(f"  品种: {sym}")
-        runner = get_pybroker_runner(data_source, config, strategies=strategy_names)
+        # 修复 per-symbol 隔离 bug：仅对当前品种做回测
+        runner = get_pybroker_runner(
+            data_source, config, strategies=strategy_names, target_symbols=[sym]
+        )
         result = safe_run_backtest(
             runner,
             bt_cfg[_CONFIG_KEY_FULL_START],

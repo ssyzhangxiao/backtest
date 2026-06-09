@@ -53,7 +53,7 @@ def factor_review_validation(
 
     for symbol in symbols:
         try:
-            ohlcv = data.query(
+            ohlcv = data_source.query(
                 config.train_start, config.test_end, symbols=[symbol]
             )
             if ohlcv is None or len(ohlcv) < 100:

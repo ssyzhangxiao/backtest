@@ -140,11 +140,15 @@ def run_e6_walkforward(
     bt_cfg = config["backtest"]
     wf_cfg = get_walkforward_config(config)
     strategy_names = get_strategy_names(config)
+    symbols: List[str] = config.get("symbols", [])
 
     all_wf_metrics: List[Dict[str, Any]] = []
     for sname in strategy_names:
         try:
-            runner = get_pybroker_runner(data_source, config, strategies=[sname])
+            # 修复 per-symbol 隔离 bug：传 target_symbols=全部品种（walkforward 内部不分品种）
+            runner = get_pybroker_runner(
+                data_source, config, strategies=[sname], target_symbols=symbols
+            )
             wf_result = runner.walkforward(
                 start_date=bt_cfg["full_start_date"],
                 end_date=bt_cfg["full_end_date"],
@@ -217,9 +221,9 @@ def run_e7_out_of_sample(
     for sym in symbols:
         logger.info(f"  品种: {sym}")
         try:
-            # 样本内回测
+            # 样本内回测（修复 per-symbol 隔离 bug：仅对当前品种做回测）
             runner_in = get_pybroker_runner(
-                data_source, config, strategies=strategy_names
+                data_source, config, strategies=strategy_names, target_symbols=[sym]
             )
             result_in = safe_run_backtest(
                 runner_in,
@@ -237,9 +241,9 @@ def run_e7_out_of_sample(
                     if eq_in is not None and not eq_in.empty:
                         save_equity_curve(eq_in, output_dir, "e7_equity_in_sample")
 
-            # 样本外回测
+            # 样本外回测（修复 per-symbol 隔离 bug：仅对当前品种做回测）
             runner_out = get_pybroker_runner(
-                data_source, config, strategies=strategy_names
+                data_source, config, strategies=strategy_names, target_symbols=[sym]
             )
             result_out = safe_run_backtest(
                 runner_out,

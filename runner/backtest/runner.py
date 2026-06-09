@@ -38,8 +38,12 @@ def build_backtest_config(config: Dict[str, Any]) -> BacktestConfig:
         commission_rate=bt_cfg.get("commission_rate", bt_cfg.get("commission", 0.0001)),
         slippage_rate=bt_cfg.get("slippage_rate", bt_cfg.get("slippage", 0.0001)),
         stop_loss_pct=risk_cfg.get("stop_loss_pct", bt_cfg.get("stop_loss_pct", 0.03)),
-        max_position_pct=risk_cfg.get("position_limit_pct", bt_cfg.get("max_position_pct", 0.15)),
-        max_total_position_pct=risk_cfg.get("total_position_limit", bt_cfg.get("max_total_position_pct", 0.6)),
+        max_position_pct=risk_cfg.get(
+            "position_limit_pct", bt_cfg.get("max_position_pct", 0.15)
+        ),
+        max_total_position_pct=risk_cfg.get(
+            "total_position_limit", bt_cfg.get("max_total_position_pct", 0.6)
+        ),
         in_sample_end=bt_cfg.get("in_sample_end_date"),
         factor_weights=config.get("factor_weights", {}),
         entry_threshold=float(bt_cfg.get("entry_threshold", 0.05)),
@@ -56,6 +60,7 @@ def get_pybroker_runner(
     data_source: PyBrokerDataSource,
     config: Dict[str, Any],
     strategies: Optional[List[str]] = None,
+    target_symbols: Optional[List[str]] = None,
 ) -> PyBrokerBacktestRunner:
     """
     创建 PyBroker 回测运行器。
@@ -64,12 +69,19 @@ def get_pybroker_runner(
         data_source: 数据源
         config: 配置字典
         strategies: 策略名称列表
+        target_symbols: 目标品种子集；None 时使用 config["symbols"]。
+            外层 per-symbol 循环必须传入 [sym] 以避免跑全品种组合。
 
     Returns:
         PyBrokerBacktestRunner 实例
     """
     bt_config = build_backtest_config(config)
-    symbols = config.get("symbols", [])
+    # 修复 per-symbol 隔离 bug：
+    # 外层循环传入 target_symbols=[sym] 时，仅对该品种做回测；
+    # 不传时维持原行为，使用 config["symbols"] 全品种组合。
+    symbols = (
+        target_symbols if target_symbols is not None else config.get("symbols", [])
+    )
     runner = PyBrokerBacktestRunner(data_source, bt_config, target_symbols=symbols)
     if strategies:
         runner.register_strategies(strategies)
