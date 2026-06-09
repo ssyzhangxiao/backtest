@@ -293,7 +293,16 @@ class PyBrokerBacktestRunner:
         register_default_indicators()
 
         # 从策略注册表动态获取各子策略的参数
-        all_strategy_names = ["trend", "term_structure", "mean_reversion", "vol_breakout", "composite_resonance"]
+        # 修复 register_strategies 失效 bug：尊重 self._registered_strategies，
+        # 未注册时回退到默认 5 子策略全集。
+        _DEFAULT_SUBS = [
+            "trend", "term_structure", "mean_reversion",
+            "vol_breakout", "composite_resonance",
+        ]
+        all_strategy_names = self._registered_strategies or _DEFAULT_SUBS
+        # 把激活的子策略集合同步给打分引擎，extract_factor_scores 据此过滤
+        if hasattr(self, "switch_engine") and self.switch_engine is not None:
+            self.switch_engine.set_active_strategies(all_strategy_names)
         sub_params = {}
         for sname in all_strategy_names:
             sp = self.library.get_profile(sname)

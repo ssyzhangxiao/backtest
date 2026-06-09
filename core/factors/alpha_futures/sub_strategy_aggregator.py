@@ -127,6 +127,13 @@ def compute_sub_strategy_scores_from_ohlcv(
         if "open_interest" in df.columns else np.zeros(len(df)),
         "volume": volume.to_numpy(),
     }
+    # 期限结构因子（TS_01/02/03）需要近月/远月价：
+    #   near_price = 主力连续合约 close（已是近月）
+    #   far_price  = spread_pairs 注入的远月合约收盘价（far_close）
+    # 若数据源缺失 far_close，传 None 让 TS_01/02/03 返回 NaN（不污染其他策略）
+    if "far_close" in df.columns and df["far_close"].notna().any():
+        raw["near_price"] = close.to_numpy()
+        raw["far_price"] = df["far_close"].astype(float).to_numpy()
     factor_results = engine.compute_all(raw)
 
     # 2) 按子策略分组聚合

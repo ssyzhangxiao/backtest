@@ -60,6 +60,13 @@ def _ohlcv_from_bar(bar_data) -> Optional[pd.DataFrame]:
         oi = getattr(bar_data, "open_interest", None)
         if oi is None:
             oi = np.zeros(n)
+        # 期限结构因子需要：远月合约收盘价（far_close 已在
+        # backtest_runner.py 中通过 StaticScope.register_custom_cols 注册）
+        fc = getattr(bar_data, "far_close", None)
+        if fc is None:
+            fc = np.full(n, np.nan, dtype=float)
+        else:
+            fc = np.asarray(fc, dtype=float)
         dates = getattr(bar_data, "date", None)
         if dates is None:
             dates = pd.date_range("2025-01-01", periods=n, freq="D")
@@ -73,6 +80,7 @@ def _ohlcv_from_bar(bar_data) -> Optional[pd.DataFrame]:
             "close": np.asarray(close, dtype=float),
             "volume": np.asarray(volume, dtype=float),
             "open_interest": np.asarray(oi, dtype=float),
+            "far_close": fc,
         })
     except Exception:
         return None
