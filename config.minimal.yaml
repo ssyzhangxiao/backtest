@@ -1,0 +1,62 @@
+backtest:
+  initial_capital: 1000000
+  commission: 0.0001
+  slippage: 0.0001
+  full_start_date: '2022-01-01'
+  full_end_date: '2025-05-31'
+  in_sample_end_date: '2023-01-01'
+  out_sample_start_date: '2023-01-01'
+  rebalance_freq: 10
+  stop_loss_pct: 0.03
+  max_position_pct: 0.15
+  max_total_position_pct: 0.6
+  min_position_pct: 0.0
+  entry_threshold: 0.07
+  use_cross_section: true
+  use_rank_score: true
+  use_trend_filter: true
+  use_rolling_ic: true
+  use_sub_strategies: true
+  use_new_factors: true
+  signal_merge_method: equal_weight
+symbols:
+- SHFE.RB
+- SHFE.AU
+- DCE.M
+- DCE.I
+- SHFE.CU
+factor_weights:
+  trend: 0.2
+  term_structure: 0.2
+  mean_reversion: 0.2
+  vol_breakout: 0.2
+  composite_resonance: 0.2
+strategies:
+- name: cross_sectional
+  params:
+    entry_threshold: 0.02
+    top_n: 3.0
+    rebalance_days: 5.0
+risk_management:
+  stop_loss_pct: 0.03
+  max_drawdown_pct: 0.2
+  position_limit_pct: 0.15
+  total_position_limit: 0.8
+  max_positions: 10
+  commission_filter_pct: 0.0
+  limit_up_down_protection: true
+walk_forward:
+  train_bars: 252
+  test_bars: 63
+  step_bars: 21
+  parallel: false
+  max_workers: 1
+bootstrap:
+  n_samples: 1000
+  confidence_level: 0.9
+monte_carlo:
+  n_simulations: 500
+  random_seed: 42
+data:
+  tqsdk_phone: ${TQSDK_PHONE}
+  tqsdk_password: ${TQSDK_PASSWORD}

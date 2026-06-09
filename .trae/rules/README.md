@@ -39,7 +39,8 @@
     ├── 12-removed.md
     ├── 14-removed.md
     ├── 15-backtest-validation.md
-    └── 22-rolling-window.md
+    ├── 22-rolling-window.md
+    └── 28-strategy-value-validation.md
 ```
 
 ## 规范索引
@@ -95,6 +96,7 @@
 | 14 | （已移除）品种选择模块已删除，功能由子策略体系覆盖 | [05-validation/14-removed.md](./05-validation/15-backtest-validation.md) |
 | 15 | 回测验证 — 多阶段验证，鲁棒性优先 | [05-validation/15-backtest-validation.md](./05-validation/15-backtest-validation.md) |
 | 22 | 回测验证 — 滚动窗口 + 样本外验证 | [05-validation/22-rolling-window.md](./05-validation/22-rolling-window.md) |
+| 28 | 策略价值验证 — 5 阶段硬性验证（A因子→B组合IC→C回测→D稳健→E抗噪） | [05-validation/28-strategy-value-validation.md](./05-validation/28-strategy-value-validation.md) |
 
 ## 维护指南
 
