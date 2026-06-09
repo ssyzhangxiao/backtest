@@ -17,6 +17,13 @@ from core.config.strategy_profiles import StrategyLibrary
 from runner.optimization import copy_config
 from runner.optimization.window_search import _MAX_OPT_PROGRESS
 
+# 扰动测试回退分数（P2 整改：可由调用方覆盖）
+# 当回测失败或基准 Sharpe≈0 时，无法计算稳定性，使用此保守分数代替。
+DEFAULT_FAILURE_STABILITY_SCORE = 0.3
+# 全部扰动都被跳过时（无 sharpe_changes）的回退分数：略高于失败回退，
+# 因为这种情况不代表策略失败，只是没有可量化的扰动样本。
+DEFAULT_NEUTRAL_STABILITY_SCORE = 0.5
+
 
 def grid_search_single_strategy(
     strategy_name: str,
@@ -119,9 +126,16 @@ def param_stability_test(
     lib: StrategyLibrary,
     config: BacktestConfig,
     perturb_ratio: float = 0.10,
+    failure_stability_score: float = DEFAULT_FAILURE_STABILITY_SCORE,
+    neutral_stability_score: float = DEFAULT_NEUTRAL_STABILITY_SCORE,
 ) -> float:
     """
     参数扰动测试：每个参数 ±10%，看 Sharpe 变化幅度。
+
+    P2 整改：失败回退分数（0.3）与无扰动样本回退分数（0.5）均改为可配置参数，
+    调用方可根据业务需求调整保守度：
+      - 提高 failure_stability_score：让"回测失败"的参数在综合排序中获得更靠前位置
+      - 降低 failure_stability_score：让"回测失败"的参数被显著降权（默认行为）
 
     Args:
         strategy_name: 策略名
@@ -129,7 +143,9 @@ def param_stability_test(
         ds: 数据源
         lib: 策略库
         config: 回测配置（BacktestConfig）
-        perturb_ratio: 扰动比例
+        perturb_ratio: 扰动比例（默认 ±10%）
+        failure_stability_score: 回测失败或基准 Sharpe≈0 时的回退稳定性分数
+        neutral_stability_score: 全部扰动被跳过（无 sharpe_changes）时的回退分数
 
     Returns:
         稳定性分数 (0~1)，1 表示最稳定
@@ -149,10 +165,10 @@ def param_stability_test(
         )
         base_sharpe = float(result.metrics.get("sharpe", 0))
     except Exception:
-        return 0.3
+        return failure_stability_score
 
     if base_sharpe is None or abs(base_sharpe) < 1e-8:
-        return 0.3
+        return failure_stability_score
 
     for key in list(params.keys()):
         orig = params[key]
@@ -180,7 +196,7 @@ def param_stability_test(
                 pass
 
     if not sharpe_changes:
-        return 0.5
+        return neutral_stability_score
 
     avg_change = sum(sharpe_changes) / len(sharpe_changes)
     stability = max(0.0, min(1.0, 1.0 - avg_change / 0.5))

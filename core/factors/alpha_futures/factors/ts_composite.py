@@ -40,8 +40,12 @@ class TS_composite(BaseFactor):
         **kwargs,
     ) -> np.ndarray:
         if near_price is None or far_price is None:
-            length = len(close) if close is not None else 100
-            return np.full(length, np.nan, dtype=float)
+            # 根治（P0 整改 2026-06-10）：见 ts_01.py 同位置注释。
+            if close is None:
+                raise ValueError(
+                    "TS_composite.compute 缺少 close 参数：必须传入 close 数组以确定返回长度"
+                )
+            return np.full(len(close), np.nan, dtype=float)
 
         near = np.asarray(near_price, dtype=float)
         far = np.asarray(far_price, dtype=float)

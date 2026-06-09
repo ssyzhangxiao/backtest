@@ -30,9 +30,15 @@ class TS_01(BaseFactor):
     ) -> np.ndarray:
         # 检查必需数据
         if near_price is None or far_price is None:
-            # 如果没有近月/远月价格，返回全 NaN
-            length = len(close) if close is not None else 100
-            return np.full(length, np.nan, dtype=float)
+            # 根治（P0 整改 2026-06-10）：必须有 close 才能确定返回长度；
+            # 不再硬编码 fallback 100（历史上 100 是占位常量，会与实际数据长度不匹配
+            # 触发 factor_engine 的 NaN right-align 兜底告警）。
+            # 若调用方未传 close（理论不应发生），主动报错，避免静默错误。
+            if close is None:
+                raise ValueError(
+                    "TS_01.compute 缺少 close 参数：必须传入 close 数组以确定返回长度"
+                )
+            return np.full(len(close), np.nan, dtype=float)
         
         near = np.asarray(near_price, dtype=float)
         far = np.asarray(far_price, dtype=float)

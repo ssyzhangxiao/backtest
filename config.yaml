@@ -58,19 +58,25 @@ factor_weights:
   composite_resonance: 0.2
 strategies:
 - name: trend
-  params: {}
+  params:
+    window: 5.0
 - name: term_structure
   params: {}
 - name: mean_reversion
-  params: {}
+  params:
+    short_window: 3.0
+    long_window: 120.0
 - name: vol_breakout
-  params: {}
+  params:
+    ma_window: 3.0
+    corr_window: 120.0
 - name: composite_resonance
   params: {}
 - name: cross_sectional
   params:
     entry_threshold: 0.02
     top_n: 3.0
+    rebalance_days: 1.0
 risk_management:
   stop_loss_pct: 0.03
   max_drawdown_pct: 0.2
@@ -121,10 +127,6 @@ factors:
     basis_window: 20
     roll_yield_smooth_window: 5
   cross_spread:
-    # 跨品种联动因子：成对价差（pair spread）配置
-    # strong_ic_pairs: 通过历史 IC 扫描得到的强信号配对列表（|IC| > 0.02）
-    # 留空 [] 表示禁用跨品种联动因子，仅用单品种 24 因子体系
-    # 配置示例：仅启用 "XPRB_I" + "XAU_AG" 两个配对
     strong_ic_pairs:
     - XPRB_I
     - XPRB_J
@@ -132,11 +134,8 @@ factors:
     - XCU_NI
     - XAU_AG
     - XFU_BU
-    # spread 标准化窗口（滚动 zscore 窗口）
     spread_window: 60
-    # EMA 平滑窗口
     smoothing_window: 3
-    # 信号方向：revert=反转（价差偏离预测回归）/ trend=趋势（价差走阔预测延续）
     direction: revert
 risk:
   stop_optimization_enabled: false

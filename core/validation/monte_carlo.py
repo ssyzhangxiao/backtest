@@ -42,6 +42,9 @@ class MonteCarloResult:
     elapsed_seconds: float = 0.0
     # P2 整改：记录交易日参数，便于不同市场对比
     trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR
+    # P0 整改：可选保存完整模拟路径 (n_simulations, n_days+1)
+    #   索引 0 是初始值 1.0；用于保存详细结果/绘制路径分布图
+    paths: Optional[np.ndarray] = None
 
     def summary(self) -> str:
         """返回模拟摘要。"""
@@ -164,15 +167,20 @@ class MonteCarloSimulator:
         )
         return annual_ret
 
-    def simulate(self, daily_returns: np.ndarray) -> MonteCarloResult:
+    def simulate(
+        self, daily_returns: np.ndarray, return_paths: bool = False
+    ) -> MonteCarloResult:
         """
         执行蒙特卡洛模拟（向量化版本）。
 
         Args:
             daily_returns: 日收益率序列
+            return_paths: 是否在结果中保存完整模拟路径 (n_sim, n_days+1)。
+                True 时额外保存（占内存：n_sim × n_days × 8 字节），
+                用于下游保存详细结果/绘制路径分布图。
 
         Returns:
-            MonteCarloResult 模拟结果
+            MonteCarloResult 模拟结果（is_robust 字段供调用方判定稳健性）
         """
         ret = np.asarray(daily_returns, dtype=float)
         n = len(ret)
@@ -201,6 +209,16 @@ class MonteCarloSimulator:
             samples, self.trading_days_per_year
         )
 
+        # P0 整改：可选保存完整模拟路径
+        # 路径 = 累积净值 = cumprod(1 + samples)，前缀 1.0
+        # 仅在 return_paths=True 时构造，节省内存
+        paths: Optional[np.ndarray] = None
+        if return_paths:
+            equity_paths = np.cumprod(1.0 + samples, axis=1)
+            paths = np.empty((self.n_simulations, n + 1), dtype=float)
+            paths[:, 0] = 1.0
+            paths[:, 1:] = equity_paths
+
         elapsed = time.perf_counter() - t0
 
         # 计算分位数
@@ -219,6 +237,7 @@ class MonteCarloSimulator:
             is_robust=is_robust,
             elapsed_seconds=elapsed,
             trading_days_per_year=self.trading_days_per_year,
+            paths=paths,
         )
 
         logger.info(result.summary())

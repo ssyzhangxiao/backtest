@@ -28,6 +28,7 @@ from runner.common.config_utils import get_missing_data_method
 from runner.common.portfolio_utils import (
     calculate_risk_parity_fusion,
     calculate_risk_parity_weights,
+    fuse_equities_by_weights,
 )
 from runner.strategy.selector import get_strategy_names
 
@@ -246,42 +247,10 @@ def run_e4_risk_parity(
         df_equities = pd.DataFrame(strategy_equities)
         df_equities = df_equities.fillna(method="ffill").fillna(1.0)
 
-        # 归一化权重确保总和为1
-        total_weight = sum(avg_weights.values())
-        normalized_weights = (
-            {k: v / total_weight for k, v in avg_weights.items()}
-            if total_weight > 0
-            else {}
-        )
-
-        # 计算融合后的净值
-        fused_equity = pd.Series(1.0, index=df_equities.index)
-        for date_idx in range(1, len(df_equities)):
-            date = df_equities.index[date_idx]
-            prev_date = df_equities.index[date_idx - 1]
-
-            # 计算各策略的日收益率
-            daily_returns = {}
-            for sname in strategy_names:
-                if (
-                    sname in df_equities.columns
-                    and df_equities.loc[prev_date, sname] > 0
-                ):
-                    daily_returns[sname] = (
-                        df_equities.loc[date, sname] / df_equities.loc[prev_date, sname]
-                    ) - 1.0
-
-            # 使用平均权重计算融合收益率
-            if daily_returns:
-                fused_return = 0.0
-                for sname, ret in daily_returns.items():
-                    weight = normalized_weights.get(sname, 0.0)
-                    fused_return += ret * weight
-                fused_equity.loc[date] = fused_equity.loc[prev_date] * (
-                    1.0 + fused_return
-                )
-            else:
-                fused_equity.loc[date] = fused_equity.loc[prev_date]
+        # P2 整改：调用公共工具 fuse_equities_by_weights 完成净值融合
+        # 避免在 e1_e5.py 内嵌约 30 行的手工循环
+        # 内部自动归一化权重（sum=1.0）+ 跳过零/负净值的边界处理
+        fused_equity = fuse_equities_by_weights(df_equities, avg_weights)
 
         # 计算融合后净值的绩效指标
         initial_capital = float(bt_cfg.get(_CONFIG_KEY_INITIAL_CASH, 1_000_000))

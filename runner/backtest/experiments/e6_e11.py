@@ -16,9 +16,9 @@ from loguru import logger
 
 from core.engine.backtest_runner import PyBrokerResult
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
-from core.engine.factor_decay import FactorDecayMonitor, FactorDecayConfig, DecayStatus
+from core.factors.factor_evaluator import FactorEvaluator
 from core.performance import PerformanceEvaluator
+from core.validation.monte_carlo import MonteCarloSimulator
 from utils.metrics import MetricsCalculator
 from runner.backtest.runner import get_pybroker_runner, safe_run_backtest
 from runner.common.utils import (
@@ -41,59 +41,6 @@ from runner.strategy.selector import get_strategy_names
 
 _EPSILON = 1e-10
 _SAFE_DECAY_THRESHOLD = 0.3
-
-
-# ============================================
-# E9：蒙特卡洛核心算法（纯函数，可测）
-# ============================================
-
-
-def _compute_monte_carlo_stats(
-    returns: np.ndarray,
-    n_simulations: int,
-    random_seed: int,
-    bankruptcy_threshold: float,
-) -> Dict[str, Any]:
-    """
-    蒙特卡洛模拟核心算法（E9 抽出，P2 整改可测）。
-
-    对历史日收益率做有放回重采样，生成 n_simulations 条模拟路径，
-    计算终值、最大回撤、破产概率等统计量。
-
-    Args:
-        returns: 日收益率序列
-        n_simulations: 模拟次数
-        random_seed: 随机种子
-        bankruptcy_threshold: 破产判定阈值（终值 < 阈值视为破产）
-
-    Returns:
-        {
-            "final_values": (n_simulations,) 终值数组,
-            "max_drawdowns": (n_simulations,) 最大回撤数组,
-            "bankruptcy_prob": float 破产概率,
-        }
-    """
-    n_days = len(returns)
-    rng = np.random.default_rng(random_seed)
-
-    sim_equities = np.zeros((n_simulations, n_days + 1))
-    sim_equities[:, 0] = 1.0
-    for i in range(n_simulations):
-        sampled = rng.choice(returns, size=n_days, replace=True)
-        sim_equities[i, 1:] = np.cumprod(1.0 + sampled)
-
-    final_values = sim_equities[:, -1]
-    peak_equities = np.maximum.accumulate(sim_equities, axis=1)
-    peak_equities_safe = np.where(peak_equities > 0, peak_equities, 1.0)
-    drawdowns = sim_equities / peak_equities_safe - 1.0
-    max_drawdowns = np.min(drawdowns, axis=1)
-    bankruptcy_prob = float(np.mean(final_values < bankruptcy_threshold))
-
-    return {
-        "final_values": final_values,
-        "max_drawdowns": max_drawdowns,
-        "bankruptcy_prob": bankruptcy_prob,
-    }
 
 
 # ============================================
@@ -202,11 +149,20 @@ def run_e7_out_of_sample(
     if "in_sample_end_date" in bt_cfg and bt_cfg["in_sample_end_date"]:
         in_sample_end = pd.to_datetime(bt_cfg["in_sample_end_date"])
     else:
-        # 自动按 7:3 划分
-        total_days = (full_end - full_start).days
-        split_day = full_start + pd.Timedelta(days=int(total_days * 0.7))
-        in_sample_end = split_day
-        logger.info(f"  自动划分样本内结束日期: {in_sample_end.date()}")
+        # P1 整改：使用交易日计数（pd.date_range + len(df['date'].unique())）
+        # 比日历天数更准确：避免节假日差异导致样本划分偏移
+        # 由于此阶段数据源尚未加载，我们以"工作日频率"近似估计交易日数
+        # 实际确切的交易日计数由回测侧 date_range 提供；此处用作粗估
+        trading_days_total = len(
+            pd.date_range(full_start, full_end, freq="B")  # B = 工作日
+        )
+        split_day_idx = int(trading_days_total * 0.7)
+        # 将 idx 反推为日期：取 start + 70% 个工作日
+        in_sample_end = full_start + pd.tseries.offsets.BDay(split_day_idx)
+        logger.info(
+            f"  自动划分样本内结束日期: {in_sample_end.date()} "
+            f"（{trading_days_total} 个工作日中前 {split_day_idx} 天）"
+        )
 
     if "out_sample_start_date" in bt_cfg and bt_cfg["out_sample_start_date"]:
         out_sample_start = pd.to_datetime(bt_cfg["out_sample_start_date"])
@@ -369,10 +325,18 @@ def run_e9_monte_carlo(
     output_dir: Path,
 ) -> Optional[pd.DataFrame]:
     """
-    E9：蒙特卡洛模拟。
+    E9：蒙特卡洛模拟（P0 整改：迁移到公共 MonteCarloSimulator）。
 
     基于历史收益率序列，通过有放回重采样模拟未来净值路径分布。
-    从配置读取 monte_carlo.bankruptcy_threshold。
+    使用 core.validation.monte_carlo.MonteCarloSimulator 计算，
+    删除原手写的 _compute_monte_carlo_stats 私有实现。
+
+    新增（return_paths=True）：
+      - 保存完整模拟路径 (n_simulations, n_days+1) 到 e9_monte_carlo_paths.npz
+      - 用于路径分布图 / 历史回放
+    复用（MonteCarloResult.is_robust）：
+      - Sharpe 的 5% 分位数 > 0 判定为稳健
+      - 在 e9_monte_carlo_stats.csv 写入 is_robust 列
 
     Args:
         data_source: 数据源
@@ -388,6 +352,9 @@ def run_e9_monte_carlo(
     n_simulations = int(mc_cfg.get("n_simulations", 1000))
     random_seed = int(mc_cfg.get("random_seed", 42))
     bankruptcy_threshold = float(mc_cfg.get("bankruptcy_threshold", 0.8))
+    trading_days_per_year = int(
+        mc_cfg.get("trading_days_per_year", 252)
+    )  # 兼容加密货币 365
 
     try:
         runner = get_pybroker_runner(
@@ -412,50 +379,95 @@ def run_e9_monte_carlo(
             logger.warning("E9：无有效收益率数据")
             return None
 
-        stats = _compute_monte_carlo_stats(
-            returns.values,
+        # P0 整改：调用公共模拟器，return_paths=True 获取完整路径
+        simulator = MonteCarloSimulator(
             n_simulations=n_simulations,
             random_seed=random_seed,
-            bankruptcy_threshold=bankruptcy_threshold,
+            trading_days_per_year=trading_days_per_year,
         )
-        final_values = stats["final_values"]
-        max_drawdowns = stats["max_drawdowns"]
-        bankruptcy_prob = stats["bankruptcy_prob"]
+        mc_result = simulator.simulate(returns.values, return_paths=True)
+        if mc_result.n_simulations == 0:
+            logger.warning("E9：模拟失败（数据不足）")
+            return None
+
+        # 终值 = 路径末端值（沿用旧 E9 字段命名以兼容下游）
+        final_values = (
+            mc_result.paths[:, -1] if mc_result.paths is not None else None
+        )
+        # 破产概率（终值 < 阈值）
+        bankruptcy_prob = (
+            float(np.mean(final_values < bankruptcy_threshold))
+            if final_values is not None
+            else float("nan")
+        )
+        # P0 整改：通过 MonteCarloResult.is_robust 判定（Sharpe 5% 分位 > 0）
+        is_robust = mc_result.is_robust
 
         logger.info(f"  模拟次数: {n_simulations}")
         logger.info(
             f"  终值均值: {np.mean(final_values):.4f}, 中位数: {np.median(final_values):.4f}"
         )
         logger.info(f"  破产概率(终值<{bankruptcy_threshold}): {bankruptcy_prob:.2%}")
+        logger.info(
+            f"  稳健性: {'✅稳健 (Sharpe@5%>0)' if is_robust else '⚠️不稳健 (Sharpe@5%≤0)'}"
+        )
+
+        # 兼容旧字段：per-sim final_value & max_drawdown 表格
+        # 从 path 重新计算 max_drawdown（与旧版口径一致：每条路径的最大回撤）
+        if mc_result.paths is not None:
+            peak = np.maximum.accumulate(mc_result.paths, axis=1)
+            safe_peak = np.where(peak > 0, peak, 1.0)
+            per_sim_max_dd = np.min(mc_result.paths / safe_peak - 1.0, axis=1)
+        else:
+            per_sim_max_dd = np.zeros(n_simulations)
 
         mc_results = pd.DataFrame(
             {
                 "sim_id": range(n_simulations),
                 "final_value": final_values,
-                "max_drawdown": max_drawdowns,
+                "max_drawdown": per_sim_max_dd,
             }
         )
         save_csv(mc_results, output_dir / "e9_monte_carlo_results.csv")
 
-        # 保存模拟统计数据（不包含绘图逻辑，绘图在外部处理）
-        stats_data = {
+        # 模拟统计数据（兼容旧版字段 + 新增 is_robust / sharpe_quantiles）
+        stats_data: Dict[str, list] = {
             "statistic": ["mean", "median", "std", "p5", "p95"],
             "final_value": [
-                np.mean(final_values),
-                np.median(final_values),
-                np.std(final_values),
-                np.percentile(final_values, 5),
-                np.percentile(final_values, 95),
+                float(np.mean(final_values)),
+                float(np.median(final_values)),
+                float(np.std(final_values)),
+                float(np.percentile(final_values, 5)),
+                float(np.percentile(final_values, 95)),
             ],
             "max_drawdown": [
-                np.mean(max_drawdowns),
-                np.median(max_drawdowns),
-                np.std(max_drawdowns),
-                np.percentile(max_drawdowns, 5),
-                np.percentile(max_drawdowns, 95),
+                float(np.mean(per_sim_max_dd)),
+                float(np.median(per_sim_max_dd)),
+                float(np.std(per_sim_max_dd)),
+                float(np.percentile(per_sim_max_dd, 5)),
+                float(np.percentile(per_sim_max_dd, 95)),
             ],
         }
+        # P0 整改：把 MonteCarloResult 公共输出落到 stats csv，便于外部分析
+        stats_data["sharpe_quantile_05"] = [mc_result.sharpe_quantiles.get(0.05, 0.0)] * 5
+        stats_data["sharpe_quantile_50"] = [mc_result.sharpe_quantiles.get(0.50, 0.0)] * 5
+        stats_data["is_robust"] = [is_robust] + [None] * 4  # 仅第一行有意义
         save_csv(pd.DataFrame(stats_data), output_dir / "e9_monte_carlo_stats.csv")
+
+        # 保存完整模拟路径（npz 压缩），供路径分布图 / 历史回放
+        if mc_result.paths is not None:
+            np.savez_compressed(
+                output_dir / "e9_monte_carlo_paths.npz",
+                paths=mc_result.paths,
+                initial_dates=eq_sorted["date"].iloc[1:].to_numpy(),
+                n_simulations=n_simulations,
+                random_seed=random_seed,
+                trading_days_per_year=trading_days_per_year,
+            )
+            logger.info(
+                f"  路径已保存: e9_monte_carlo_paths.npz "
+                f"shape={mc_result.paths.shape}"
+            )
 
         return mc_results
     except Exception as e:
@@ -511,7 +523,16 @@ def _run_factor_analysis_for_symbol(
     output_dir: Path,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
-    对单个品种执行因子分析（E11 子函数）。
+    对单个品种执行因子分析（E11 子函数，P0 整改）。
+
+    整改前：
+      - 使用 RollingICWeightEngine（私有状态对象）做滚动 IC 加权
+      - 使用 FactorDecayMonitor（私有状态对象）做衰减检测
+      - 访问 decay_monitor._ic_history 私有属性
+    整改后：
+      - 委托 FactorEvaluator.compute_ic_weights 计算动态权重（公开 API）
+      - 委托 FactorEvaluator.detect_decay 检测衰减（公开 API）
+      - 通过 factor_scores_history 字典公开维护 IC 历史，规避私有属性
 
     Args:
         sym: 品种代码
@@ -523,16 +544,8 @@ def _run_factor_analysis_for_symbol(
     Returns:
         (ic_df, decay_df, summary) 元组
     """
-    ic_config = RollingICConfig(
-        window=60, forward_period=5, ema_alpha=0.1, min_observations=30
-    )
-    decay_config = FactorDecayConfig(
-        trend_window=40,
-        ic_healthy_threshold=0.03,
-        ic_dead_threshold=0.01,
-        max_consecutive_decline=5,
-        decay_slope_threshold=-0.001,
-    )
+    # P0 整改：评估器改为单例（无状态），IC 状态由调用方用字典维护
+    evaluator = FactorEvaluator()
 
     ic_rows: List[Dict[str, Any]] = []
     summary: Dict[str, Any] = {}
@@ -550,8 +563,12 @@ def _run_factor_analysis_for_symbol(
 
     scored = compute_sub_strategy_scores_from_ohlcv(sym_df)
 
-    ic_engine = RollingICWeightEngine(ic_config)
-    decay_monitor = FactorDecayMonitor(decay_config)
+    # P0 整改：用公开数据结构维护 IC 历史（替代私有属性访问）
+    factor_scores_history: Dict[str, np.ndarray] = {n: np.array([]) for n in factor_names}
+    forward_returns_arr: List[float] = []
+    prev_weights: Optional[Dict[str, float]] = None
+    last_sample_date: Optional[str] = None
+    current_ic_snapshot: Dict[str, float] = {}
 
     for i in range(len(scored)):
         row = scored.iloc[i]
@@ -567,16 +584,42 @@ def _run_factor_analysis_for_symbol(
         if not factor_scores:
             continue
 
-        ic_engine.update(factor_scores, forward_ret, sym)
+        # 累积每个因子的得分历史
+        for name, score in factor_scores.items():
+            factor_scores_history[name] = np.append(
+                factor_scores_history[name], score
+            )
+        forward_returns_arr.append(forward_ret)
+        last_sample_date = str(row["date"])[:10]
 
-        current_ic = ic_engine.current_ic
-        for name, ic_val in current_ic.items():
-            decay_monitor.update(name, ic_val, str(row["date"])[:10])
+        # 每 10 步采样一次（与旧版节奏一致：避免 csv 过大）
+        if i % 10 == 0 and len(forward_returns_arr) >= 20:
+            fwd_arr = np.asarray(forward_returns_arr)
+            current_weights = evaluator.compute_ic_weights(
+                factor_scores_history=factor_scores_history,
+                forward_returns=fwd_arr,
+                ema_alpha=0.1,
+                prev_weights=prev_weights,
+            )
+            prev_weights = current_weights
 
-        if i % 10 == 0:
-            current_weights = ic_engine.get_dynamic_weights()
-            ic_row = {"date": str(row["date"])[:10]}
-            for name, ic_val in current_ic.items():
+            # 当前 IC = 因子得分与 forward_return 的 Pearson（仅取最近 60 步）
+            recent_window = min(60, len(forward_returns_arr))
+            recent_fwd = fwd_arr[-recent_window:]
+            current_ic_snapshot = {}
+            for name, scores in factor_scores_history.items():
+                if len(scores) < recent_window:
+                    continue
+                recent_scores = scores[-recent_window:]
+                if np.std(recent_scores) < 1e-10 or np.std(recent_fwd) < 1e-10:
+                    current_ic_snapshot[name] = 0.0
+                else:
+                    current_ic_snapshot[name] = float(
+                        np.corrcoef(recent_scores, recent_fwd)[0, 1]
+                    )
+
+            ic_row: Dict[str, Any] = {"date": last_sample_date}
+            for name, ic_val in current_ic_snapshot.items():
                 ic_row[f"ic_{name}"] = round(ic_val, 6)
             for name, w in current_weights.items():
                 ic_row[f"w_{name}"] = round(w, 4)
@@ -584,44 +627,86 @@ def _run_factor_analysis_for_symbol(
 
     ic_df = pd.DataFrame(ic_rows)
 
-    alerts = decay_monitor.check_decay()
-    decay_rows = []
+    # P0 整改：使用 FactorEvaluator.detect_decay 公开接口
+    # 衰减检测需要的是**历史 IC 序列**，由 factor_scores_history 计算得到
+    ic_history_for_decay: Dict[str, List[float]] = {}
+    fwd_arr = np.asarray(forward_returns_arr) if forward_returns_arr else np.array([])
+    if len(fwd_arr) >= 2:
+        for name, scores in factor_scores_history.items():
+            if len(scores) < 2 or len(scores) != len(fwd_arr):
+                continue
+            # 滚动 20 步 IC：每步 Pearson(score[:-1], fwd)
+            window = 20
+            ic_series: List[float] = []
+            for j in range(window, len(scores) + 1):
+                s_window = scores[j - window : j]
+                f_window = fwd_arr[j - window : j]
+                if np.std(s_window) < 1e-10 or np.std(f_window) < 1e-10:
+                    continue
+                ic_series.append(float(np.corrcoef(s_window, f_window)[0, 1]))
+            if ic_series:
+                ic_history_for_decay[name] = ic_series
+
+    decay_alerts: Dict[str, Dict[str, Any]] = {}
+    if ic_history_for_decay:
+        decay_alerts = evaluator.detect_decay(
+            ic_history=ic_history_for_decay,
+            trend_window=40,
+            ic_healthy_threshold=0.03,
+            ic_dead_threshold=0.01,
+            max_consecutive_decline=5,
+            decay_slope_threshold=-0.001,
+        )
+
+    # 构造 decay_df（沿用旧版字段格式）
+    decay_rows: List[Dict[str, Any]] = []
+    decay_status_map: Dict[str, str] = {
+        "healthy": "healthy",
+        "warning": "warning",
+        "decay": "decay",
+        "dead": "dead",
+    }
     for name in factor_names:
-        if name in decay_monitor._ic_history:
-            ic_series = decay_monitor._ic_history[name]
-            decay_rows.append(
-                {
-                    "date": str(scored["date"].iloc[-1])[:10],
-                    "factor": name,
-                    "current_ic": round(ic_series[-1], 6) if ic_series else 0.0,
-                    "mean_ic": round(np.mean(ic_series), 6) if ic_series else 0.0,
-                    "status": decay_monitor.current_status.get(
-                        name, DecayStatus.HEALTHY
-                    ).value,
-                }
-            )
+        ic_series = ic_history_for_decay.get(name, [])
+        status = decay_alerts.get(name, {}).get("status", "healthy")
+        decay_rows.append(
+            {
+                "date": last_sample_date or "",
+                "factor": name,
+                "current_ic": round(ic_series[-1], 6) if ic_series else 0.0,
+                "mean_ic": round(float(np.mean(ic_series)), 6) if ic_series else 0.0,
+                "status": decay_status_map.get(status, "healthy"),
+            }
+        )
     decay_df = pd.DataFrame(decay_rows)
 
-    ic_summary = ic_engine.get_ic_summary()
+    # 构造 summary（沿用旧版字段：mean_ic / std_ic / ir / current_ic / current_weight）
     summary_rows: List[Dict[str, Any]] = []
-    for name, stats in ic_summary.items():
+    for name in factor_names:
+        ic_series = ic_history_for_decay.get(name, [])
+        if ic_series:
+            mean_ic = float(np.mean(ic_series))
+            std_ic = float(np.std(ic_series))
+            ir = mean_ic / std_ic if std_ic > 1e-10 else 0.0
+            current_ic = ic_series[-1]
+        else:
+            mean_ic = std_ic = ir = current_ic = 0.0
+        current_weight = float(prev_weights.get(name, 0.0)) if prev_weights else 0.0
         summary_rows.append(
             {
                 "symbol": sym,
                 "factor": name,
-                "mean_ic": round(stats.get("mean", 0.0), 6),
-                "std_ic": round(stats.get("std", 0.0), 6),
-                "ir": round(stats.get("ir", 0.0), 4),
-                "current_ic": round(stats.get("current", 0.0), 6),
-                "current_weight": round(
-                    ic_engine.get_dynamic_weights().get(name, 0.0), 4
-                ),
+                "mean_ic": round(mean_ic, 6),
+                "std_ic": round(std_ic, 6),
+                "ir": round(ir, 4),
+                "current_ic": round(current_ic, 6),
+                "current_weight": round(current_weight, 4),
             }
         )
     summary = {
         "ic_summary": summary_rows,
-        "alerts": alerts,
-        "final_weights": ic_engine.get_dynamic_weights(),
+        "alerts": decay_alerts,
+        "final_weights": prev_weights or {},
     }
 
     return ic_df, decay_df, summary

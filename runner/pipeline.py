@@ -382,9 +382,14 @@ class Pipeline:
         }
 
         # 验证 BacktestConfig 关键字段
+        # P2 整改：删除 `backtest_config_has_factor_weights` 检查。
+        # 原因：factor_weights 是 Dict[str, float]，合法状态包含空字典（用户未启用任何
+        # 子策略时，default_factory=dict 即为空）。`bool({})` 与 `bool(None)` 均为 False，
+        # 会产生"未配置"的误导性告警；改用 `bool(self._config.factor_weights)` 仍无法
+        # 区分"空字典（合法）"与"字段缺失（异常）"。该字段的存在性已在 BacktestConfig
+        # dataclass 定义处保证，无需在 health check 中重复验证。
         if self._config is not None:
             chain_status["backtest_config_has_symbols"] = bool(self._config.symbols)
-            chain_status["backtest_config_has_factor_weights"] = bool(self._config.factor_weights)
 
         # 验证核心模块可导入且存在
         try:

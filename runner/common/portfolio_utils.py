@@ -3,10 +3,15 @@
 
 提取自 runner/backtest/experiments/e1_e5.py 的私有工具函数，
 统一为公共 API（重复#P1：避免 e1_e5.py 内重复实现）。
+
+P2 整改（2026-06-09）：
+  - 新增 fuse_equities_by_weights：通用多策略净值融合工具
+  - 支持空权重、零权重、缺失品种的边界情况
 """
 
 from typing import Dict
 
+import numpy as np
 import pandas as pd
 
 _EPSILON = 1e-10
@@ -86,3 +91,64 @@ def calculate_risk_parity_fusion(
     if total <= 0:
         return {}
     return {name: float(v / total) for name, v in avg.items()}
+
+
+def fuse_equities_by_weights(
+    strategy_equities: pd.DataFrame,
+    weights: Dict[str, float],
+) -> pd.Series:
+    """
+    多策略净值融合（P2 整改：从 e1_e5.py E4 实现提取）。
+
+    对每行（日期）计算各策略的日收益率，按给定权重加权求和，
+    然后从前一日的融合净值累积出新的融合净值序列。
+
+    与 calculate_risk_parity_fusion 的区别：
+      - **本函数**：输入**策略净值 DataFrame** + **权重字典** → 输出融合后的净值 Series
+      - **calculate_risk_parity_fusion**：输入**策略收益率时序** → 输出平均权重字典
+
+    Args:
+        strategy_equities: 策略净值 DataFrame
+            - 行索引=日期（递增）
+            - 列=策略名
+            - 值=各策略的累计净值（首行应为 1.0 或初始资金）
+        weights: {策略名: 权重}，权重会自动归一化（sum=1.0）
+            - 缺失策略的权重视为 0
+            - 全部为 0 或为空 → 返回全 1.0 常数列
+
+    Returns:
+        融合后的净值 Series，索引与 strategy_equities 一致，首值=1.0
+
+    Edge cases:
+      - 空 DataFrame → 返回空 Series
+      - 全部权重为 0 → 返回全 1.0
+      - 某策略当日净值为 0 或负 → 跳过该策略当日的日收益率计算
+      - 索引含 NaT → 自动 forward fill
+    """
+    if strategy_equities is None or strategy_equities.empty:
+        return pd.Series(dtype=float)
+
+    # 1) 缺失策略的权重补 0
+    weights_norm = {col: float(weights.get(col, 0.0)) for col in strategy_equities.columns}
+    total_w = sum(weights_norm.values())
+    if total_w <= _EPSILON:
+        # 全部权重为 0 → 净值保持 1.0
+        return pd.Series(1.0, index=strategy_equities.index)
+    weights_norm = {k: v / total_w for k, v in weights_norm.items()}
+
+    # 2) 计算各策略的日收益率（前向）
+    # 关键：避免在 0 或负净值上做除法
+    prev = strategy_equities.shift(1)
+    safe_prev = prev.where(prev > _EPSILON, np.nan)
+    daily_returns = (strategy_equities / safe_prev) - 1.0
+    # 缺失策略的日收益率视为 0（不影响融合）
+    daily_returns = daily_returns.fillna(0.0)
+
+    # 3) 加权求和
+    weighted = daily_returns * pd.Series(weights_norm)
+    fused_daily_return = weighted.sum(axis=1)
+
+    # 4) 累积为净值（首行=1.0）
+    fused_equity = (1.0 + fused_daily_return).cumprod()
+    fused_equity.iloc[0] = 1.0
+    return fused_equity
