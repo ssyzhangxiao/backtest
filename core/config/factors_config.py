@@ -4,8 +4,29 @@
 因子必须通过IC检验才能进入策略组合，无效因子不入库。
 """
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class CrossSpreadConfig:
+    """跨品种联动因子（pair spread）配置。"""
+
+    strong_ic_pairs: List[str] = field(default_factory=list)
+    spread_window: int = 60
+    smoothing_window: int = 3
+    direction: str = "revert"  # "revert"=反转 / "trend"=趋势
+
+    @staticmethod
+    def from_dict(raw: dict) -> "CrossSpreadConfig":
+        if not raw:
+            return CrossSpreadConfig()
+        return CrossSpreadConfig(
+            strong_ic_pairs=list(raw.get("strong_ic_pairs", []) or []),
+            spread_window=int(raw.get("spread_window", 60)),
+            smoothing_window=int(raw.get("smoothing_window", 3)),
+            direction=str(raw.get("direction", "revert")),
+        )
 
 
 @dataclass
@@ -25,6 +46,7 @@ class FactorModuleConfig:
     term_structure_enabled: bool = False
     term_structure_basis_window: int = 20
     term_structure_roll_yield_smooth_window: int = 5  # 期限结构信号平滑窗口
+    cross_spread: CrossSpreadConfig = field(default_factory=CrossSpreadConfig)
 
     @staticmethod
     def from_yaml(raw: dict) -> "FactorModuleConfig":
@@ -32,6 +54,7 @@ class FactorModuleConfig:
         f = raw.get("factors", {})
         cf = f.get("capital_flow", {})
         ts = f.get("term_structure", {})
+        cs = f.get("cross_spread", {})
         return FactorModuleConfig(
             enabled=bool(f.get("enabled", False)),
             ic_threshold=float(f.get("ic_threshold", 0.03)),
@@ -48,4 +71,5 @@ class FactorModuleConfig:
             term_structure_roll_yield_smooth_window=int(
                 ts.get("roll_yield_smooth_window", 5)
             ),
+            cross_spread=CrossSpreadConfig.from_dict(cs),
         )

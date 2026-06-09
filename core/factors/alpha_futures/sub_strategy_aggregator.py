@@ -44,7 +44,14 @@ def _safe_clip(series: pd.Series, lo: float = -1.0, hi: float = 1.0) -> pd.Serie
 
 
 def _aggregate_group(factor_results: Dict[str, np.ndarray], names: List[str]) -> np.ndarray:
-    """对同组因子取均值（缺失跳过），返回长度一致的一维数组。"""
+    """对同组因子取均值（缺失跳过），返回长度一致的一维数组。
+
+    数据缺失语义：
+      - 若组内**所有因子均缺失**（None 或长度 0）→ 返回**空数组**（长度 0），
+        由 _to_series 进一步处理为全 NaN 序列
+      - 若组内**至少有一个因子产出**但其余为 NaN → np.nanmean 自动跳过 NaN
+      - **禁止**用全 0 数组作为"无数据"标记，避免下游误判为"中性信号"
+    """
     arrays: List[np.ndarray] = []
     for n in names:
         v = factor_results.get(n)
@@ -55,6 +62,7 @@ def _aggregate_group(factor_results: Dict[str, np.ndarray], names: List[str]) ->
             continue
         arrays.append(arr)
     if not arrays:
+        # 空数组语义：告诉调用方"本组无数据"，由 _to_series 填充为全 NaN
         return np.zeros(0)
     min_len = min(len(a) for a in arrays)
     if min_len == 0:
@@ -64,15 +72,25 @@ def _aggregate_group(factor_results: Dict[str, np.ndarray], names: List[str]) ->
 
 
 def _to_series(values: np.ndarray, index: pd.Index) -> pd.Series:
-    """将 np.ndarray 与目标索引对齐（长度不足时右对齐补 NaN）。"""
-    if len(values) == 0:
-        return pd.Series(np.zeros(len(index)), index=index)
-    if len(values) == len(index):
-        return pd.Series(values, index=index)
-    # 右对齐：values[-len(index):]
+    """将 np.ndarray 与目标索引对齐（长度不足时右对齐补 NaN）。
+
+    空输入语义：
+      - 若 values 长度为 0（来自 _aggregate_group 的"全无数据"信号），
+        **返回全 NaN 序列**而非全 0，避免下游把"无数据"误判为"中性信号 0"
+      - 若 values 长度等于 index → 直接对齐
+      - 若 values 长度小于 index → 右对齐：values[-len(index):] 放尾部，前部补 NaN
+      - 若 values 长度大于 index → 截取尾部
+    """
     n = len(index)
+    if len(values) == 0:
+        # 全无数据 → 全 NaN（区分于"中性信号 0"）
+        return pd.Series(np.full(n, np.nan, dtype=float), index=index)
+    if len(values) == n:
+        return pd.Series(values, index=index)
+    # 右对齐：把 values 的尾部对齐到 index 末尾
     arr = np.full(n, np.nan, dtype=float)
-    arr[-len(values):] = values[-n:]
+    k = min(len(values), n)
+    arr[-k:] = values[-k:]
     return pd.Series(arr, index=index)
 
 

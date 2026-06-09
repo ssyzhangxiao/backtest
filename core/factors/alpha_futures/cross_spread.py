@@ -17,9 +17,14 @@
   factor = +zscore(spread_t)  // 趋势信号
 
 默认：反转信号。回归窗口 60 日。
+
+配置：
+  - 强 IC 配对（STRONG_IC_PAIRS）默认从 `config.yaml::factors.cross_spread.strong_ic_pairs` 加载
+  - 支持通过 `set_strong_ic_pairs()` 在运行时覆盖
+  - 配置加载失败时回退到模块内置默认值（向后兼容）
 """
 
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,7 +59,12 @@ CHAIN_PAIRS: Dict[str, Tuple[str, str]] = {
 # 强 IC 配对（用于 factor_combo_ic 候选池）。
 # 来源：scratch_cross_spread.py 历史时序 IC 扫描结果。
 # 注意：这里只列出通过 |IC| > 0.02 阈值的稳定配对。
-STRONG_IC_PAIRS: Tuple[str, ...] = (
+#
+# 配置优先级：
+#   1. 运行时通过 set_strong_ic_pairs() 显式覆盖
+#   2. 加载 BacktestConfig.from_yaml() 后的 config.factors.cross_spread.strong_ic_pairs
+#   3. 本模块内置默认值（向后兼容）
+_STRONG_IC_PAIRS_DEFAULT: Tuple[str, ...] = (
     "XPRB_I",  # 螺纹-铁矿（钢厂利润代理）
     "XPRB_J",  # 螺纹-焦炭
     "XCU_ZN",  # 铜-锌
@@ -62,6 +72,66 @@ STRONG_IC_PAIRS: Tuple[str, ...] = (
     "XAU_AG",  # 金银比
     "XFU_BU",  # 燃料油-沥青
 )
+
+# 模块级可覆盖状态
+STRONG_IC_PAIRS: Tuple[str, ...] = _STRONG_IC_PAIRS_DEFAULT
+
+
+def set_strong_ic_pairs(pairs: Optional[List[str]]) -> Tuple[str, ...]:
+    """
+    运行时覆盖强 IC 配对列表。
+
+    Args:
+        pairs: 配对名列表，传 None 或 [] 恢复为默认值
+
+    Returns:
+        当前生效的 STRONG_IC_PAIRS（只读 tuple）
+    """
+    global STRONG_IC_PAIRS
+    if not pairs:
+        STRONG_IC_PAIRS = _STRONG_IC_PAIRS_DEFAULT
+    else:
+        # 过滤掉不在 CHAIN_PAIRS 中的无效配对
+        valid = tuple(p for p in pairs if p in CHAIN_PAIRS)
+        if not valid:
+            STRONG_IC_PAIRS = _STRONG_IC_PAIRS_DEFAULT
+        else:
+            STRONG_IC_PAIRS = valid
+    return STRONG_IC_PAIRS
+
+
+def load_strong_ic_pairs_from_config(config_path: str = "config.yaml") -> Tuple[str, ...]:
+    """
+    从 config.yaml 加载强 IC 配对配置。
+
+    Args:
+        config_path: 配置文件路径
+
+    Returns:
+        当前生效的 STRONG_IC_PAIRS
+
+    Note:
+        配置缺失 / 解析失败时静默回退到默认值（不抛异常，向后兼容）。
+    """
+    try:
+        from core.config import BacktestConfig
+        from core.config.factors_config import FactorModuleConfig
+        # 优先使用 BacktestConfig.factors_config（与 yaml 同步）。
+        # 兼容旧版：若 BacktestConfig 上无此字段则回退到独立解析。
+        cfg = BacktestConfig.from_yaml(config_path)
+        cs_cfg = getattr(cfg, "factors_config", None)
+        if cs_cfg is None:
+            # 兜底：直接用 FactorModuleConfig.from_yaml 解析
+            from core.config.yaml_utils import load_yaml
+            raw = load_yaml(config_path)
+            cs_cfg = FactorModuleConfig.from_yaml(raw)
+        cross_spread_cfg = getattr(cs_cfg, "cross_spread", None)
+        if cross_spread_cfg is None:
+            return STRONG_IC_PAIRS
+        pairs = getattr(cross_spread_cfg, "strong_ic_pairs", None)
+        return set_strong_ic_pairs(pairs)
+    except Exception:  # noqa: BLE001
+        return STRONG_IC_PAIRS
 
 
 def compute_pair_spread_factor(
