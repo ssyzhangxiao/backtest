@@ -98,10 +98,20 @@ class PerformanceEvaluator:
 
         # 风险调整后收益
         excess = returns - risk_free_rate / annual_factor
-        metrics["sharpe"] = (excess.mean() / returns.std() * np.sqrt(annual_factor)) if returns.std() > 0 else 0
+        # P0 修复（2026-06-10）：防止 daily std 接近 0 时 Sharpe 爆炸到百万级
+        # 原因：equity 水平线（5 个子策略全 0 信号）时 std ≈ 1e-10，mean/std 爆炸
+        # 阈值：日波动率 < 1e-6 视为"无交易"，Sharpe 记 0
+        MIN_DAILY_STD = 1e-6
+        if returns.std() > MIN_DAILY_STD:
+            metrics["sharpe"] = excess.mean() / returns.std() * np.sqrt(annual_factor)
+        else:
+            metrics["sharpe"] = 0.0
 
         downside = returns[returns < 0]
-        metrics["sortino"] = (excess.mean() / downside.std() * np.sqrt(annual_factor)) if len(downside) > 0 and downside.std() > 0 else 0
+        if len(downside) > 0 and downside.std() > MIN_DAILY_STD:
+            metrics["sortino"] = excess.mean() / downside.std() * np.sqrt(annual_factor)
+        else:
+            metrics["sortino"] = 0.0
 
         # 最大回撤
         peak = equity.cummax()

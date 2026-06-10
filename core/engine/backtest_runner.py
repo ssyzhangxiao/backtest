@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import pybroker
+
     PYBROKER_AVAILABLE = True
 except ImportError:
     PYBROKER_AVAILABLE = False
@@ -113,6 +114,7 @@ class PyBrokerBacktestRunner:
         # P1-D1 整改：stop_loss_cooldown/commission_rate/slippage_rate 不属于信号层
         # 已迁移到 RiskConfig（规则4 风险控制统一），不再透传到 ScoringConfig
         from core.engine.switch_engine import ScoringConfig
+
         scoring_config = ScoringConfig(
             rebalance_days=self.config.rebalance_days,
             factor_weights=self.config.factor_weights,
@@ -131,15 +133,28 @@ class PyBrokerBacktestRunner:
                 0.8,
             ),
         )
-        self._risk_controller = RiskController(RiskConfig(
-            stop_loss_pct=self.config.stop_loss_pct,
-            max_position_pct=self.config.max_position_pct,
-            max_total_position_pct=self.config.max_total_position_pct,
-        ))
+        self._risk_controller = RiskController(
+            RiskConfig(
+                stop_loss_pct=self.config.stop_loss_pct,
+                max_position_pct=self.config.max_position_pct,
+                max_total_position_pct=self.config.max_total_position_pct,
+                # P0-2 整改（2026-06-10）：注入复合止损参数，让 stop_optimization_config
+                # 的 trailing_pct / max_holding_days 真正传递到 CompositeStopManager。
+                # 之前这些字段保持默认值，追踪止损/时间止损实际从未触发。
+                use_composite_stop=self.config.stop_optimization_config.enabled,
+                fixed_stop_pct=self.config.stop_optimization_config.composite_fixed_stop_pct,
+                trailing_mode=self.config.stop_optimization_config.trailing_mode,
+                trailing_pct=self.config.stop_optimization_config.trailing_pct,
+                trailing_atr_mult=self.config.stop_optimization_config.trailing_atr_multiplier,
+                max_holding_days=self.config.stop_optimization_config.time_stop_max_holding_days,
+                time_target_return=self.config.stop_optimization_config.time_stop_target_return,
+            )
+        )
 
         # 注入滚动IC引擎
         if self.config.use_rolling_ic:
             from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
+
             ic_config = RollingICConfig(
                 window=60, forward_period=5, ema_alpha=0.1, min_observations=30
             )
@@ -163,12 +178,20 @@ class PyBrokerBacktestRunner:
                 use_sub_strategies=True,
                 merge_method=merge_method,
             )
-            logger.debug("子策略适配器初始化成功（use_new_factors=%s）", self.config.use_new_factors)
+            logger.debug(
+                "子策略适配器初始化成功（use_new_factors=%s）",
+                self.config.use_new_factors,
+            )
 
     def register_strategies(self, strategy_names: List[str]):
         """注册策略名称列表。"""
         self._registered_strategies = list(strategy_names)
         logger.debug("已注册策略: %s", strategy_names)
+
+    def set_custom_params(self, custom_params: Dict[str, Dict[str, Any]]):
+        """设置策略 custom_params（在 run() 时覆盖 default_params）。"""
+        self._custom_params = custom_params
+        logger.debug("已设置 custom_params: %s", list(custom_params.keys()))
 
     @staticmethod
     def _compute_rsi(close_ser, period):
@@ -204,6 +227,10 @@ class PyBrokerBacktestRunner:
             raise RuntimeError("请先调用 register_strategies() 注册策略")
 
         cash = initial_cash or self.config.initial_cash
+        # 修复 best_params 注入 bug：合并 set_custom_params 传入的参数
+        # （之前调用 set_custom_params 设的值会被这里的 None 覆盖）
+        if custom_params is None and getattr(self, "_custom_params", None):
+            custom_params = self._custom_params
         self._custom_params = custom_params
         self._use_execute_fusion = use_execute_fusion
 
@@ -257,12 +284,11 @@ class PyBrokerBacktestRunner:
             )
         elif "is_dominant" not in df.columns:
             logger.debug("没有主力合约信息，使用全部数据 (%d 行)", len(df))
-        
+
         # 计算新因子（如果启用）
         if self._sub_strategy_adapter is not None and self.config.use_new_factors:
             logger.debug("计算新因子...")
             df = self._sub_strategy_adapter.compute_factors(df)
-
 
         pb_config = pybroker.StrategyConfig(
             initial_cash=initial_cash,
@@ -274,9 +300,11 @@ class PyBrokerBacktestRunner:
             if col in df.columns:
                 df[col] = df[col].astype(float).to_numpy()
         from pybroker.scope import StaticScope
+
         scope = StaticScope.instance()
         custom_cols_to_register = [
-            col for col in df.columns
+            col
+            for col in df.columns
             if col not in scope.default_data_cols and col not in scope.custom_data_cols
         ]
         if custom_cols_to_register:
@@ -288,16 +316,21 @@ class PyBrokerBacktestRunner:
         # ── 5子策略指标注册 ──
         # 使用 StrategyIndicatorRegistry 替代硬编码指标构建
         from core.engine.strategy_indicators import StrategyIndicatorRegistry
+
         # P1-任务7整改：显式注册默认指标（不再依赖 import 时副作用）
         from core.engine.sub_strategy_indicators import register_default_indicators
+
         register_default_indicators()
 
         # 从策略注册表动态获取各子策略的参数
         # 修复 register_strategies 失效 bug：尊重 self._registered_strategies，
         # 未注册时回退到默认 5 子策略全集。
         _DEFAULT_SUBS = [
-            "trend", "term_structure", "mean_reversion",
-            "vol_breakout", "composite_resonance",
+            "trend",
+            "term_structure",
+            "mean_reversion",
+            "vol_breakout",
+            "composite_resonance",
         ]
         all_strategy_names = self._registered_strategies or _DEFAULT_SUBS
         # 把激活的子策略集合同步给打分引擎，extract_factor_scores 据此过滤
@@ -316,7 +349,9 @@ class PyBrokerBacktestRunner:
         ]
         # 添加通用指标（非策略特定）
         _indicators.append(
-            pybroker.indicator("sma_20", lambda d: pd.Series(d.close).rolling(20).mean().values)
+            pybroker.indicator(
+                "sma_20", lambda d: pd.Series(d.close).rolling(20).mean().values
+            )
         )
 
         symbols = sorted(df["symbol"].unique().tolist())
@@ -334,7 +369,9 @@ class PyBrokerBacktestRunner:
             risk_estimates_provider=self._estimate_symbol_risk,
         )
         blueprint_executor = blueprint_builder.build(strategy_params=sub_params)
-        strategy.add_execution(blueprint_executor, symbols=symbols, indicators=_indicators)
+        strategy.add_execution(
+            blueprint_executor, symbols=symbols, indicators=_indicators
+        )
 
         pb_result = strategy.backtest(
             start_date=start_date,
@@ -450,8 +487,11 @@ class PyBrokerBacktestRunner:
     def _get_default_sub_params(self) -> Dict[str, Dict[str, Any]]:
         """获取默认子策略参数（蓝图模式共用）。"""
         all_strategy_names = [
-            "trend", "term_structure", "mean_reversion",
-            "vol_breakout", "composite_resonance",
+            "trend",
+            "term_structure",
+            "mean_reversion",
+            "vol_breakout",
+            "composite_resonance",
         ]
         sub_params: Dict[str, Dict[str, Any]] = {}
         for sname in all_strategy_names:
@@ -470,16 +510,22 @@ class PyBrokerBacktestRunner:
         step_bars: Optional[int] = None,
     ) -> WalkforwardResult:
         """向前滚动分析。"""
-        _train_bars = train_bars if train_bars is not None else self.config.wf_train_bars
+        _train_bars = (
+            train_bars if train_bars is not None else self.config.wf_train_bars
+        )
         _test_bars = test_bars if test_bars is not None else self.config.wf_test_bars
         _step_bars = step_bars if step_bars is not None else self.config.wf_step_bars
         _train_ratio = train_ratio or self.config.wf_train_ratio
         _step_ratio = step_ratio or self.config.wf_step_ratio
 
         return self._walkforward_custom(
-            start_date, end_date,
-            train_ratio=_train_ratio, step_ratio=_step_ratio,
-            train_bars=_train_bars, test_bars=_test_bars, step_bars=_step_bars,
+            start_date,
+            end_date,
+            train_ratio=_train_ratio,
+            step_ratio=_step_ratio,
+            train_bars=_train_bars,
+            test_bars=_test_bars,
+            step_bars=_step_bars,
         )
 
     def _walkforward_custom(
@@ -528,7 +574,7 @@ class PyBrokerBacktestRunner:
             test_df = df[df["date"].isin(test_dates)]
 
             wf_params = {}
-            for sname in (self._registered_strategies or ["trend"]):
+            for sname in self._registered_strategies or ["trend"]:
                 sp = self.library.get_profile(sname)
                 wf_params[sname] = dict(sp.default_params) if sp else {}
 
@@ -553,13 +599,24 @@ class PyBrokerBacktestRunner:
 
         overall = {}
         if windows:
-            metric_keys = [
-                k
-                for k in windows[0]["metrics"]
-                if isinstance(windows[0]["metrics"][k], (int, float))
+            # 修复 2026-06-10：跨窗口 metrics 字段可能不一致（insufficient_data 时
+            # 返回 {"error": ...}），用集合交集保证只计算所有窗口都有的字段。
+            valid_metric_sets = [
+                set(
+                    k
+                    for k in (w.get("metrics") or {})
+                    if isinstance((w.get("metrics") or {}).get(k), (int, float))
+                )
+                for w in windows
             ]
-            for key in metric_keys:
-                vals = [w["metrics"][key] for w in windows]
+            common_keys = (
+                set.intersection(*valid_metric_sets) if valid_metric_sets else set()
+            )
+            for key in common_keys:
+                vals = [(w.get("metrics") or {}).get(key) for w in windows]
+                vals = [v for v in vals if v is not None]
+                if not vals:
+                    continue
                 overall[key] = round(float(np.mean(vals)), 4)
 
         return WalkforwardResult(
@@ -685,7 +742,9 @@ class PyBrokerBacktestRunner:
         return result
 
     @staticmethod
-    def _generate_simple_signal(df: pd.DataFrame, idx: int, strategy_name: str, params: dict = None) -> int:
+    def _generate_simple_signal(
+        df: pd.DataFrame, idx: int, strategy_name: str, params: dict = None
+    ) -> int:
         """简化信号生成（WalkForward fallback 引擎使用）。5子策略版本。"""
         if params is None:
             params = {}
@@ -705,7 +764,7 @@ class PyBrokerBacktestRunner:
             lookback = params.get("lookback", 20)
             if i < lookback:
                 return 0
-            ma = close.iloc[max(0, i - lookback): i + 1].mean()
+            ma = close.iloc[max(0, i - lookback) : i + 1].mean()
             if ma <= 0:
                 return 0
             spread_pct = (close.iloc[i] - ma) / ma * 100
@@ -724,7 +783,7 @@ class PyBrokerBacktestRunner:
             ma_window = params.get("ma_window", 7)
             if i < ma_window:
                 return 0
-            ma = close.iloc[max(0, i - ma_window): i + 1].mean()
+            ma = close.iloc[max(0, i - ma_window) : i + 1].mean()
             deviation = ma - close.iloc[i]
             signal = np.tanh(deviation * 0.1)
             return 1 if signal > 0.2 else (-1 if signal < -0.2 else 0)
@@ -787,7 +846,10 @@ class _WindowRunner:
     """
 
     def __init__(
-        self, symbols: List[str], strategies: List[str], config: BacktestConfig,
+        self,
+        symbols: List[str],
+        strategies: List[str],
+        config: BacktestConfig,
         strategy_params: dict = None,
     ):
         self.symbols = symbols
@@ -839,10 +901,13 @@ class _WindowRunner:
 
                 stop_pct = cfg.stop_loss_pct
                 if i >= 14:
-                    hw = sym_df["high"].iloc[i-13:i+1]
-                    lw = sym_df["low"].iloc[i-13:i+1]
-                    cs = sym_df["close"].shift(1).iloc[i-13:i+1]
-                    tr = pd.concat([(hw-lw).astype(float), (hw-cs).abs(), (lw-cs).abs()], axis=1).max(axis=1)
+                    hw = sym_df["high"].iloc[i - 13 : i + 1]
+                    lw = sym_df["low"].iloc[i - 13 : i + 1]
+                    cs = sym_df["close"].shift(1).iloc[i - 13 : i + 1]
+                    tr = pd.concat(
+                        [(hw - lw).astype(float), (hw - cs).abs(), (lw - cs).abs()],
+                        axis=1,
+                    ).max(axis=1)
                     atr_val = tr.mean()
                     atr_stop = 2.0 * atr_val / close if close > 0 else stop_pct
                     effective_stop = max(stop_pct, atr_stop)
@@ -851,7 +916,12 @@ class _WindowRunner:
 
                 if position == 1 and close < entry_price * (1 - effective_stop):
                     trade_records.append(
-                        {"date": date, "side": "stop_loss_long", "price": close, "shares": shares}
+                        {
+                            "date": date,
+                            "side": "stop_loss_long",
+                            "price": close,
+                            "shares": shares,
+                        }
                     )
                     cash += shares * close * (1 - cost_rate)
                     position = 0
@@ -859,7 +929,12 @@ class _WindowRunner:
 
                 elif position == -1 and close > entry_price * (1 + effective_stop):
                     trade_records.append(
-                        {"date": date, "side": "stop_loss_short", "price": close, "shares": shares}
+                        {
+                            "date": date,
+                            "side": "stop_loss_short",
+                            "price": close,
+                            "shares": shares,
+                        }
                     )
                     cash -= shares * close * (1 + cost_rate)
                     position = 0
@@ -953,5 +1028,3 @@ class _WindowRunner:
             trades=trades_df,
             switch_log=pd.DataFrame(),
         )
-
-

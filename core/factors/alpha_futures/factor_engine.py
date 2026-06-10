@@ -3,6 +3,7 @@
 
 负责：数据清洗 → 公共数据准备 → 因子调度 → 结果汇总。
 """
+
 import logging
 from typing import Dict, List, Optional, Any
 
@@ -120,6 +121,10 @@ class FactorEngine:
         for factor in self.factors:
             # 提取因子需要的字段
             needs = {k: public_data[k] for k in factor.get_needs() if k in public_data}
+            # 兜底字段：close / zscore_window / oi_mean_20 始终透传，
+            # 让依赖它们做长度对齐的因子（TS_01/02/03/TS_composite）能正确返回 NaN 兜底
+            if "close" in public_data and "close" not in needs:
+                needs["close"] = public_data["close"]
             # 传递配置参数
             needs["zscore_window"] = self._get_zscore_window()
             needs["oi_mean_20"] = public_data.get("oi_mean_20")
@@ -129,7 +134,8 @@ class FactorEngine:
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     "因子 %s compute() 失败: %s；返回全 NaN 兜底",
-                    factor.name, e,
+                    factor.name,
+                    e,
                     exc_info=logger.isEnabledFor(logging.DEBUG),
                 )
                 values = nan_template.copy()
@@ -139,7 +145,8 @@ class FactorEngine:
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     "因子 %s post_process() 失败: %s；返回原始值",
-                    factor.name, e,
+                    factor.name,
+                    e,
                     exc_info=logger.isEnabledFor(logging.DEBUG),
                 )
             # 保存结果
@@ -155,7 +162,9 @@ class FactorEngine:
             if len(_vals) != target_len:
                 logger.warning(
                     "因子 %s 返回长度 %d 与期望 %d 不一致，自动 NaN right-align 兜底",
-                    _name, len(_vals), target_len,
+                    _name,
+                    len(_vals),
+                    target_len,
                 )
                 _aligned = np.full(target_len, np.nan, dtype=float)
                 _n = min(len(_vals), target_len)

@@ -1,13 +1,17 @@
 backtest:
   initial_capital: 1000000
-  commission: 0.0001
+  commission: 0.0002
   slippage: 0.0001
   full_start_date: '2016-01-01'
   full_end_date: '2026-04-01'
   in_sample_end_date: '2023-01-01'
   out_sample_start_date: '2023-01-01'
   rebalance_freq: 5
-  stop_loss_pct: 0.03
+  stop_loss_pct: 0.025
+  take_profit_pct: 0.04
+  trailing_stop_pct: 0.025
+  time_stop_days: 10
+  use_composite_stop: true
   max_position_pct: 0.15
   max_total_position_pct: 0.6
   min_position_pct: 0.0
@@ -20,36 +24,14 @@ backtest:
   use_new_factors: true
   signal_merge_method: equal_weight
 symbols:
-- SHFE.RB
-- DCE.M
-- CZCE.MA
-- CZCE.TA
-- SHFE.AU
-- DCE.I
-- INE.SC
-- SHFE.CU
-- DCE.J
-- CZCE.CF
-- DCE.Y
-- DCE.P
-- DCE.L
-- DCE.PP
-- DCE.V
-- DCE.JD
-- DCE.C
-- DCE.CS
-- CZCE.FG
-- CZCE.SR
-- CZCE.OI
-- CZCE.RM
 - SHFE.AL
-- SHFE.ZN
-- SHFE.NI
-- SHFE.AG
-- SHFE.BU
+- SHFE.CU
+- CZCE.FG
 - SHFE.RU
-- SHFE.FU
-- INE.LU
+- DCE.PP
+- CZCE.CF
+- DCE.J
+- SHFE.RB
 factor_weights:
   trend: 0.2
   term_structure: 0.2
@@ -78,13 +60,24 @@ strategies:
     top_n: 3.0
     rebalance_days: 1.0
 risk_management:
-  stop_loss_pct: 0.03
+  stop_loss_pct: 0.025
   max_drawdown_pct: 0.2
   position_limit_pct: 0.15
   total_position_limit: 0.8
   max_positions: 10
   commission_filter_pct: 0.0
   limit_up_down_protection: true
+risk:
+  stop_optimization_enabled: false
+  trailing_stop:
+    mode: pct
+    trail_pct: 0.03
+    atr_multiplier: 2.0
+  time_stop:
+    max_holding_days: 10
+    target_return: 0.01
+  composite_stop:
+    fixed_stop_pct: 0.05
 walk_forward:
   train_bars: 252
   test_bars: 63
@@ -137,17 +130,6 @@ factors:
     spread_window: 60
     smoothing_window: 3
     direction: revert
-risk:
-  stop_optimization_enabled: false
-  trailing_stop:
-    mode: pct
-    trail_pct: 0.03
-    atr_multiplier: 2.0
-  time_stop:
-    max_holding_days: 10
-    target_return: 0.01
-  composite_stop:
-    fixed_stop_pct: 0.05
 validation:
   enabled: false
   monte_carlo:

@@ -290,12 +290,20 @@ class PyBrokerExecutorBuilder:
         return target_weight
 
     def _check_stop_loss(self, ctx: ExecContext, current_close: Optional[float]) -> bool:
-        """检查止损：委托给 RiskController。"""
-        # 通过 ATR 动态止损阈值与配置止损比较
+        """检查止损：委托给 RiskController。
+
+        P0-2 整改（2026-06-10）：
+          - 复合止损启用（use_composite_stop=True）时优先走 check_composite_stop
+            路径，使用 entry_price + highest/lowest 跟踪追踪/时间止损
+          - 由于 PyBroker Pos 对象未直接暴露 entry_price/held_days，这里以
+            浮盈 PnL% 反向推算 entry_price：entry ≈ current_close - pnl/shares
+          - highest/lowest 不可获取时用 current_close 近似
+          - 复合止损禁用或调用失败时回退到 PnL-based 固定止损路径
+        """
         atr = _get_indicator(ctx, "atr_14")
         long_pos = ctx.pos(ctx.symbol, "long")
         short_pos = ctx.pos(ctx.symbol, "short")
-        for pos, side_sign in ((long_pos, 1), (short_pos, -1)):
+        for pos, direction in ((long_pos, "long"), (short_pos, "short")):
             if pos is None:
                 continue
             try:
@@ -304,16 +312,70 @@ class PyBrokerExecutorBuilder:
                 if equity <= 0:
                     continue
                 pnl_pct = pnl / equity
+
+                # ── P0-2 整改：优先走复合止损（追踪/时间/固定） ──
+                if (
+                    self.risk_controller is not None
+                    and self.risk_controller.composite_stop is not None
+                    and current_close is not None
+                    and current_close > 0
+                ):
+                    # 反推 entry_price：equity = shares * entry_price,
+                    # pnl = shares * (current_close - entry_price)
+                    shares = float(equity) / current_close if pnl_pct == 0 else (
+                        abs(pnl) / max(abs(pnl_pct) * current_close, 1e-9)
+                    )
+                    if shares <= 0:
+                        continue
+                    entry_price = current_close - pnl / shares if direction == "long" \
+                        else current_close + pnl / shares
+                    # 多头用 current_close 近似 highest，空头用 lowest
+                    if direction == "long":
+                        result = self.risk_controller.check_composite_stop(
+                            symbol=ctx.symbol,
+                            direction="long",
+                            entry_price=entry_price,
+                            current_price=current_close,
+                            highest_since_entry=current_close,
+                            lowest_since_entry=current_close,
+                            entry_day=0,
+                            current_day=0,
+                            atr_value=float(atr) if atr else None,
+                            auto_register_entry=False,
+                        )
+                    else:
+                        result = self.risk_controller.check_composite_stop(
+                            symbol=ctx.symbol,
+                            direction="short",
+                            entry_price=entry_price,
+                            current_price=current_close,
+                            highest_since_entry=current_close,
+                            lowest_since_entry=current_close,
+                            entry_day=0,
+                            current_day=0,
+                            atr_value=float(atr) if atr else None,
+                            auto_register_entry=False,
+                        )
+                    if result.triggered:
+                        _logger.info(
+                            "%s 触发%s: %s",
+                            ctx.symbol, direction, result.trigger_reason,
+                        )
+                        return True
+                    # 复合止损未触发时，浮盈情况下也允许继续持有
+                    if pnl_pct >= 0:
+                        continue
+
+                # ── 回退路径：PnL-based 固定止损（兼容旧逻辑） ──
                 if pnl_pct >= 0:
                     continue
-                # 计算有效止损阈值
                 effective_stop = self.config.stop_loss_pct
                 if current_close and current_close > 0 and atr:
                     atr_stop = float(atr) * 2.0 / current_close
                     effective_stop = max(effective_stop, atr_stop)
                 if -pnl_pct > effective_stop:
                     _logger.info(
-                        "%s 触发止损: 亏损=%.2f%%, 阈值=%.2f%%",
+                        "%s 触发止损(fixed): 亏损=%.2f%%, 阈值=%.2f%%",
                         ctx.symbol, pnl_pct * 100, effective_stop * 100,
                     )
                     return True

@@ -785,12 +785,17 @@ class DataLoader(DataProvider):
 
         对每个品种的每个交易日：
           - 近月 = 当日主力合约
-          - 远月 = 同品种中持仓量第二大的合约（或按到期月份排序的下一个合约）
+          - 远月 = 同品种中持仓量第二大的合约（OI 排名=2）
 
         在 full_df 中新增列：
           - far_symbol: 远月合约代码
           - far_close: 远月收盘价
           - spread: 近月收盘价 - 远月收盘价
+
+        P1 整改（2026-06-10）：原实现 O(N_date × N_contracts) 嵌套循环，
+        在 30+ 品种 × 170k+ 行下耗时长。改为 O(N) 向量化：
+        groupby(['date', 'product']) + rank() 一次得到 OI 排名，
+        提取 OI 排名=2 的行作为远月，再 merge 回全量数据。
         """
         if self.full_df is None:
             self.build_continuous_series()
@@ -805,61 +810,44 @@ class DataLoader(DataProvider):
             self.full_df = df
             return df
 
-        # 仅对主力合约行构建近远月对
-        dominant_rows = df[df["is_dominant"]].copy()
+        # 向量化：按 (date, product) 计算 OI 排名
+        # OI 排名=1：主力；OI 排名=2：远月；其余：忽略
+        df["_oi_rank_in_dp"] = df.groupby(["date", "product"])["open_interest"].rank(
+            method="first", ascending=False
+        )
 
-        far_data = []
-        for date, group in dominant_rows.groupby("date"):
-            for _, row in group.iterrows():
-                product = row.get("product", "")
-                dom_symbol = row["dominant_symbol"]
+        # 提取远月合约（OI 排名=2）信息
+        far_rows = df[df["_oi_rank_in_dp"] == 2][["date", "product", "symbol", "close"]].rename(
+            columns={"symbol": "far_symbol", "close": "far_close"}
+        )
 
-                # 同品种、同日、非主力的合约
-                same_product = df[
-                    (df["date"] == date)
-                    & (df.get("product", "") == product)
-                    & (df["symbol"] != dom_symbol)
-                ]
-
-                if same_product.empty:
-                    far_data.append({
-                        "date": date,
-                        "dominant_symbol": dom_symbol,
-                        "far_symbol": "",
-                        "far_close": np.nan,
-                    })
-                    continue
-
-                # 按持仓量排序，取第二大持仓量的合约作为远月
-                same_product_sorted = same_product.sort_values(
-                    "open_interest", ascending=False
-                )
-                far_row = same_product_sorted.iloc[0]
-
-                far_data.append({
-                    "date": date,
-                    "dominant_symbol": dom_symbol,
-                    "far_symbol": far_row["symbol"],
-                    "far_close": far_row["close"],
-                })
-
-        if not far_data:
+        # 仅在主力合约行追加远月列（其余行保持 NaN）
+        dominant = df["is_dominant"].fillna(False)
+        if far_rows.empty:
+            # 无远月数据时直接补空列
             df["far_symbol"] = ""
             df["far_close"] = np.nan
             df["spread"] = np.nan
+            df["spread"] = np.where(
+                dominant, df["close"] - df["far_close"], np.nan
+            )
+            df = df.drop(columns=["_oi_rank_in_dp"])
             self.full_df = df
             return df
 
-        far_df = pd.DataFrame(far_data)
-
-        # 合并远月数据到 full_df（仅主力合约行有远月信息）
-        df = df.merge(
-            far_df[["date", "dominant_symbol", "far_symbol", "far_close"]],
-            on=["date", "dominant_symbol"],
-            how="left",
+        # 远月信息按 (date, product) merge 到全量数据
+        df = df.merge(far_rows, on=["date", "product"], how="left")
+        # 非主力合约行的 far_close/far_symbol 强制 NaN（避免误用远月数据）
+        df.loc[~dominant, "far_close"] = np.nan
+        df.loc[~dominant, "far_symbol"] = ""
+        # spread：仅主力合约行有效
+        df["spread"] = np.where(
+            dominant & df["far_close"].notna(),
+            df["close"] - df["far_close"],
+            np.nan,
         )
-        df["spread"] = df["close"] - df["far_close"]
 
+        df = df.drop(columns=["_oi_rank_in_dp"])
         self.full_df = df
         return df
 
