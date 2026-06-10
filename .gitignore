@@ -34,14 +34,7 @@ unified_backtest_results_*/
 output_*/
 term_structure_backtest_results/
 
-# 临时脚本
-analyze_loss_years.py
-backtest_visualization.py
-simple_analyze.py
-md_to_html.py
-
-# 配置示例文件
-backtest_config_example.json
+# 数据缓存
 data_cache/
 skills-lock.json
 .trae/skills/agent-reviewer/SKILL.md
