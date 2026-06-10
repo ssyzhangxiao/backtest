@@ -2,8 +2,8 @@ backtest:
   initial_capital: 1000000
   commission: 0.0002
   slippage: 0.0001
-  full_start_date: '2016-01-01'
-  full_end_date: '2026-04-01'
+  full_start_date: '2020-01-01'
+  full_end_date: '2025-01-01'
   in_sample_end_date: '2023-01-01'
   out_sample_start_date: '2023-01-01'
   rebalance_freq: 5
