@@ -65,10 +65,6 @@ def grid_search_single_strategy(
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
 
-        # 期限结构策略的入场/出场阈值合法性检查
-        if strategy_name == "term_structure" and params.get("entry_threshold", 0) <= params.get("exit_threshold", 999):
-            continue
-
         try:
             runner = PyBrokerBacktestRunner(ds, bt_config)
             runner.register_strategies([strategy_name])

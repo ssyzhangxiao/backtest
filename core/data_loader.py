@@ -97,7 +97,11 @@ _DEFAULT_SYMBOLS = [
 # 常量配置
 # ---------------------------------------------------------------------------
 _DAILY_SECONDS = 86400  # 86400 秒 = 1 天，用于 TqSdk K 线日线周期
-_MAX_CONTRACTS_PER_PRODUCT = 20  # 每个品种最多下载的合约数
+# 60 个合约 ≈ 5 年覆盖：
+#   - SHFE/DCE（每月合约）: 60 × 1 month = 5 年
+#   - CZCE（双月合约）: 60 × 2 months = 10 年
+# 20 个合约只覆盖 20 个月，无法支持 3 年 OOS 验证。
+_MAX_CONTRACTS_PER_PRODUCT = 60  # 每个品种最多下载的合约数
 
 
 from core.data_provider import DataProvider
@@ -216,9 +220,13 @@ class DataLoader(DataProvider):
     # ------------------------------------------------------------------
 
     def _get_cache_path(self, symbol: str) -> Path:
-        """获取品种数据的缓存路径"""
+        """获取品种数据的缓存路径
+
+        Cache key 包含 data_length 和 _MAX_CONTRACTS_PER_PRODUCT，
+        调整任一参数都会导致旧缓存失效（这是预期行为）。
+        """
         sanitized = symbol.replace(".", "_").replace("-", "_")
-        return CACHE_DIR / f"{sanitized}_{self._data_length}.pkl"
+        return CACHE_DIR / f"{sanitized}_{self._data_length}_{_MAX_CONTRACTS_PER_PRODUCT}.pkl"
 
     def _is_cache_valid(self, cache_path: Path) -> bool:
         """检查缓存是否有效"""
@@ -333,9 +341,20 @@ class DataLoader(DataProvider):
         if not quotes:
             raise RuntimeError(f"未查到 {product_symbol} 的合约")
 
-        # 按到期月份排序，取最近的 N 个合约
-        sorted_contracts = sorted(quotes, key=self._parse_contract_month)[:_MAX_CONTRACTS_PER_PRODUCT]
-        _logger.info("%s: 找到 %d 个合约", product_symbol, len(sorted_contracts))
+        # 按到期月份**降序**排序，取最近的 N 个合约
+        # 旧实现是升序取前 N → 拿到的是 4 年前已退市的旧合约 (如 al2009-al2204)，
+        # 导致 2023/2024 数据缺失、is_dominant 标记失效。
+        # 修复：降序取前 20 个最近的合约（al2509-al2606）。
+        sorted_contracts = sorted(
+            quotes, key=self._parse_contract_month, reverse=True
+        )[:_MAX_CONTRACTS_PER_PRODUCT]
+        _logger.info(
+            "%s: 找到 %d 个合约 (最旧=%s, 最新=%s)",
+            product_symbol,
+            len(sorted_contracts),
+            sorted_contracts[-1],
+            sorted_contracts[0],
+        )
 
         contract_dfs = []
         for ins_id in sorted_contracts:
