@@ -100,15 +100,24 @@ def run_e6_walkforward(
                 start_date=bt_cfg["full_start_date"],
                 end_date=bt_cfg["full_end_date"],
             )
+            # 修复 2026-06-10：兼容 _WindowRunner._compute_simple_metrics
+            # 返回的 metrics 字段（既有 total_return 也有 total_return_pct，
+            # 但 DataFrame 构造时嵌套 dict 会触发 KeyError）。
+            # 显式平铺 metrics 到外层 dict，避免 pandas 内部 dict 转换失败。
             for w in wf_result.windows:
-                w["strategy"] = sname
-                all_wf_metrics.append(w)
+                flat_w = dict(w)  # 浅拷贝
+                metrics_nested = flat_w.pop("metrics", {}) or {}
+                for mk, mv in metrics_nested.items():
+                    flat_w[f"metric_{mk}"] = mv
+                flat_w["strategy"] = sname
+                all_wf_metrics.append(flat_w)
             logger.info(
                 f"  {sname}: {len(wf_result.windows)} 窗口, "
                 f"avg_sharpe={wf_result.overall_metrics.get('sharpe', 'N/A')}"
             )
         except Exception as e:
             logger.error(f"  {sname} WalkForward 失败: {e}")
+            logger.exception(f"  {sname} WalkForward 异常详情")
 
     df = pd.DataFrame(all_wf_metrics) if all_wf_metrics else pd.DataFrame()
     if not df.empty:

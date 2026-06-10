@@ -72,16 +72,18 @@ def _ohlcv_from_bar(bar_data) -> Optional[pd.DataFrame]:
             dates = pd.date_range("2025-01-01", periods=n, freq="D")
         else:
             dates = pd.to_datetime(dates)
-        return pd.DataFrame({
-            "date": dates,
-            "open": np.asarray(open_, dtype=float),
-            "high": np.asarray(high, dtype=float),
-            "low": np.asarray(low, dtype=float),
-            "close": np.asarray(close, dtype=float),
-            "volume": np.asarray(volume, dtype=float),
-            "open_interest": np.asarray(oi, dtype=float),
-            "far_close": fc,
-        })
+        return pd.DataFrame(
+            {
+                "date": dates,
+                "open": np.asarray(open_, dtype=float),
+                "high": np.asarray(high, dtype=float),
+                "low": np.asarray(low, dtype=float),
+                "close": np.asarray(close, dtype=float),
+                "volume": np.asarray(volume, dtype=float),
+                "open_interest": np.asarray(oi, dtype=float),
+                "far_close": fc,
+            }
+        )
     except Exception:
         return None
 
@@ -90,12 +92,17 @@ def _ohlcv_from_bar(bar_data) -> Optional[pd.DataFrame]:
 _DEFAULT_CONFIG = AlphaFuturesConfig()
 
 
-def _signal_from_factor_column(bar_data, column: str) -> np.ndarray:
+def _signal_from_factor_column(
+    bar_data, column: str, strategy_params: Optional[Dict[str, Dict[str, Any]]] = None
+) -> np.ndarray:
     """
     通用：调路径 A 的因子聚合器，提取指定列作为 PyBroker 指标输出。
 
     路径 C→A 合并后，所有 5 个 build_xxx_indicators 内部走此函数，
     保证主回测与因子验证的算法一致性。
+
+    strategy_params 透传 best_params（trend.window 等），让参数化窗口动量通道
+    真正生效。
     """
     df = _ohlcv_from_bar(bar_data)
     if df is None or len(df) < 30:
@@ -104,7 +111,11 @@ def _signal_from_factor_column(bar_data, column: str) -> np.ndarray:
         n = len(close_arr) if close_arr is not None else 0
         return np.zeros(n, dtype=float)
     try:
-        scored = compute_sub_strategy_scores_from_ohlcv(df, config=_DEFAULT_CONFIG)
+        scored = compute_sub_strategy_scores_from_ohlcv(
+            df,
+            config=_DEFAULT_CONFIG,
+            strategy_params=strategy_params,
+        )
         if column not in scored.columns:
             return np.zeros(len(df), dtype=float)
         return scored[column].fillna(0.0).to_numpy()
@@ -119,11 +130,13 @@ def _signal_from_factor_column(bar_data, column: str) -> np.ndarray:
 
 
 def build_trend_indicators(params: Dict[str, Any]) -> List[tuple]:
-    """构建趋势策略 PyBroker 指标。"""
-    del params  # 参数由 AlphaFuturesConfig 统一管理
+    """构建趋势策略 PyBroker 指标。params 透传 best_params（含 trend.window）。"""
+    captured_params = dict(params or {})
 
     def trend_signal(bar_data):
-        return _signal_from_factor_column(bar_data, "trend")
+        return _signal_from_factor_column(
+            bar_data, "trend", strategy_params={"trend": captured_params}
+        )
 
     return [("trend_signal", trend_signal)]
 
@@ -136,40 +149,56 @@ def build_term_structure_indicators(params: Dict[str, Any]) -> List[tuple]:
       原实现用单合约收盘价相对均线的偏离**模拟**期限结构，与因子库的 TS_01/TS_02/TS_03
       算法不一致。现在统一调 `compute_sub_strategy_scores_from_ohlcv` 提取 `term_structure` 列。
     """
-    del params  # 参数由 AlphaFuturesConfig 统一管理
+    captured_params = dict(params or {})
 
     def term_structure_signal(bar_data):
-        return _signal_from_factor_column(bar_data, "term_structure")
+        return _signal_from_factor_column(
+            bar_data,
+            "term_structure",
+            strategy_params={"term_structure": captured_params},
+        )
 
     return [("term_structure_signal", term_structure_signal)]
 
 
 def build_mean_reversion_indicators(params: Dict[str, Any]) -> List[tuple]:
-    """构建均值回归策略 PyBroker 指标（走路径 A）。"""
-    del params
+    """构建均值回归策略 PyBroker 指标（走路径 A）。params 透传 best_params。"""
+    captured_params = dict(params or {})
 
     def mean_reversion_signal(bar_data):
-        return _signal_from_factor_column(bar_data, "mean_reversion")
+        return _signal_from_factor_column(
+            bar_data,
+            "mean_reversion",
+            strategy_params={"mean_reversion": captured_params},
+        )
 
     return [("mean_reversion_signal", mean_reversion_signal)]
 
 
 def build_vol_breakout_indicators(params: Dict[str, Any]) -> List[tuple]:
-    """构建波动率突破策略 PyBroker 指标（走路径 A）。"""
-    del params
+    """构建波动率突破策略 PyBroker 指标（走路径 A）。params 透传 best_params。"""
+    captured_params = dict(params or {})
 
     def vol_breakout_signal(bar_data):
-        return _signal_from_factor_column(bar_data, "vol_breakout")
+        return _signal_from_factor_column(
+            bar_data,
+            "vol_breakout",
+            strategy_params={"vol_breakout": captured_params},
+        )
 
     return [("vol_breakout_signal", vol_breakout_signal)]
 
 
 def build_composite_indicators(params: Dict[str, Any]) -> List[tuple]:
-    """构建复合共振策略 PyBroker 指标（走路径 A）。"""
-    del params
+    """构建复合共振策略 PyBroker 指标（走路径 A）。params 透传 best_params。"""
+    captured_params = dict(params or {})
 
     def composite_signal(bar_data):
-        return _signal_from_factor_column(bar_data, "composite_resonance")
+        return _signal_from_factor_column(
+            bar_data,
+            "composite_resonance",
+            strategy_params={"composite_resonance": captured_params},
+        )
 
     return [("composite_signal", composite_signal)]
 

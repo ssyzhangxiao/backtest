@@ -85,6 +85,17 @@ def get_pybroker_runner(
     runner = PyBrokerBacktestRunner(data_source, bt_config, target_symbols=symbols)
     if strategies:
         runner.register_strategies(strategies)
+        # 修复 best_params 失效 bug：把 config["strategies"][*].params 注入到
+        # custom_params，让 PyBroker run() 的 sub_params.update(custom_params) 生效。
+        custom = {}
+        for sname in strategies:
+            for s_cfg in config.get("strategies", []) or []:
+                if s_cfg.get("name") == sname and s_cfg.get("params"):
+                    custom[sname] = dict(s_cfg["params"])
+                    break
+        if custom:
+            runner.set_custom_params(custom)  # type: ignore[attr-defined]
+            logger.debug("已注入最优参数到 PyBroker: %s", list(custom.keys()))
     return runner
 
 

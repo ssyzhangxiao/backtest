@@ -21,7 +21,7 @@ P0 整改：从 OHLCV DataFrame 直接计算 5 子策略因子得分。
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,8 +33,11 @@ from .factor_registry import get_sub_strategy_factors
 from .config import AlphaFuturesConfig
 
 DEFAULT_FACTOR_NAMES = [
-    "trend", "term_structure", "mean_reversion",
-    "vol_breakout", "composite_resonance",
+    "trend",
+    "term_structure",
+    "mean_reversion",
+    "vol_breakout",
+    "composite_resonance",
 ]
 
 
@@ -43,7 +46,9 @@ def _safe_clip(series: pd.Series, lo: float = -1.0, hi: float = 1.0) -> pd.Serie
     return series.fillna(0.0).clip(lower=lo, upper=hi)
 
 
-def _aggregate_group(factor_results: Dict[str, np.ndarray], names: List[str]) -> np.ndarray:
+def _aggregate_group(
+    factor_results: Dict[str, np.ndarray], names: List[str]
+) -> np.ndarray:
     """对同组因子取均值（缺失跳过），返回长度一致的一维数组。
 
     数据缺失语义：
@@ -99,6 +104,8 @@ def compute_sub_strategy_scores_from_ohlcv(
     config: Optional[AlphaFuturesConfig] = None,
     atr_period: int = 14,
     atr_scaling: float = 10.0,
+    strategy_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    param_window_blend: float = 0.3,
 ) -> pd.DataFrame:
     """
     从 OHLCV DataFrame 计算 5 子策略因子得分（替代 basic_factors.compute_factor_scores_from_ohlcv）。
@@ -116,6 +123,13 @@ def compute_sub_strategy_scores_from_ohlcv(
         atr_scaling: ATR 归一化缩放系数（trend / term_structure 专用）。
                      经验值 10.0，对应 1 个 ATR ≈ 10 倍归一化单位；
                      调大可降低信号幅度，调小可放大。NaN 时使用 1e-8 兜底。
+        strategy_params: 子策略参数 {strategy_name: params}，用于叠加参数化窗口动量
+                        通道（best_params 真正生效的入口）。None 或缺失关键参数时
+                        退化为纯因子库输出（与旧行为一致）。
+        param_window_blend: 参数化窗口动量通道权重（0~1，0 表示关闭通道）。
+                          默认 0.3（2026-06-10 选项 B 修复：从 0.1 恢复 0.3，
+                          避免压过 T_01..T_05 多因子集成 + 保留 best_params
+                          30% 边际贡献。算法已升级为 SMA 斜率，更鲁棒）。
 
     Returns:
         含以下列的 DataFrame：
@@ -129,8 +143,13 @@ def compute_sub_strategy_scores_from_ohlcv(
     close = df["close"].astype(float)
     high = df["high"].astype(float)
     low = df["low"].astype(float)
-    volume = df["volume"].astype(float) if "volume" in df.columns else pd.Series(
-        np.zeros(len(df)), index=df.index,
+    volume = (
+        df["volume"].astype(float)
+        if "volume" in df.columns
+        else pd.Series(
+            np.zeros(len(df)),
+            index=df.index,
+        )
     )
 
     # 1) 一次性计算 24 因子
@@ -138,11 +157,14 @@ def compute_sub_strategy_scores_from_ohlcv(
     engine = FactorEngine(cfg)
     raw = {
         "close": close.to_numpy(),
-        "open_price": df["open"].astype(float).to_numpy() if "open" in df.columns else close.to_numpy(),
+        "open_price": df["open"].astype(float).to_numpy()
+        if "open" in df.columns
+        else close.to_numpy(),
         "high": high.to_numpy(),
         "low": low.to_numpy(),
         "open_interest": df["open_interest"].astype(float).to_numpy()
-        if "open_interest" in df.columns else np.zeros(len(df)),
+        if "open_interest" in df.columns
+        else np.zeros(len(df)),
         "volume": volume.to_numpy(),
     }
     # 期限结构因子（TS_01/02/03）需要近月/远月价：
@@ -173,9 +195,99 @@ def compute_sub_strategy_scores_from_ohlcv(
             ser = (ser / (mom_scale * atr_scaling + 1e-8)).pipe(_safe_clip)
         else:
             ser = _safe_clip(ser)
+        # 3.1) 参数化窗口动量叠加通道（best_params 真正生效的入口）
+        # 权重 0.1 让 T_01..T_05 多因子集成占主导，窗口动量做边际增强
+        ser = _apply_param_window(
+            ser,
+            sname,
+            close,
+            strategy_params,
+            mom_scale,
+            blend=param_window_blend,
+        )
         df[sname] = ser
 
     # 4) 前瞻收益（5日）
     df["forward_return"] = close.shift(-5) / close - 1.0
 
     return df
+
+
+def _apply_param_window(
+    ser: pd.Series,
+    sname: str,
+    close: pd.Series,
+    strategy_params: Optional[Dict[str, Dict[str, Any]]],
+    mom_scale: pd.Series,
+    blend: float = 0.3,
+) -> pd.Series:
+    """
+    在已有子策略信号上叠加一条"参数化 SMA 斜率"通道。
+
+    这是 best_params（trend.window / term_structure.lookback / mean_reversion.short_window
+    / vol_breakout.ma_window）真正生效的入口。
+
+    算法（2026-06-10 选项 B 升级）：
+      旧版：`window_ret = close / close.shift(w) - 1`（原始动量，噪声大）
+      新版：`sma_slope  = (close - SMA(w)) / SMA(w)`（价格相对 SMA 的偏离度）
+      新版优势：SMA 自身做了一次平滑，信号噪声显著低于原始动量，
+                且在不同品种/波动率上更稳定。
+
+    设计要点：
+      - 只在 strategy_params 显式提供窗口参数时才叠加（默认行为不变，零回归风险）
+      - 归一化：sma_slope / mom_scale + tanh
+      - blend 默认 0.3（2026-06-10 选项 B 修复：从 0.1 恢复 0.3，保留 best_params
+        30% 边际贡献。E1 v2 实验证明 blend=0.1 会让 best_params 失效，
+        avg Sharpe 反而下降 8.19%）
+      - 叠加后重新 clip 到 [-1, 1]
+
+    Args:
+        ser: 现有子策略因子得分序列
+        sname: 子策略名
+        close: 收盘价序列
+        strategy_params: 子策略参数 {strategy_name: params}
+        mom_scale: ATR/close 缩放序列
+        blend: 窗口 SMA 斜率通道权重（0~1，0 表示关闭通道）
+
+    Returns:
+        叠加后的子策略得分序列
+    """
+    if not strategy_params or blend <= 0:
+        return ser
+    sp = strategy_params.get(sname) or {}
+    if not sp:
+        return ser
+    # 不同子策略的窗口参数键
+    window_key_map = {
+        "trend": "window",
+        "term_structure": "lookback",
+        "mean_reversion": "short_window",
+        "vol_breakout": "ma_window",
+        "composite_resonance": "window",
+    }
+    w = sp.get(window_key_map.get(sname, "window"))
+    if w is None:
+        return ser
+    try:
+        w = int(w)
+    except (TypeError, ValueError):
+        return ser
+    if w < 2 or w >= len(close):
+        return ser
+
+    # SMA 斜率（2026-06-10 升级）：
+    # 旧版：window_ret = (close / close.shift(w) - 1.0)            # 原始动量
+    # 新版：sma_slope  = (close - sma(w)) / sma(w)                  # SMA 偏离度
+    sma_w = close.rolling(window=w, min_periods=max(2, w // 2)).mean()
+    sma_safe = sma_w.replace(0, np.nan)
+    sma_slope = ((close - sma_w) / sma_safe).fillna(0.0)
+    scaled = (sma_slope / (mom_scale + 1e-8)).clip(lower=-3.0, upper=3.0)
+    # tanh 软饱和到 [-1, 1]
+    window_signal = np.tanh(scaled).fillna(0.0)
+
+    # 重新索引对齐（避免 index 不一致）
+    window_signal = window_signal.reindex(ser.index, fill_value=0.0)
+
+    # 加权混合：(1 - blend) * 原信号 + blend * SMA 斜率，再 clip
+    blended = (1.0 - blend) * ser + blend * window_signal
+    return blended.clip(lower=-1.0, upper=1.0).fillna(0.0)
