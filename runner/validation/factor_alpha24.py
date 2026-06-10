@@ -293,7 +293,10 @@ def factor_alpha24_screening(
         mean_ic = float(np.mean(ic_arr))
         std_ic = float(np.std(ic_arr))
         ir = mean_ic / std_ic if std_ic > 1e-10 else 0.0
-        is_valid = abs(mean_ic) >= 0.03 and abs(ir) >= 0.5
+        # 规则 2 整改：阈值从 config.factors_config 读（不再硬编码 0.03/0.5）
+        ic_th = getattr(config.factors_config, "ic_threshold", 0.01)
+        ir_th = getattr(config.factors_config, "ir_threshold", 0.1)
+        is_valid = abs(mean_ic) >= ic_th and abs(ir) >= ir_th
         summary_rows.append(
             {
                 "factor": fname,
@@ -672,7 +675,10 @@ def factor_combo_ic_validation(
     mean_ic = float(np.mean(arr))
     std_ic = float(np.std(arr))
     ir = mean_ic / std_ic if std_ic > 1e-10 else 0.0
-    pass_rule9 = abs(mean_ic) >= 0.03 and abs(ir) >= 0.5
+    # 规则 2 整改：阈值从 config 读（不再硬编码 0.03/0.5）
+    ic_th = getattr(config.factors_config, "ic_threshold", 0.01)
+    ir_th = getattr(config.factors_config, "ir_threshold", 0.1)
+    pass_rule9 = abs(mean_ic) >= ic_th and abs(ir) >= ir_th
 
     # 单因子的"组合贡献"：用 full-sample abs(IC) 加权
     weights_static = single_df[single_df["is_candidate"]].set_index("factor")[

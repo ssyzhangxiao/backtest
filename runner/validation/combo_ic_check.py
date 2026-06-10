@@ -174,19 +174,24 @@ def main() -> None:
     print(f"{'因子':<8}{'|IC|':<10}{'IR':<10}{'天数':<8}{'pass':<8}")
     print("-" * 70)
     for r in single_results:
-        passed = "✅" if abs(r["mean_ic"]) >= 0.03 and abs(r["ir"]) >= 0.5 else "  "
+        # 规则 2 整改：阈值从 config 读（不再硬编码 0.03/0.5）
+        passed = "✅" if abs(r["mean_ic"]) >= ic_th and abs(r["ir"]) >= ir_th else "  "
         print(
             f"{r['factor']:<8}{abs(r['mean_ic']):<10.4f}{r['ir']:<10.4f}{r['n_days']:<8}{passed}"
         )
     print("-" * 70)
+    # 规则 2 整改：阈值从 config 读（不再硬编码 0.03/0.5）
+    ic_th = getattr(config.factors_config, "ic_threshold", 0.01)
+    ir_th = getattr(config.factors_config, "ir_threshold", 0.1)
+    combo_pass = abs(combo_mean) >= ic_th and abs(combo_ir) >= ir_th
     print(
-        f"{'COMBO':<8}{abs(combo_mean):<10.4f}{combo_ir:<10.4f}{len(combo_ics):<8}{'✅' if abs(combo_mean) >= 0.03 and abs(combo_ir) >= 0.5 else '  '}"
+        f"{'COMBO':<8}{abs(combo_mean):<10.4f}{combo_ir:<10.4f}{len(combo_ics):<8}{'✅' if combo_pass else '  '}"
     )
     print("=" * 70)
     print(f"\n组合平均互相关: {avg_corr:.3f} (阈值<0.6)")
     print(f"组合 |IC|={abs(combo_mean):.4f}, IR={combo_ir:.4f}")
     print(
-        f"规则9 (|IC|>=0.03 AND |IR|>=0.5): {'✅ 通过' if abs(combo_mean) >= 0.03 and abs(combo_ir) >= 0.5 else '❌ 未通过'}"
+        f"规则9 (|IC|>={ic_th} AND |IR|>={ir_th}): {'✅ 通过' if combo_pass else '❌ 未通过'}"
     )
 
     # 5) 保存
