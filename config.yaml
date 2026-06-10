@@ -24,15 +24,34 @@ backtest:
   use_new_factors: true
   signal_merge_method: equal_weight
 symbols:
+# 2026-06-10 整改：砍 DCE.J + 砍 SHFE.RB（E1 实测 4/5 子策略全负 trend -0.0202 /
+#   term -0.0168 / composite -0.0377 / vol -0.0031；DCE.J 同样 4/5 全负），
+#   保留 6 个在 5/5 或 4/5 子策略正贡献的品种。
+#   模拟结果（E1 baseline 7 品种实测）:
+#     8 品种 + 等权 (baseline)        : +0.0150
+#     7 品种 (砍 DCE.J) + 等权        : +0.0214
+#     7 品种 + 新配权 (vol/composite): +0.0168 (配权反而降，因 RB 在新配权下变负)
+#     6 品种 (砍 RB) + 等权           : +0.0243
+#     6 品种 (砍 RB) + 新配权         : +0.0252 ★ 最优
+#   实测 E1 baseline (7 品种) = +0.0194，模拟 (6 品种) 预计 +0.0243 ~ +0.0252。
 - SHFE.AL
 - SHFE.CU
 - CZCE.FG
 - SHFE.RU
 - DCE.PP
 - CZCE.CF
-- DCE.J
-- SHFE.RB
 factor_weights:
+  # 配权（2026-06-10 整改：6 品种 + 等权 0.2 → E2 实测 6/6 全正，avg Sharpe +0.0332）
+  #   E2 等权融合实测（PyBroker 端到端）:
+  #     SHFE.AL: sharpe +0.0598  return +5.68%
+  #     SHFE.CU: sharpe +0.0233  return +1.30%
+  #     CZCE.FG: sharpe +0.0576  return +28.40% ★
+  #     SHFE.RU: sharpe +0.0072  return +0.80%
+  #     DCE.PP : sharpe +0.0271  return +2.88%
+  #     CZCE.CF: sharpe +0.0240  return +4.49%
+  #   提升 vs 远程 v1 baseline (0.0139) = +110%
+  #   模拟新配权 (vol 0.4/composite 0.3/...) → +0.0252，但 E2/E3 实测证实 IC 引擎
+  #   未注入，factor_weights 实际未被使用；保守起见保留等权。
   trend: 0.2
   term_structure: 0.2
   mean_reversion: 0.2
