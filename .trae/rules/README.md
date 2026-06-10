@@ -58,6 +58,7 @@
 | 17 | 不重复造轮子 — 优先调用公共系统 | [01-basics/17-common-systems.md](./01-basics/17-common-systems.md) |
 | 18 | Pipeline 编排器 — 声明式调用 | [01-basics/18-pipeline.md](./01-basics/18-pipeline.md) |
 | 19 | 依赖方向检查 — 禁止反向依赖 | [01-basics/19-dependencies.md](./01-basics/19-dependencies.md) |
+| 20 | 根目录脚本迁移 — run_*.py 必须收敛到 Pipeline | [01-basics/20-root-scripts-migration.md](./01-basics/20-root-scripts-migration.md) |
 
 ### 回测引擎
 

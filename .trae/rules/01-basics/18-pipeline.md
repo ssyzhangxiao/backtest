@@ -8,3 +8,4 @@
 - 通过 `load_data().run_backtest().optimize().validate().report()` 链式组合流程
 - 新增实验/优化/验证方法只需在对应目录添加文件并注册到 Pipeline
 - 使用 `is_healthy()` 检查状态健康度
+- 根目录脚本与 Pipeline 方法的迁移约束见规则 20

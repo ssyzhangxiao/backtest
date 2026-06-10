@@ -8,7 +8,7 @@ Pipeline 编排器。
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -123,6 +123,130 @@ class Pipeline:
             self._raw_config,
             cross_sectional=cross_sectional,
             strategy=strategy,
+        )
+        return self
+
+    def run_experiments(
+        self,
+        experiments: List[str],
+        cross_sectional: bool = False,
+    ) -> "Pipeline":
+        """
+        批量执行多个实验（委托 runner/backtest/experiments.run_experiment）。
+
+        用于在一次调用中按顺序跑 E1~E11 中指定子集，逐个打印指标摘要。
+
+        Args:
+            experiments: 实验名称列表，如 ["e1", "e2", "e11", "e9"]
+            cross_sectional: 是否启用多策略横截面打分模式
+
+        Returns:
+            self（支持链式调用）
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+        from runner.backtest.experiments import run_experiment
+
+        for name in experiments:
+            logger.info("[%s] 实验开始", name)
+            self._results[name] = run_experiment(
+                name,
+                self._config,
+                self._data,
+                self._raw_config,
+                cross_sectional=cross_sectional,
+            )
+            logger.info("[%s] 实验完成", name)
+        return self
+
+    def multi_oos(
+        self,
+        output_dir: Optional[Path] = None,
+        strategies: Optional[List[str]] = None,
+        windows: Optional[List[Tuple[str, str, str]]] = None,
+        best_params: Optional[Dict[str, Dict[str, Any]]] = None,
+        save_json: bool = True,
+    ) -> "Pipeline":
+        """
+        多窗口 OOS 验证（委托 runner/validation/multi_oos.run_multi_oos）。
+
+        对 5 子策略在多个 OOS 窗口内回测，提取 Sharpe/Return/MaxDD/Trades，
+        并计算等权组合的 Sharpe 平均值。
+
+        Args:
+            output_dir: 输出目录，默认 config.yaml 中 output_dir/validation/multi_oos
+            strategies: 子策略列表，默认 5 子策略
+            windows: (窗口名, 起始日, 结束日) 元组列表
+            best_params: 优化后的最优参数
+            save_json: 是否保存 JSON 汇总
+
+        Returns:
+            self（支持链式调用），结果在 self._results["multi_oos"]
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+        from runner.validation.multi_oos import run_multi_oos as _run_multi_oos
+
+        if output_dir is None:
+            output_dir = Path(self._config.output_dir) / "validation" / "multi_oos"
+        self._results["multi_oos"] = _run_multi_oos(
+            data_source=self._data,
+            config=self._config,
+            output_dir=Path(output_dir),
+            strategies=strategies,
+            windows=windows,
+            best_params=best_params,
+            save_json=save_json,
+        )
+        return self
+
+    def full_validation(
+        self,
+        in_sample_start: str = "2020-01-01",
+        in_sample_end: str = "2023-01-01",
+        oos_start: str = "2023-01-01",
+        oos_end: str = "2024-12-31",
+        full_start: str = "2020-01-01",
+        full_end: str = "2024-12-31",
+        strategies: Optional[List[str]] = None,
+        output_dir: Optional[Path] = None,
+    ) -> "Pipeline":
+        """
+        全量验证 3 阶段流水线（委托 runner/validation/full_validation）。
+
+        Phase 1: in_sample 调参（grid + OOS 优选）
+        Phase 2: 6 品种 × 5 子策略 × {TRAIN, OOS} 窗口 EW 组合回测
+        Phase 3: 全段蒙特卡洛 1000 次鲁棒性测试
+
+        Args:
+            in_sample_start: 训练区间起始
+            in_sample_end: 训练区间结束
+            oos_start: OOS 区间起始
+            oos_end: OOS 区间结束
+            full_start: 全段起始（蒙特卡洛用）
+            full_end: 全段结束（蒙特卡洛用）
+            strategies: 子策略列表，默认 5 子策略
+            output_dir: 输出目录
+
+        Returns:
+            self（支持链式调用），结果在 self._results["full_validation"]
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+        from runner.validation.full_validation import run_full_validation as _run_fv
+
+        if output_dir is None:
+            output_dir = Path("output_backtest_pybroker/full_validation")
+        self._results["full_validation"] = _run_fv(
+            pipe=self,
+            in_sample_start=in_sample_start,
+            in_sample_end=in_sample_end,
+            oos_start=oos_start,
+            oos_end=oos_end,
+            full_start=full_start,
+            full_end=full_end,
+            strategies=strategies,
+            output_dir=Path(output_dir),
         )
         return self
 
