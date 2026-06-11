@@ -1,6 +1,7 @@
 # 虚拟环境
 venv/
 .env
+.env.*
 
 # Python 编译文件
 __pycache__/
@@ -21,11 +22,15 @@ __pycache__/
 *.orig
 .ipynb_checkpoints/
 
+# 临时测试文件
+.tmp_test_*.py
+
 # 数据文件（不推送到远程，体积大且与运行环境强绑定）
 data/*.csv
 
 # 日志文件
 *.log
+logs/
 
 # 回测结果目录
 backtest_results_*/
@@ -33,41 +38,18 @@ new_strategy_results_*/
 unified_backtest_results_*/
 output_*/
 term_structure_backtest_results/
+results/
 
 # 数据缓存
 data_cache/
-skills-lock.json
-.trae/skills/agent-reviewer/SKILL.md
-.trae/skills/debugging-master/SKILL.md
-.trae/skills/debugging-master/references/patterns.md
-.trae/skills/debugging-master/references/sharp_edges.md
-.trae/skills/debugging-master/references/validations.md
-.trae/skills/docs-writer/README.md
-.trae/skills/docs-writer/SKILL.md
-.trae/skills/docs-writer/references/adr.md
-.trae/skills/docs-writer/references/brief.md
-.trae/skills/docs-writer/references/design.md
-.trae/skills/docs-writer/references/discovery.md
-.trae/skills/docs-writer/references/prd.md
-.trae/skills/docs-writer/references/quality.md
-.trae/skills/find-skills/SKILL.md
-.trae/skills/git-commit-generator/SKILL.md
-.trae/skills/git-commit-generator/examples/input.md
-.trae/skills/git-commit-generator/examples/output.md
-.trae/skills/git-commit-generator/resources/conventional-commits-types.md
-.trae/skills/git-commit-generator/templates/commit-message.txt
-.trae/skills/knowledge-consolidation/hooks.json
-.trae/skills/knowledge-consolidation/SKILL.md
-.trae/skills/knowledge-consolidation/assets/knowledge.md.template
-.trae/skills/knowledge-consolidation/examples/debug-session.md
-.trae/skills/knowledge-consolidation/references/conditional-reflection.md
-.trae/skills/knowledge-consolidation/references/knowledge-types.md
-.trae/skills/knowledge-consolidation/scripts/cli.cjs
-.trae/skills/knowledge-consolidation/scripts/hooks/post-resolution-nudge.cjs
-.trae/skills/sparc-refine/SKILL.md
-.trae/skills/unit-test-generator/SKILL.md
-.trae/skills/agent-refinement/SKILL.md
+core/data_cache/
 
-# 回测/优化/验证结果目录（运行产物，不推送到远程）
-results/
-output_*/
+# Trae IDE 自动生成
+skills-lock.json
+.trae/skills/
+.trae/notes/
+
+# Streamlit Dashboard（旧 UI，已废弃）
+app.py
+components/
+pages/
