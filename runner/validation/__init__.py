@@ -5,7 +5,7 @@
 委托 core/validation/ 和 core/engine/ 的公共接口，不重复实现。
 """
 
-from typing import Any, Callable, Dict
+from typing import Callable, Dict
 
 from runner.validation.train_test import task2_train_test_split
 from runner.validation.monte_carlo import task3_monte_carlo
@@ -15,6 +15,10 @@ from runner.validation.factor_alpha24 import factor_alpha24_screening
 from runner.validation.factor_alpha24 import factor_combo_ic_validation
 from runner.validation.factor_review import factor_review_validation
 from runner.validation.cross_sectional import cross_sectional_validation
+from runner.validation.factor_adf import factor_adf_validation
+from runner.validation.factor_prf import factor_prf_validation
+from runner.validation.event_study import factor_event_study_validation
+from runner.validation.standard_report import factor_standard_report_validation
 
 _VALIDATOR_MAP: Dict[str, Callable] = {
     "train_test": task2_train_test_split,
@@ -25,6 +29,11 @@ _VALIDATOR_MAP: Dict[str, Callable] = {
     "factor_combo_ic": factor_combo_ic_validation,
     "factor_review": factor_review_validation,
     "cross_sectional": cross_sectional_validation,
+    # 5 段式因子验证（规则 28 阶段 A 扩展）
+    "factor_adf": factor_adf_validation,
+    "factor_prf": factor_prf_validation,
+    "event_study": factor_event_study_validation,
+    "standard_report": factor_standard_report_validation,
 }
 
 
@@ -55,5 +64,9 @@ __all__ = [
     "factor_alpha24_screening",
     "factor_review_validation",
     "cross_sectional_validation",
+    "factor_adf_validation",
+    "factor_prf_validation",
+    "factor_event_study_validation",
+    "factor_standard_report_validation",
     "get_validator",
 ]
