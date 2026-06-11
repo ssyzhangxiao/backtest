@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from core.engine.backtest_runner import PyBrokerResult
+from core.execution._result_types import PyBrokerResult
 from utils.metrics import MetricsCalculator
 
 

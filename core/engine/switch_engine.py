@@ -382,7 +382,7 @@ class FactorScoringEngine:
 
         # P2-1 整改：横截面Z-Score标准化 — 委托给 FactorEvaluator
         if self.config.use_cross_section and len(scores_df) > 1:
-            from core.factors.factor_evaluator import FactorEvaluator
+            from core.ext.factors.evaluator import FactorEvaluator
 
             _evaluator = FactorEvaluator()
             for col in factor_names:

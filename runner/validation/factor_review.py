@@ -15,7 +15,7 @@ from loguru import logger
 
 from core.config import BacktestConfig
 from core.config.strategy_profiles import StrategyLibrary
-from core.factors.alpha_futures.factor_pipeline import FactorPipeline
+from core.ext.factors.alpha_futures.factor_pipeline import FactorPipeline
 from core.factors.alpha_futures_24 import AlphaFuturesConfig
 from runner.common.utils import save_csv
 

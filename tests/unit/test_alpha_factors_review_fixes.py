@@ -48,13 +48,13 @@ def test_init_exports_all_factors():
         cls = getattr(alpha_futures, name, None)
         assert cls is not None, f"{name} 未在 alpha_futures 命名空间中"
         # 验证是 BaseFactor 的子类
-        from core.factors.alpha_futures.base_factor import BaseFactor
+        from core.ext.factors.alpha_futures.base_factor import BaseFactor
         assert issubclass(cls, BaseFactor), f"{name} 不是 BaseFactor 子类"
 
 
 def test_init_exports_factor_count_matches_registry():
     """__init__.py 导出的因子数应与注册表一致。"""
-    from core.factors.alpha_futures.factor_registry import list_available_factors
+    from core.ext.factors.alpha_futures.factor_registry import list_available_factors
     registered = set(list_available_factors())
     exported = set(EXPECTED_FACTOR_NAMES)
     assert registered == exported, (
@@ -108,7 +108,7 @@ def test_ema_handles_nan():
 def test_ema_import_path_works_from_cross_spread():
     """cross_spread.py 内部的 from ..operators import ema, zscore 必须可用。"""
     # 仅做 import 测试，验证 from 路径与绝对路径一致
-    from core.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures import cross_spread
     assert hasattr(cross_spread, "ema")
     assert hasattr(cross_spread, "zscore")
 
@@ -120,8 +120,8 @@ def test_ema_import_path_works_from_cross_spread():
 
 def test_strong_ic_pairs_default():
     """未加载配置时，STRONG_IC_PAIRS 应当等于内置默认值。"""
-    from core.factors.alpha_futures import cross_spread
-    from core.factors.alpha_futures.cross_spread import (
+    from core.ext.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures.cross_spread import (
         _STRONG_IC_PAIRS_DEFAULT, STRONG_IC_PAIRS,
     )
     # 加载配置后调用 set_strong_ic_pairs([]) 应当回到默认值
@@ -131,7 +131,7 @@ def test_strong_ic_pairs_default():
 
 def test_strong_ic_pairs_runtime_override():
     """set_strong_ic_pairs([...]) 应当能覆盖默认列表。"""
-    from core.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures import cross_spread
     cross_spread.set_strong_ic_pairs(["XPRB_I", "XAU_AG"])
     assert cross_spread.STRONG_IC_PAIRS == ("XPRB_I", "XAU_AG")
     # 还原默认
@@ -140,7 +140,7 @@ def test_strong_ic_pairs_runtime_override():
 
 def test_strong_ic_pairs_filters_invalid():
     """set_strong_ic_pairs 应当过滤掉不在 CHAIN_PAIRS 中的配对。"""
-    from core.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures import cross_spread
     cross_spread.set_strong_ic_pairs(["XPRB_I", "INVALID_PAIR", "XAU_AG"])
     # INVALID_PAIR 被过滤
     assert cross_spread.STRONG_IC_PAIRS == ("XPRB_I", "XAU_AG")
@@ -149,15 +149,15 @@ def test_strong_ic_pairs_filters_invalid():
 
 def test_strong_ic_pairs_all_invalid_falls_back_to_default():
     """全部无效时回退到默认。"""
-    from core.factors.alpha_futures import cross_spread
-    from core.factors.alpha_futures.cross_spread import _STRONG_IC_PAIRS_DEFAULT
+    from core.ext.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures.cross_spread import _STRONG_IC_PAIRS_DEFAULT
     cross_spread.set_strong_ic_pairs(["NOPE1", "NOPE2"])
     assert cross_spread.STRONG_IC_PAIRS == _STRONG_IC_PAIRS_DEFAULT
 
 
 def test_strong_ic_pairs_load_from_yaml(tmp_path: Path):
     """load_strong_ic_pairs_from_config 必须从 config.yaml 读取 strong_ic_pairs。"""
-    from core.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures import cross_spread
     yaml_content = """
 backtest:
   initial_capital: 1000000
@@ -191,8 +191,8 @@ factors:
 
 def test_strong_ic_pairs_load_handles_missing_section(tmp_path: Path):
     """配置缺少 cross_spread 段时，应当回退到默认（不抛异常）。"""
-    from core.factors.alpha_futures import cross_spread
-    from core.factors.alpha_futures.cross_spread import _STRONG_IC_PAIRS_DEFAULT
+    from core.ext.factors.alpha_futures import cross_spread
+    from core.ext.factors.alpha_futures.cross_spread import _STRONG_IC_PAIRS_DEFAULT
     yaml_content = """
 backtest:
   initial_capital: 1000000
@@ -211,7 +211,7 @@ symbols: [SHFE.RB]
 
 def test_aggregate_group_empty_returns_empty_array():
     """_aggregate_group 在组内所有因子均为 None 时返回空数组（长度 0）。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
     result = _aggregate_group({}, ["T_01", "T_02", "T_03"])
     assert isinstance(result, np.ndarray)
     assert len(result) == 0
@@ -219,7 +219,7 @@ def test_aggregate_group_empty_returns_empty_array():
 
 def test_to_series_empty_input_returns_all_nan():
     """_to_series 在输入为空数组时返回全 NaN（不允许返回全 0 掩盖数据缺失）。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _to_series
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _to_series
     index = pd.RangeIndex(10)
     result = _to_series(np.array([]), index)
     assert len(result) == 10
@@ -229,7 +229,7 @@ def test_to_series_empty_input_returns_all_nan():
 
 def test_to_series_equal_length():
     """_to_series 在长度匹配时直接对齐。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _to_series
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _to_series
     index = pd.RangeIndex(5)
     values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     result = _to_series(values, index)
@@ -238,7 +238,7 @@ def test_to_series_equal_length():
 
 def test_to_series_shorter_input_right_aligns():
     """_to_series 在输入短于 index 时右对齐：values 放尾部，前部补 NaN。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _to_series
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _to_series
     index = pd.RangeIndex(5)
     values = np.array([10.0, 20.0, 30.0])
     result = _to_series(values, index)
@@ -248,7 +248,7 @@ def test_to_series_shorter_input_right_aligns():
 
 def test_to_series_longer_input_truncates_tail():
     """_to_series 在输入长于 index 时截取尾部。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _to_series
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _to_series
     index = pd.RangeIndex(3)
     values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     result = _to_series(values, index)
@@ -258,7 +258,7 @@ def test_to_series_longer_input_truncates_tail():
 
 def test_aggregate_group_partial_missing_uses_valid_only():
     """_aggregate_group 在部分因子为 None 时，仅对有效因子做 nanmean。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
     result = _aggregate_group(
         {"T_01": np.array([1.0, 2.0, 3.0, 4.0])},  # T_02/T_03 缺失
         ["T_01", "T_02", "T_03"],
@@ -268,7 +268,7 @@ def test_aggregate_group_partial_missing_uses_valid_only():
 
 def test_aggregate_group_nanmean_skips_nan():
     """_aggregate_group 内 np.nanmean 自动跳过 NaN。"""
-    from core.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import _aggregate_group
     a = np.array([1.0, 2.0, np.nan, 4.0])
     b = np.array([np.nan, np.nan, 3.0, 4.0])
     result = _aggregate_group({"A": a, "B": b}, ["A", "B"])
@@ -291,7 +291,7 @@ def test_compute_sub_strategy_scores_no_far_data_uses_nan():
     `np.nan / scale = NaN` → `_safe_clip` 显式 `fillna(0.0)` → 输出 0。
     这与"无数据"语义等价于"中性信号"的设计一致（不做多不做空）。
     """
-    from core.factors.alpha_futures.sub_strategy_aggregator import (
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
         compute_sub_strategy_scores_from_ohlcv,
     )
     n = 60

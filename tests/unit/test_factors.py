@@ -8,13 +8,13 @@
 import unittest
 import numpy as np
 
-from core.factors.factor_evaluator import (
+from core.ext.factors.evaluator import (
     FactorEvaluator,
     FactorEvalResult,
     IC_THRESHOLD,
     IR_THRESHOLD,
 )
-from core.factors.factor_transformer import FactorTransformer
+from core.ext.factors.transformer import FactorTransformer
 
 
 class TestFactorEvaluator(unittest.TestCase):

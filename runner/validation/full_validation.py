@@ -27,7 +27,7 @@ from loguru import logger
 
 from core.config import BacktestConfig
 from core.config.strategy_profiles import StrategyLibrary
-from core.engine.backtest_runner import PyBrokerBacktestRunner
+from core.execution.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from runner.common.utils import safe_float
 from runner.validation.monte_carlo import task3_monte_carlo

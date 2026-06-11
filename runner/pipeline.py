@@ -45,9 +45,24 @@ class Pipeline:
         pipe.with_config(initial_cash=500000).run_backtest("e1").report()
     """
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(
+        self,
+        config_path: str = "config.yaml",
+        overrides: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        初始化 Pipeline。
+
+        Args:
+            config_path: 配置文件路径
+            overrides: 运行时覆盖（最高优先级），支持：
+                - 顶层字段: {"rebalance_days": 5}
+                - 段路径: {"backtest__rebalance_days": 5}
+                - 嵌套 dict: {"backtest": {"rebalance_days": 5}}
+                优先级: dataclass默认 < YAML < 环境变量QUANT_* < overrides
+        """
         try:
-            self._config = BacktestConfig.from_yaml(config_path)
+            self._config = BacktestConfig.from_yaml(config_path, overrides=overrides)
         except Exception as e:
             raise ConfigError(f"配置加载失败: {e}") from e
         self._config_path = config_path
@@ -425,19 +440,30 @@ class Pipeline:
         """
         配置热更新，返回新实例。
 
-        不修改当前实例，确保线程安全。**overrides 必须是 BacktestConfig
-        合法字段**（如 initial_cash、symbols、train_start 等），任意键会
-        在 dataclasses.replace 时抛 TypeError，便于及时发现拼写错误。
+        不修改当前实例，确保线程安全。支持两种覆盖格式：
+        1. BacktestConfig 合法字段（如 initial_cash、symbols）— 直接 replace
+        2. 分层路径格式（如 backtest__rebalance_days）— 重新 from_yaml
 
         Args:
-            **overrides: BacktestConfig 字段覆盖项
+            **overrides: BacktestConfig 字段覆盖项或分层路径
 
         Returns:
             新的 Pipeline 实例
         """
         from dataclasses import replace
 
-        new_config = replace(self._config, **overrides)
+        # 检测是否有分层路径格式（含 __ 分隔符）
+        has_layered_key = any("__" in k for k in overrides)
+
+        if has_layered_key:
+            # 分层覆盖：重新 from_yaml 并传入 overrides
+            new_config = BacktestConfig.from_yaml(
+                self._config_path, overrides=overrides
+            )
+        else:
+            # 直接字段覆盖
+            new_config = replace(self._config, **overrides)
+
         new_pipe = Pipeline.__new__(Pipeline)
         new_pipe._config = new_config
         new_pipe._config_path = self._config_path

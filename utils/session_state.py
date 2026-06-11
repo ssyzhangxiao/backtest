@@ -10,9 +10,15 @@ _PYBROKER_COLUMNS_REGISTERED = False
 
 @st.cache_data(show_spinner=False)
 def load_data_cached(data_dir: str, file_pattern: str):
-    """CSV 模式：从本地文件加载数据。"""
-    from core.data_loader import DataLoader
-    loader = DataLoader(data_dir)
+    """CSV 模式：从本地文件加载数据。
+
+    M-03 重构：内部委托 core.ext.adapters.create_data_source 工厂，
+    弃用直接构造 DataLoader(data_dir=...)。
+    """
+    from core.ext.adapters import create_data_source
+
+    adapter = create_data_source("csv", data_dir=data_dir)
+    loader = adapter._loader  # noqa: SLF001 — 规则 21.4 复用 DataLoader 内部逻辑
     loader.load_csv_files(file_pattern=file_pattern)
     loader.identify_dominant_contracts()
     loader.build_continuous_series()
@@ -25,13 +31,20 @@ def load_tqsdk_cached(
     symbols: Optional[tuple] = None,
     data_length: int = 2000,
 ):
-    """TqSdk 模式：从 TqSdk 获取独立合约 + 展期数据。"""
-    from core.data_loader_tqsdk import TqSdkDataSource
+    """TqSdk 模式：从 TqSdk 获取独立合约 + 展期数据。
+
+    M-03 重构：弃用 core.data_loader_tqsdk.TqSdkDataSource（dead alias，文件已不存在），
+    改用 core.ext.adapters.create_data_source("tqsdk", ...)。
+    """
+    from core.ext.adapters import create_data_source
+
     sym_list = list(symbols) if symbols else None
-    loader = TqSdkDataSource(
+    adapter = create_data_source(
+        "tqsdk",
         phone=phone, password=password,
         symbols=sym_list, data_length=data_length,
     )
+    loader = adapter._loader  # noqa: SLF001 — 规则 21.4 复用
     loader.load_from_tqsdk()
     loader.identify_dominant_contracts()
     loader.build_continuous_series()

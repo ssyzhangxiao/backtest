@@ -25,7 +25,9 @@ core/
 ├── strategies/        # 策略实现（5子策略 + 基类 + 横截面打分）
 │   └── sub_strategies/# 5子策略：趋势/期限结构/均值回归/波动率突破/复合共振
 ├── performance/       # 绩效评估
-└── monitor/           # 策略监控（规划中）
+├── monitor/           # 策略监控（规划中）
+└── ext/               # 可选扩展（规则21）：adapters/factors/models/handlers/utils
+                        # 按需安装（extras_require），工厂注册模式
 
 # 以下模块已移除，功能由子策略体系覆盖：
 # ├── adaptive/        # 已移除（规则10）

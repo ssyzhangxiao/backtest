@@ -1,13 +1,14 @@
 """
 引擎模块。
 
-提供核心回测引擎和因子打分调仓引擎。
+提供因子打分调仓引擎和向后兼容重导出。
 
-⚠️ P0-5整改（2026-06-07）：
-  - 自研回测引擎 BacktestRunner 已完全移除
-  - 交叉验证功能提取到 CrossValidator（core/engine/cross_validator.py）
-  - PyBroker 主引擎位于 core/engine/backtest_runner.py
-  - 蓝图执行器位于 core/engine/pybroker_executor.py
+⚠️ 迁移历史（2026-06-12）：
+  - backtest_runner / pybroker_executor / _bootstrap / _result_types / _walkforward
+    已迁移到 core/execution/，此处保留向后兼容重导出
+  - factor_decay / rolling_ic 已物理删除，功能由 core.ext.factors.evaluator 提供
+  - cross_validator 已迁移到 core/validation/
+  - FactorDecayMonitor / RollingICWeightEngine 兼容别名已删除（2026-06-12）
 """
 
 from core.engine.switch_engine import (
@@ -16,20 +17,23 @@ from core.engine.switch_engine import (
     RebalanceDecision,
     RebalanceReason,
 )
-from core.engine.cross_validator import CrossValidator
-from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
-from core.engine.factor_decay import FactorDecayMonitor, FactorDecayConfig, DecayStatus, DecayAlert
+from core.validation.cross_validator import CrossValidator
+
+# ── 向后兼容：从 core.execution 重导出 ──
+from core.execution.backtest_runner import PyBrokerBacktestRunner
+from core.execution.pybroker_executor import PyBrokerExecutorBuilder
+from core.execution._result_types import PyBrokerResult, WalkforwardResult
 
 __all__ = [
+    # 核心引擎
     "FactorScoringEngine",
     "ScoringConfig",
     "RebalanceDecision",
     "RebalanceReason",
     "CrossValidator",
-    "RollingICWeightEngine",
-    "RollingICConfig",
-    "FactorDecayMonitor",
-    "FactorDecayConfig",
-    "DecayStatus",
-    "DecayAlert",
+    # 从 core.execution 重导出
+    "PyBrokerBacktestRunner",
+    "PyBrokerExecutorBuilder",
+    "PyBrokerResult",
+    "WalkforwardResult",
 ]

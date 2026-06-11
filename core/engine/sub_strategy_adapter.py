@@ -24,8 +24,8 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 import numpy as np
 
-from core.factors.alpha_futures.factor_engine import FactorEngine
-from core.factors.alpha_futures.config import AlphaFuturesConfig
+from core.ext.factors.alpha_futures.factor_engine import FactorEngine
+from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 from core.config.strategy_profiles import SUB_STRATEGY_NAMES
 
 logger = logging.getLogger(__name__)

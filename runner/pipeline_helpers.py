@@ -210,7 +210,7 @@ def _verify_chain(
         chain_status["hybrid_data_source"] = False
 
     try:
-        from core.engine.backtest_runner import PyBrokerBacktestRunner
+        from core.execution.backtest_runner import PyBrokerBacktestRunner
 
         chain_status["pybroker_runner"] = PyBrokerBacktestRunner is not None
     except ImportError:

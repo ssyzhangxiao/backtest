@@ -1,0 +1,9 @@
+# 全量安装（不推荐用于生产）— 规则21.2
+# 安装：pip install -r requirements-all.txt
+# 或：pip install -e .[all]
+-r requirements.txt
+-r requirements-data-sources.txt
+-r requirements-factors.txt
+-r requirements-llm.txt
+-r requirements-models.txt
+streamlit-extras>=0.3.0

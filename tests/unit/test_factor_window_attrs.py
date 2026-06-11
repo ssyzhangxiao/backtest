@@ -1,7 +1,7 @@
 """P1-3 验证：所有硬编码窗口已参数化为类属性。"""
 import numpy as np
 
-from core.factors.alpha_futures.factors import (
+from core.ext.factors.alpha_futures.factors import (
     cf_01, cf_02, cf_03,
     h_01, h_02, h_03, h_04, h_05,
     m_01, m_02, m_03, m_04, m_05,

@@ -62,7 +62,7 @@ assert list(sig2.parameters.keys())[0] == "data_source"
 print(f"OK: factor_alpha24_screening 形参[0] = {list(sig2.parameters.keys())[0]}")
 
 # 7) 验证 FactorEvaluator 集成
-from core.factors.factor_evaluator import FactorEvaluator
+from core.ext.factors.evaluator import FactorEvaluator
 from core.factors import AlphaFutures24, AlphaFuturesConfig
 
 calc = AlphaFutures24(AlphaFuturesConfig())

@@ -1,18 +1,23 @@
 """
-商品期货 Alpha 因子库 — 五大类24因子（工程化重构版本）。
+商品期货 Alpha 因子库 — 五大类24因子（向后兼容 shim）— 规则 22 目录迁移 M-05。
 
-基于抽象基类的独立因子类 + 注册表 + 引擎调度架构。
-所有24个因子已全部迁移到新架构，AlphaFutures24 内部委托给 FactorEngine。
+⚠️ 物理位置已迁移到 `core.ext.factors.alpha_futures.*`：
+    配置:   core.ext.factors.alpha_futures.config
+    引擎:   core.ext.factors.alpha_futures.factor_engine
+    因子:   core.ext.factors.alpha_futures.factors.{t,r,v,m,h,cf,ts}_*
 
-⚠️ 向后兼容：compute_all 接口签名保持不变，外部调用无需修改。
+本文件仅作为向后兼容 shim，AlphaFutures24.compute_all 接口保持不变。
 """
 from typing import Dict, Optional
 import logging
 
 import numpy as np
 
-# 配置类（权威源在 core/factors/alpha_futures/config.py，本文件仅为向后兼容 re-export）
-from .alpha_futures.config import AlphaFuturesConfig, OIThresholdType
+# 配置类（权威源已迁到 core.ext.factors.alpha_futures.config）
+from core.ext.factors.alpha_futures.config import (
+    AlphaFuturesConfig,
+    OIThresholdType,
+)
 
 __all__ = [
     "AlphaFuturesConfig",
@@ -34,8 +39,8 @@ class AlphaFutures24:
 
     def __init__(self, config: Optional[AlphaFuturesConfig] = None):
         self.config = config or AlphaFuturesConfig()
-        # 延迟导入，避免循环依赖
-        from .alpha_futures.factor_engine import FactorEngine
+        # 延迟导入，避免循环依赖（新位置：core.ext.factors.alpha_futures）
+        from core.ext.factors.alpha_futures.factor_engine import FactorEngine
 
         self._engine = FactorEngine(self.config)
 

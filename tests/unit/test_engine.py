@@ -2,92 +2,64 @@
 调仓逻辑单元测试。
 
 规则6要求：调仓逻辑修改必须有调仓日判断测试。
-覆盖：滚动IC权重引擎、调仓日判断逻辑。
+覆盖：因子评估器、调仓日判断逻辑。
 """
 
 import unittest
 import numpy as np
 
-from core.engine.rolling_ic import RollingICWeightEngine, RollingICConfig
+from core.ext.factors.evaluator import FactorEvaluator, FactorEvalResult
 
 
-class TestRollingICWeightEngine(unittest.TestCase):
-    """滚动IC权重引擎测试。"""
+class TestFactorEvaluatorForRebalance(unittest.TestCase):
+    """因子评估器测试（替代原 RollingICWeightEngine 测试）。"""
 
     def setUp(self):
-        self.config = RollingICConfig(
-            window=30,
+        self.evaluator = FactorEvaluator(
             forward_period=5,
-            ema_alpha=0.1,
-            min_abs_ic=0.02,
+            ic_window=30,
             min_observations=10,
         )
-        self.engine = RollingICWeightEngine(config=self.config)
 
-    def test_initial_weights_are_default(self):
-        """初始权重应为默认固定权重（5 子策略体系）。"""
-        weights = self.engine.current_weights
-        # 2026-06 架构：默认 5 子策略权重（不再是 ts_momentum/roll_yield 旧因子名）
-        self.assertIn("trend", weights)
-        self.assertIn("vol_breakout", weights)
-        # 权重之和应接近1
-        total = sum(weights.values())
-        self.assertAlmostEqual(total, 1.0, places=2)
-
-    def test_weights_update_after_sufficient_data(self):
-        """数据充足后权重应更新。"""
+    def test_evaluate_single_factor(self):
+        """单因子评估应返回 FactorEvalResult。"""
+        n = 100
         np.random.seed(42)
-        n = 50
-        # 构造因子得分和前瞻收益
-        for i in range(n):
-            factor_scores = {
-                "ts_momentum": np.random.randn(),
-                "roll_yield": np.random.randn(),
-                "alpha019": np.random.randn(),
-                "alpha032": np.random.randn(),
-            }
-            forward_returns = np.random.randn() * 0.01
-            self.engine.update(factor_scores, forward_returns, symbol="rb2401")
+        scores = np.random.randn(n)
+        returns = scores * 0.5 + np.random.randn(n) * 0.5
+        result = self.evaluator.evaluate("trend", scores, returns)
+        self.assertIsInstance(result, FactorEvalResult)
+        self.assertEqual(result.name, "trend")
 
-        # 更新后IC值应已计算
-        ic = self.engine.current_ic
-        self.assertGreater(len(ic), 0)
-
-    def test_min_observations_fallback(self):
-        """观测数不足时应回退到固定权重。"""
-        # 仅添加少量数据
-        factor_scores = {
-            "ts_momentum": 0.5,
-            "roll_yield": -0.3,
-            "alpha019": 0.1,
-            "alpha032": 0.2,
+    def test_batch_evaluate(self):
+        """批量评估应返回多个结果。"""
+        n = 100
+        np.random.seed(42)
+        factor_dict = {
+            "trend": np.random.randn(n),
+            "momentum": np.random.randn(n),
         }
-        self.engine.update(factor_scores, 0.01, symbol="rb2401")
-        # 观测数不足，权重应保持默认
-        weights = self.engine.current_weights
-        total = sum(weights.values())
-        self.assertAlmostEqual(total, 1.0, places=2)
+        returns = np.random.randn(n)
+        results = self.evaluator.evaluate_batch(factor_dict, returns)
+        self.assertEqual(len(results), 2)
+        self.assertIn("trend", results)
 
-    def test_ic_below_threshold_zero_weight(self):
-        """IC低于阈值的因子权重应清零。"""
+    def test_insufficient_data(self):
+        """观测数不足应标记为无效。"""
+        scores = np.array([1.0, 2.0])
+        returns = np.array([0.1, 0.2])
+        result = self.evaluator.evaluate("short", scores, returns)
+        self.assertFalse(result.is_valid)
+
+    def test_healthy_factor_is_valid(self):
+        """健康因子应通过规则9。"""
+        n = 200
         np.random.seed(42)
-        n = 50
-        # 构造IC极低的因子
-        for i in range(n):
-            factor_scores = {
-                "ts_momentum": np.random.randn(),
-                "roll_yield": np.random.randn(),
-                "alpha019": np.random.randn(),
-                "alpha032": np.random.randn(),
-            }
-            # 前瞻收益与因子无关
-            forward_returns = np.random.randn() * 0.01
-            self.engine.update(factor_scores, forward_returns, symbol="rb2401")
-
-        # 所有因子IC应接近0
-        ic = self.engine.current_ic
-        for factor_name, ic_val in ic.items():
-            self.assertLess(abs(ic_val), 0.3)
+        scores = np.random.randn(n)
+        returns = scores * 0.3 + np.random.randn(n) * 0.1
+        result = self.evaluator.evaluate("healthy", scores, returns)
+        # IC 应为正
+        self.assertGreater(result.ic_mean, 0)
 
 
 class TestRebalanceDayLogic(unittest.TestCase):

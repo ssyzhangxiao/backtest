@@ -1,0 +1,134 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-futures-backtest"
+version = "0.1.0"
+description = "5子策略量化回测系统（期货）— 核心 + 可选扩展"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Quant Team" },
+]
+
+# ============================================================
+# 核心依赖（最小安装）
+# ============================================================
+# 与 requirements.txt 保持一致；新增依赖必须先放这里
+dependencies = [
+    "pybroker>=1.0.0",
+    "numba>=0.56.0",
+    "streamlit>=1.28.0",
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "plotly>=5.15.0",
+    "scikit-learn>=1.2.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "statsmodels>=0.14.0",     # ADF 平稳性检验（runner/validation/factor_adf.py）
+    "scipy>=1.10.0",            # 统计检验（PRF / 事件研究）
+    "pyyaml>=6.0",              # 配置文件
+    "tqdm>=4.65.0",
+]
+
+# ============================================================
+# 可选依赖（extras_require — 规则21.2）
+# ============================================================
+# 新增 extras 必须同步更新 .trae/rules/01-basics/21-ext-directory.md 的"按需安装"表格
+[project.optional-dependencies]
+
+# 默认安装（core + 数据源 + 因子挖掘），覆盖 90% 开发场景
+default = [
+    "tqsdk>=3.0.0",
+    "gplearn>=0.4",
+]
+
+# 数据源适配器（rules 21.2 — 规则表格登记）
+data-sources = [
+    "tqsdk>=3.0.0",          # TqSdk 在线
+    "akshare>=1.12.0",       # AKShare 公开数据（规划中）
+    "tushare>=1.4.0",        # Tushare Pro（规划中）
+    "rqdatac>=2.10.0",       # RQData 米筐（规划中）
+]
+
+# 因子挖掘（GP 遗传规划 + DEAP）
+factors = [
+    "gplearn>=0.4",
+    "deap>=1.4",
+]
+
+# LLM 因子生成（DeepSeek / OpenAI / Anthropic）
+llm = [
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
+
+# 预测模型（LightGBM / XGBoost / PyTorch）
+models = [
+    "lightgbm>=4.0.0",
+    "xgboost>=2.0.0",
+    "torch>=2.0.0",
+]
+
+# 监控 / Dashboard（Streamlit + Plotly 已属 core，本组仅占位）
+dashboard = [
+    "streamlit-extras>=0.3.0",
+]
+
+# 全量（不推荐用于生产）
+all = [
+    "quant-futures-backtest[data-sources,factors,llm,models,dashboard]",
+]
+
+# ============================================================
+# Console Scripts（统一 CLI 入口 — 规则21 阶段 2）
+# ============================================================
+[project.scripts]
+quant-system = "cli:main"
+
+# ============================================================
+# 工具配置
+# ============================================================
+[tool.setuptools]
+packages = [
+    "core",
+    "core.config",
+    "core.data",
+    "core.engine",
+    "core.execution",
+    "core.factors",
+    "core.factors.alpha_futures",
+    "core.factors.alpha_futures.factors",
+    "core.performance",
+    "core.report_builder",
+    "core.risk",
+    "core.validation",
+    "core.ext",
+    "core.ext.adapters",
+    "core.ext.factors",
+    "core.ext.factors.alpha_futures",
+    "core.ext.factors.alpha_futures.factors",
+    "core.ext.factors.generation",
+    "core.ext.factors.pool",
+    "core.ext.factors.operators",
+    "core.ext.models",
+    "core.ext.handlers",
+    "core.ext.utils",
+    "runner",
+    "runner.common",
+    "runner.data",
+    "runner.strategy",
+    "runner.backtest",
+    "runner.backtest.experiments",
+    "runner.optimization",
+    "runner.validation",
+    "runner.report",
+    "utils",
+    "utils.plots",
+]
+
+[tool.setuptools.package-data]
+"core" = ["**/*.yaml", "**/*.yml"]
+"core.config" = ["**/*.yaml", "**/*.yml"]

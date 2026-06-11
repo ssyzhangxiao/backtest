@@ -5,8 +5,8 @@ import logging
 
 import numpy as np
 
-from core.factors.alpha_futures.config import AlphaFuturesConfig
-from core.factors.alpha_futures.factor_engine import FactorEngine
+from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
+from core.ext.factors.alpha_futures.factor_engine import FactorEngine
 
 
 def _make_raw(n: int = 60) -> dict:
@@ -37,8 +37,8 @@ def test_compute_all_runs_with_default_config():
 
 def test_compute_all_isolates_failing_factor(caplog):
     """单因子 compute() 抛异常时，引擎继续运行，失败因子返回全 NaN 兜底。"""
-    from core.factors.alpha_futures import factor_registry
-    from core.factors.alpha_futures.base_factor import BaseFactor
+    from core.ext.factors.alpha_futures import factor_registry
+    from core.ext.factors.alpha_futures.base_factor import BaseFactor
 
     class _BoomFactor(BaseFactor):
         name = "T_05"  # 覆盖已有因子，验证该名字被填充为 NaN
@@ -100,7 +100,7 @@ def test_from_backtest_config_uses_defaults():
 def test_alpha_futures_24_reexports_same_config():
     """验证 alpha_futures_24.AlphaFuturesConfig 与新 config 是同一个类。"""
     from core.factors.alpha_futures_24 import AlphaFuturesConfig as Legacy
-    from core.factors.alpha_futures.config import AlphaFuturesConfig as New
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig as New
 
     assert Legacy is New
 
@@ -111,7 +111,7 @@ def test_atr_scaling_parameter_propagates():
     验证策略：用极小的 scaling 让信号饱和到 ±1，用极大的 scaling 让信号趋近 0。
     两者均值绝对值必有差异。
     """
-    from core.factors.alpha_futures.sub_strategy_aggregator import (
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
         compute_sub_strategy_scores_from_ohlcv,
     )
     import pandas as pd
@@ -146,7 +146,7 @@ def test_alpha_futures_config_no_dead_fields():
     """Issue #2: gap_weight_min/max 与 delivery_exclude_days 已删除（无引用）。"""
     import dataclasses
 
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 
     fields = {f.name for f in dataclasses.fields(AlphaFuturesConfig)}
     # 这些字段曾被定义但无任何代码使用，会污染 config 公共 API
@@ -164,7 +164,7 @@ def test_factor_review_uses_pearson():
     import inspect
 
     from core.factors import factor_review
-    from core.factors.factor_evaluator import FactorEvaluator
+    from core.ext.factors.evaluator import FactorEvaluator
 
     src = inspect.getsource(factor_review.FactorReviewer._check_sensitivity)
     assert 'method="pearson"' in src
@@ -176,7 +176,7 @@ def test_factor_review_uses_pearson():
 
 def test_exp_transform_clip_threshold_configurable():
     """Issue #4: exp_transform 的 clip_threshold 参数可配置。"""
-    from core.factors.factor_transformer import FactorTransformer
+    from core.ext.factors.transformer import FactorTransformer
 
     transformer = FactorTransformer()
     f = np.array([1.0, 5.0, 20.0])  # 最后一个超 10
@@ -238,8 +238,8 @@ def test_path_a_and_c_yield_identical_signals():
         build_vol_breakout_indicators,
         build_composite_indicators,
     )
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
-    from core.factors.alpha_futures.sub_strategy_aggregator import (
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
         compute_sub_strategy_scores_from_ohlcv,
     )
 
@@ -331,8 +331,8 @@ def test_compute_all_aligns_misaligned_factor_length():
     `Length of values (100) does not match length of index (183)`。
     compute_all 必须强制等长契约。
     """
-    from core.factors.alpha_futures import factor_registry
-    from core.factors.alpha_futures.base_factor import BaseFactor
+    from core.ext.factors.alpha_futures import factor_registry
+    from core.ext.factors.alpha_futures.base_factor import BaseFactor
 
     class _ShortFactor(BaseFactor):
         """模拟 TS_01 的 hardcoded length=100 行为：返回 100 元素而非 close 长度。"""

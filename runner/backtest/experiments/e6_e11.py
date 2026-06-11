@@ -15,9 +15,10 @@ import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig  # 2026-06-11 修复：直接接受 BacktestConfig
-from core.engine.backtest_runner import PyBrokerBacktestRunner, PyBrokerResult
+from core.execution.backtest_runner import PyBrokerBacktestRunner
+from core.execution._result_types import PyBrokerResult
 from core.engine.pybroker_data_source import PyBrokerDataSource
-from core.factors.factor_evaluator import FactorEvaluator
+from core.ext.factors.evaluator import FactorEvaluator
 from core.performance import PerformanceEvaluator
 from core.validation.monte_carlo import MonteCarloSimulator
 from utils.metrics import MetricsCalculator
@@ -580,7 +581,7 @@ def _run_factor_analysis_for_symbol(
     ic_rows: List[Dict[str, Any]] = []
     summary: Dict[str, Any] = {}
 
-    from core.factors.alpha_futures.sub_strategy_aggregator import (
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
         compute_sub_strategy_scores_from_ohlcv,
     )
 

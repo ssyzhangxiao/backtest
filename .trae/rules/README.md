@@ -17,7 +17,8 @@
 │   ├── 16-directory.md
 │   ├── 17-common-systems.md
 │   ├── 18-pipeline.md
-│   └── 19-dependencies.md
+│   ├── 19-dependencies.md
+│   └── 21-ext-directory.md
 ├── 02-engine/             # 回测引擎
 │   ├── 01-no-fallback.md
 │   └── 26-cross-validation.md
@@ -59,6 +60,7 @@
 | 18 | Pipeline 编排器 — 声明式调用 | [01-basics/18-pipeline.md](./01-basics/18-pipeline.md) |
 | 19 | 依赖方向检查 — 禁止反向依赖 | [01-basics/19-dependencies.md](./01-basics/19-dependencies.md) |
 | 20 | 根目录脚本迁移 — run_*.py 必须收敛到 Pipeline | [01-basics/20-root-scripts-migration.md](./01-basics/20-root-scripts-migration.md) |
+| 21 | 扩展目录 ext/ — 借鉴 QuantML-Qlib 按需加载 + 工厂注册 | [01-basics/21-ext-directory.md](./01-basics/21-ext-directory.md) |
 
 ### 回测引擎
 

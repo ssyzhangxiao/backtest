@@ -50,7 +50,7 @@ def extract_trend_signals(ds: PyBrokerDataSource, custom_params) -> pd.Series:
     from core.engine.sub_strategy_indicators import register_default_indicators
 
     register_default_indicators()
-    from core.factors.alpha_futures.sub_strategy_aggregator import (
+    from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
         compute_sub_strategy_scores_from_ohlcv,
     )
 

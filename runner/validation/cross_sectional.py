@@ -18,11 +18,11 @@ import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.factors.alpha_futures.sub_strategy_aggregator import (
+from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
     compute_sub_strategy_scores_from_ohlcv,
 )
-from core.factors.alpha_futures.config import AlphaFuturesConfig
-from core.factors.factor_evaluator import FactorEvaluator
+from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
+from core.ext.factors.evaluator import FactorEvaluator
 from core.config.strategy_profiles import StrategyLibrary
 from runner.common.utils import save_csv
 

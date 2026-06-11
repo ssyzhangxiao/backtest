@@ -11,7 +11,7 @@ import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.engine.backtest_runner import PyBrokerBacktestRunner
+from core.execution.backtest_runner import PyBrokerBacktestRunner
 from core.config.strategy_profiles import StrategyLibrary
 from runner.common.utils import safe_float
 from runner.optimization import copy_config

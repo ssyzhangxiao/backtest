@@ -26,6 +26,7 @@ from .sensitivity import (
     DEFAULT_PERTURBATION,
     HIGH_SENSITIVITY_THRESHOLD,
 )
+from .cross_validator import CrossValidator
 
 __all__ = [
     # Monte Carlo
@@ -40,4 +41,6 @@ __all__ = [
     "FullSensitivityResult",
     "DEFAULT_PERTURBATION",
     "HIGH_SENSITIVITY_THRESHOLD",
+    # Cross Validation
+    "CrossValidator",
 ]

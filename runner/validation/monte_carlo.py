@@ -14,7 +14,7 @@ import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.engine.backtest_runner import PyBrokerBacktestRunner
+from core.execution.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from core.config.strategy_profiles import StrategyLibrary
 from core.validation.monte_carlo import MonteCarloSimulator

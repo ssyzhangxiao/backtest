@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from core.config import BacktestConfig
-from core.engine.pybroker_executor import (
+from core.execution.pybroker_executor import (
     PyBrokerExecutorBuilder,
     PyBrokerExecutorSharedState,
 )

@@ -1,0 +1,6 @@
+# 预测模型（规则21.2）
+# 安装：pip install -r requirements-models.txt
+# 或：pip install -e .[models]
+lightgbm>=4.0.0
+xgboost>=2.0.0
+torch>=2.0.0

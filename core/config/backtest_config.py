@@ -26,6 +26,7 @@ from .factors_config import FactorModuleConfig
 from .stop_config import StopOptimizationConfig
 from .validation_config import ValidationModuleConfig
 from .yaml_utils import convert_numpy_types, dump_yaml, load_yaml
+from .layered_config import load_env_overrides, merge_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -148,17 +149,27 @@ class BacktestConfig:
     )
 
     @classmethod
-    def from_yaml(cls, path: str = "config.yaml") -> "BacktestConfig":
+    def from_yaml(
+        cls,
+        path: str = "config.yaml",
+        overrides: Optional[Dict] = None,
+    ) -> "BacktestConfig":
         """
-        从 YAML 文件加载配置。
+        从 YAML 文件加载配置（支持分层覆盖）。
 
         规则2：config.yaml 是单一数据源，BacktestConfig 必须与 yaml 完全同步。
+        规则23：分层配置 — 优先级 YAML < env vars < overrides。
 
         P0 整改：补充 top_n_symbols / weight_method / min_position_pct 字段读取。
         P1-1 整改：factor_weights 缺省时记 warning，使用空字典（不再用 DEFAULT_FACTOR_WEIGHTS）。
+        规则23: 集成 LayeredConfigLoader，支持 env vars + runtime overrides。
 
         Args:
             path: YAML 文件路径
+            overrides: 运行时覆盖字典，key 格式：
+                - 顶层字段:  "rebalance_days"
+                - yaml 段路径: "backtest__rebalance_days" / "output__output_dir"
+                - 嵌套 dict:  {"backtest": {"rebalance_days": 5}}
 
         Returns:
             BacktestConfig 实例
@@ -166,6 +177,21 @@ class BacktestConfig:
         raw = load_yaml(path)
         bt = raw.get("backtest", {})
         fw = raw.get("factor_weights", {})
+
+        # 规则 23: 加载 env vars 覆盖（QUANT_BACKTEST__REBALANCE_FREQ=5）
+        env_overrides = load_env_overrides()
+        if env_overrides:
+            logger.info("检测到 env 覆盖: %s", list(env_overrides.keys()))
+
+        # 规则 23: 应用 overrides + env 覆盖到 raw dict
+        # 优先级: yaml < env < overrides
+        if env_overrides or overrides:
+            raw = cls._apply_layered_overrides(
+                raw, env_overrides=env_overrides, runtime_overrides=overrides or {}
+            )
+            # 重新提取各段（已被覆盖）
+            bt = raw.get("backtest", {})
+            fw = raw.get("factor_weights", {})
 
         # P1-1 整改：YAML 未提供 factor_weights 时记 warning 并使用空字典
         if not fw:
@@ -281,6 +307,39 @@ class BacktestConfig:
 
         # P2-1 整改：使用 yaml_utils.dump_yaml（自动处理 numpy 类型）
         dump_yaml(path, raw, sort_keys=False)
+
+    @staticmethod
+    def _apply_layered_overrides(
+        raw: Dict,
+        env_overrides: Dict[str, Dict],
+        runtime_overrides: Dict,
+    ) -> Dict:
+        """按优先级合并 env 与 runtime 覆盖到 raw dict（规则 23）。
+
+        优先级: raw (YAML) < env_overrides < runtime_overrides
+        env_overrides 的段名已通过 ENV_SECTION_ALIAS 映射到 yaml 段名。
+        runtime_overrides 的 key 支持:
+            - 顶层字段名: "rebalance_days"  → raw["rebalance_days"]
+            - 段路径: "backtest__rebalance_days"  → raw["backtest"]["rebalance_days"]
+            - 嵌套 dict: {"backtest": {...}}  → 合并到 raw["backtest"]
+
+        Returns:
+            新的 raw dict（不修改入参）
+        """
+        # Step 1: 应用 env 覆盖（段名已在 load_env_overrides 内做过映射）
+        result = merge_overrides(raw, env_overrides)
+
+        # Step 2: 规范化 runtime_overrides（点号/双下划线 → 嵌套）
+        normalized: Dict = {}
+        for key, value in runtime_overrides.items():
+            if isinstance(key, str) and "__" in key:
+                section, field = key.split("__", 1)
+                normalized.setdefault(section, {})[field] = value
+            else:
+                normalized[key] = value
+
+        # Step 3: 应用 runtime（最高优先级）
+        return merge_overrides(result, normalized)
 
     def update_strategy_params(self, best_params: dict, path: str = "config.yaml"):
         """

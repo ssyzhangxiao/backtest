@@ -15,8 +15,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from core.factors.alpha_futures import cross_spread as _cs_mod
-from core.factors.alpha_futures.cross_spread import (
+from core.ext.factors.alpha_futures import cross_spread as _cs_mod
+from core.ext.factors.alpha_futures.cross_spread import (
     CHAIN_PAIRS,
     compute_pair_spread_factor,
     list_available_pairs,

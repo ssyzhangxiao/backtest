@@ -12,7 +12,7 @@ import pandas as pd
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.engine.backtest_runner import PyBrokerBacktestRunner
+from core.execution.backtest_runner import PyBrokerBacktestRunner
 from core.config.strategy_profiles import StrategyLibrary
 from runner.optimization import copy_config
 from runner.optimization.window_search import _MAX_OPT_PROGRESS

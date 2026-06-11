@@ -8,8 +8,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.factors.alpha_futures_24 import AlphaFutures24, AlphaFuturesConfig
-from core.factors.alpha_futures.factor_pipeline import FactorPipeline
-from core.factors.alpha_futures.factor_registry import list_available_factors
+from core.ext.factors.alpha_futures.factor_pipeline import FactorPipeline
+from core.ext.factors.alpha_futures.factor_registry import list_available_factors
 
 np.random.seed(42)
 n = 500

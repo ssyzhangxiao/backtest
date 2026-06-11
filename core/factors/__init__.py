@@ -1,30 +1,35 @@
 """
-因子模块。
+因子模块（向后兼容 shim）— 规则 22 目录迁移 M-05。
 
-提供因子评估、变换、筛选、复核和新因子实现的统一框架。
+⚠️ 物理位置：所有功能已迁移到 `core.ext.factors.*`
+   本文件仅作为向后兼容的 re-export shim，给一个 release 周期后删除。
 
-模块拆分：
-  - factor_evaluator.py: 因子评估框架（IC/IR/稳定性）
-  - factor_transformer.py: 因子变换（对数/指数/交叉项）
-  - factor_selector.py: 因子筛选与去冗余
-  - factor_review.py: 因子复核（6项质量检查）
-  - operators.py: 基础算子库（safe_div, delay, zscore 等）
-  - futures_data_cleaners.py: 适用性工程改造数据清洗算子
-  - alpha_futures_24.py: 30因子编排入口（委托给 FactorEngine）
-  - alpha_futures/: 新因子类体系（BaseFactor + 注册表 + FactorEngine + Pipeline + sub_strategy_aggregator）
-
-P0 整改（2026-06-07）：
-  - 废弃 basic_factors.py（compute_factor_scores_from_ohlcv 委托给
-    alpha_futures.sub_strategy_aggregator.compute_sub_strategy_scores_from_ohlcv）
+新位置映射：
+    core.factors.factor_evaluator     → core.ext.factors.evaluator
+    core.factors.factor_selector      → core.ext.factors.selector
+    core.factors.factor_transformer   → core.ext.factors.transformer
+    core.factors.factor_review        → core.ext.factors.review
+    core.factors.operators            → core.ext.factors.operators
+    core.factors.futures_data_cleaners→ core.ext.factors.cleaners
+    core.factors.alpha_futures        → core.ext.factors.alpha_futures
+    core.factors.alpha_futures_24     → core.ext.factors.alpha_futures.factor_engine
+                                       （AlphaFutures24 内部委托给 FactorEngine）
 """
 
-from .factor_evaluator import FactorEvaluator, FactorEvalResult
-from .factor_transformer import FactorTransformer
-from .factor_selector import FactorSelector
-from .factor_review import FactorReviewer, FactorReviewReport
+from __future__ import annotations
 
-# 基础算子（供外部直接使用）
-from .operators import (
+# ──────────────────────────────────────────────────────
+# 评估/筛选/变换/复核框架
+# ──────────────────────────────────────────────────────
+from core.ext.factors.evaluator import FactorEvaluator, FactorEvalResult
+from core.ext.factors.selector import FactorSelector
+from core.ext.factors.transformer import FactorTransformer
+from core.ext.factors.review import FactorReviewer, FactorReviewReport
+
+# ──────────────────────────────────────────────────────
+# 基础算子（保留旧的导入路径供外部使用）
+# ──────────────────────────────────────────────────────
+from core.ext.factors.operators import (
     safe_div,
     delay,
     delta,
@@ -42,26 +47,97 @@ from .operators import (
     sma_ema,
     winsorize,
     clipping,
+    ema,
 )
 
-# 商品期货因子配置与清洗算子
-from .alpha_futures_24 import AlphaFuturesConfig, OIThresholdType, AlphaFutures24
-from .alpha_futures.factor_pipeline import FactorPipeline, PipelineResult
-from .alpha_futures.sub_strategy_aggregator import (
-    compute_sub_strategy_scores_from_ohlcv,
-)
-from .alpha_futures.factor_registry import (
-    SUB_STRATEGY_FACTOR_GROUPS,
-    get_sub_strategy_factors,
-)
-from .futures_data_cleaners import (
+# ──────────────────────────────────────────────────────
+# 商品期货清洗算子
+# ──────────────────────────────────────────────────────
+from core.ext.factors.cleaners import (
     compute_open_adj,
     compute_intraday_ret,
     compute_carry,
     compute_oi_safe,
     generate_delivery_exclude,
     adjust_price_for_roll,
+    compute_adaptive_gap_weight,
 )
+
+# ──────────────────────────────────────────────────────
+# 商品期货因子（24 因子 + 子策略聚合）
+# ──────────────────────────────────────────────────────
+from core.ext.factors.alpha_futures.config import (
+    AlphaFuturesConfig,
+    OIThresholdType,
+)
+from core.ext.factors.alpha_futures.factor_pipeline import (
+    FactorPipeline,
+    PipelineResult,
+)
+from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
+    compute_sub_strategy_scores_from_ohlcv,
+)
+from core.ext.factors.alpha_futures.factor_registry import (
+    SUB_STRATEGY_FACTOR_GROUPS,
+    get_sub_strategy_factors,
+)
+
+# ──────────────────────────────────────────────────────
+# 旧 AlphaFutures24 API 委托 shim（保留向后兼容）
+# ──────────────────────────────────────────────────────
+from core.factors.alpha_futures_24 import AlphaFutures24
+
+
+# ──────────────────────────────────────────────────────
+# 模块级 shim：支持 `from core.factors import factor_review` 旧用法
+# ──────────────────────────────────────────────────────
+import sys as _sys
+from core.ext.factors import (
+    evaluator as factor_evaluator,
+    selector as factor_selector,
+    transformer as factor_transformer,
+    review as factor_review,
+    cleaners as futures_data_cleaners,
+    operators as operators,
+)
+from core.ext.factors import alpha_futures as alpha_futures_pkg
+
+# 让 `from core.factors.alpha_futures import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.alpha_futures",
+    alpha_futures_pkg,
+)
+# 让 `from core.factors.operators import ema` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.operators",
+    operators,
+)
+# 让 `from core.factors.futures_data_cleaners import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.futures_data_cleaners",
+    futures_data_cleaners,
+)
+# 让 `from core.factors.factor_evaluator import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.factor_evaluator",
+    factor_evaluator,
+)
+# 让 `from core.factors.factor_selector import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.factor_selector",
+    factor_selector,
+)
+# 让 `from core.factors.factor_transformer import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.factor_transformer",
+    factor_transformer,
+)
+# 让 `from core.factors.factor_review import X` 旧用法也可工作
+_sys.modules.setdefault(
+    "core.factors.factor_review",
+    factor_review,
+)
+
 
 __all__ = [
     # 评估框架
@@ -89,20 +165,22 @@ __all__ = [
     "sma_ema",
     "winsorize",
     "clipping",
+    "ema",
     # 商品期货因子
     "AlphaFuturesConfig",
     "OIThresholdType",
+    "AlphaFutures24",
     "compute_open_adj",
     "compute_intraday_ret",
     "compute_carry",
     "compute_oi_safe",
     "generate_delivery_exclude",
     "adjust_price_for_roll",
-    "AlphaFutures24",
+    "compute_adaptive_gap_weight",
     # Pipeline
     "FactorPipeline",
     "PipelineResult",
-    # P0 整改：从 OHLCV 计算子策略得分（替代 basic_factors）
+    # 子策略聚合
     "compute_sub_strategy_scores_from_ohlcv",
     "SUB_STRATEGY_FACTOR_GROUPS",
     "get_sub_strategy_factors",

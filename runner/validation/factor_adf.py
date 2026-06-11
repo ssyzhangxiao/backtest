@@ -28,7 +28,7 @@ from loguru import logger
 
 from core.config import BacktestConfig
 from core.factors import AlphaFuturesConfig
-from core.factors.alpha_futures.factor_engine import FactorEngine
+from core.ext.factors.alpha_futures.factor_engine import FactorEngine
 from runner.common.utils import save_csv
 
 # ADF 显著性阈值（拒绝单位根的标准）

@@ -34,7 +34,7 @@ from loguru import logger
 
 from core.config import BacktestConfig
 from core.factors import AlphaFuturesConfig
-from core.factors.alpha_futures.factor_engine import FactorEngine
+from core.ext.factors.alpha_futures.factor_engine import FactorEngine
 from runner.common.utils import save_csv
 
 # 信号触发阈值（绝对值，单位：标准差）

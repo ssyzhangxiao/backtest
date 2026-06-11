@@ -1,0 +1,5 @@
+# 因子挖掘（GP 遗传规划 + DEAP）— 规则21.2
+# 安装：pip install -r requirements-factors.txt
+# 或：pip install -e .[factors]
+gplearn>=0.4
+deap>=1.4

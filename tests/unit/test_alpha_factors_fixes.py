@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # ───────────────────────────────────────────────────────────
 def test_adaptive_gap_weight_continuing():
     """跳空后高延续 → 权重应 > 0.5（更信任 open）。"""
-    from core.factors.futures_data_cleaners import compute_adaptive_gap_weight
+    from core.ext.factors.cleaners import compute_adaptive_gap_weight
 
     n = 60
     # 高延续场景：open[i] = 100 + 5*i（每日跳空+5），close[i] = 100 + 10*i（日内再+5）
@@ -48,7 +48,7 @@ def test_adaptive_gap_weight_continuing():
 
 def test_adaptive_gap_weight_reversing():
     """跳空后高反转 → 权重应 < 0.5（更信任 prev_close）。"""
-    from core.factors.futures_data_cleaners import compute_adaptive_gap_weight
+    from core.ext.factors.cleaners import compute_adaptive_gap_weight
 
     n = 60
     # 高反转场景：跳空 +5 但日内回落 5（开 105 收 100）
@@ -64,7 +64,7 @@ def test_adaptive_gap_weight_reversing():
 
 def test_adaptive_gap_weight_clipped_range():
     """权重应被 clip 到 [0.2, 0.8] 范围。"""
-    from core.factors.futures_data_cleaners import compute_adaptive_gap_weight
+    from core.ext.factors.cleaners import compute_adaptive_gap_weight
 
     np.random.seed(0)
     n = 100
@@ -76,7 +76,7 @@ def test_adaptive_gap_weight_clipped_range():
 
 def test_adaptive_gap_weight_no_lookahead():
     """无前瞻性：每个时间点权重仅由该时刻及之前数据决定。"""
-    from core.factors.futures_data_cleaners import compute_adaptive_gap_weight
+    from core.ext.factors.cleaners import compute_adaptive_gap_weight
 
     n = 60
     open_p = np.full(n, 100.0)
@@ -101,8 +101,8 @@ def test_adaptive_gap_weight_no_lookahead():
 # ───────────────────────────────────────────────────────────
 def test_factor_engine_adaptive_gap_weight_applied():
     """FactorEngine 应在缺省 gap_weight 时自适应计算。"""
-    from core.factors.alpha_futures.factor_engine import FactorEngine
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.factor_engine import FactorEngine
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 
     n = 50
     cfg = AlphaFuturesConfig()
@@ -126,7 +126,7 @@ def test_factor_engine_adaptive_gap_weight_applied():
 
 def test_alpha_futures_config_has_gap_weight_window():
     """AlphaFuturesConfig 应包含 gap_weight_window 字段。"""
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
     cfg = AlphaFuturesConfig()
     assert hasattr(cfg, "gap_weight_window")
     assert cfg.gap_weight_window == 20
@@ -146,13 +146,13 @@ def test_alpha_futures_config_has_gap_weight_window():
 # ───────────────────────────────────────────────────────────
 def _make_factor(cls):
     """统一通过 FactorRegistry 构造因子（注入默认 config）。"""
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
     return cls(AlphaFuturesConfig())
 
 
 def test_v01_price_up_oi_up_is_positive():
     """V_01: 价涨OI增 → 应为正（多开信号）。"""
-    from core.factors.alpha_futures.factors.v_01 import V_01
+    from core.ext.factors.alpha_futures.factors.v_01 import V_01
 
     n = 30
     oi = np.linspace(100, 200, n)  # 持续增仓
@@ -166,7 +166,7 @@ def test_v01_price_up_oi_up_is_positive():
 
 def test_v01_price_up_oi_down_is_negative():
     """V_01: 价涨OI减 → 应为负（被动平仓/空平）。"""
-    from core.factors.alpha_futures.factors.v_01 import V_01
+    from core.ext.factors.alpha_futures.factors.v_01 import V_01
 
     n = 30
     oi = np.linspace(200, 100, n)  # 持续减仓
@@ -179,7 +179,7 @@ def test_v01_price_up_oi_down_is_negative():
 
 def test_cf01_price_up_oi_up_is_positive():
     """CF_01: 价涨 + 持仓量 > MA → 应为正。"""
-    from core.factors.alpha_futures.factors.cf_01 import CF_01
+    from core.ext.factors.alpha_futures.factors.cf_01 import CF_01
 
     n = 30
     oi = np.concatenate([np.full(15, 100.0), np.linspace(100, 200, 15)])
@@ -193,13 +193,13 @@ def test_cf01_price_up_oi_up_is_positive():
 
 def test_cf01_dependencies_include_close():
     """CF_01 的 dependencies 应包含 close（新增依赖）。"""
-    from core.factors.alpha_futures.factors.cf_01 import CF_01
+    from core.ext.factors.alpha_futures.factors.cf_01 import CF_01
     assert "close" in CF_01.dependencies
 
 
 def test_v01_dependencies_include_close():
     """V_01 的 dependencies 应包含 close（新增依赖）。"""
-    from core.factors.alpha_futures.factors.v_01 import V_01
+    from core.ext.factors.alpha_futures.factors.v_01 import V_01
     assert "close" in V_01.dependencies
 
 
@@ -208,8 +208,8 @@ def test_v01_dependencies_include_close():
 # ───────────────────────────────────────────────────────────
 def test_cf03_dynamic_threshold_differs_from_static():
     """动态阈值在不同波动率区段应给出不同值。"""
-    from core.factors.alpha_futures.factors.cf_03 import CF_03
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.factors.cf_03 import CF_03
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 
     np.random.seed(42)
     n = 200
@@ -229,8 +229,8 @@ def test_cf03_dynamic_threshold_differs_from_static():
 
 def test_cf03_static_fallback():
     """dynamic_threshold=False 时回落静态阈值。"""
-    from core.factors.alpha_futures.factors.cf_03 import CF_03
-    from core.factors.alpha_futures.config import AlphaFuturesConfig
+    from core.ext.factors.alpha_futures.factors.cf_03 import CF_03
+    from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 
     np.random.seed(0)
     n = 100
@@ -247,7 +247,7 @@ def test_cf03_static_fallback():
 # ───────────────────────────────────────────────────────────
 def test_v02_handles_limit_up_zero_intraday():
     """涨跌停日 intraday_ret=0 时 V_02 不应全 0。"""
-    from core.factors.alpha_futures.factors.v_02 import V_02
+    from core.ext.factors.alpha_futures.factors.v_02 import V_02
 
     n = 30
     # 前 19 日有正常波动，第 20 日涨跌停（intraday_ret=0）
@@ -265,7 +265,7 @@ def test_v02_handles_limit_up_zero_intraday():
 
 def test_v02_std_min_periods_attribute():
     """V_02 应暴露 std_min_periods 类属性。"""
-    from core.factors.alpha_futures.factors.v_02 import V_02
+    from core.ext.factors.alpha_futures.factors.v_02 import V_02
     assert hasattr(V_02, "std_min_periods")
     assert V_02.std_min_periods >= 1
 
@@ -294,7 +294,7 @@ def test_compute_all_warns_when_no_roll_map(caplog):
 
 def test_auto_generate_roll_map():
     """_auto_generate_roll_map 应正确识别换月日。"""
-    from core.factors.alpha_futures.factor_engine import _auto_generate_roll_map
+    from core.ext.factors.alpha_futures.factor_engine import _auto_generate_roll_map
 
     is_dom = np.array([True, True, True, False, False, True, True], dtype=bool)
     rm = _auto_generate_roll_map(is_dom)

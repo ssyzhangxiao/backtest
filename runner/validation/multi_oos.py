@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.engine.backtest_runner import PyBrokerBacktestRunner
+from core.execution.backtest_runner import PyBrokerBacktestRunner
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from runner.common.utils import safe_float
 

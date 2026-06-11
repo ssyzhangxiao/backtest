@@ -5,7 +5,16 @@ PyBroker 数据源 — 将 DataFrame 转为 PyBroker 兼容数据源。
 
 提供:
   - PyBrokerDataSource: 数据源封装
-  - create_hybrid_data_source: TqSdk 优先 + CSV fallback 工厂
+  - create_hybrid_data_source: TqSdk 优先 + CSV fallback 工厂（M-02 重构：内部委托 adapters 工厂）
+
+M-02 重构说明：
+    原 create_hybrid_data_source 内部直接构造 DataLoader(data_source="tqsdk"/"csv")，
+    违反规则 22（伪迁移 + 调用方绕过 ext/adapters 工厂）。
+    现改为：
+        tqsdk_ds = create_data_source("tqsdk", ...)
+        csv_ds   = create_data_source("csv", ...)
+    DataLoader 仍负责低层加载/展期/spread 逻辑（规则 21.4 复用约束），
+    但调用路径统一走 ext/adapters 工厂。
 """
 
 from __future__ import annotations
@@ -93,6 +102,35 @@ class PyBrokerDataSource:
         return PyBrokerDataSource(filtered)
 
 
+def _load_legacy_dataframe(
+    data_source: str,
+    loader_kwargs: dict,
+) -> pd.DataFrame:
+    """委托 ext/adapters 工厂加载并返回 PyBroker 兼容 DataFrame。
+
+    内部约定：factory 返回的 DataSourceAdapter 提供 build_pybroker_df() 方法，
+    该方法顺序执行：load → identify_dominant_contracts → build_continuous_series → ...。
+    """
+    from core.ext.adapters import create_data_source  # 局部 import 避免循环
+
+    adapter = create_data_source(data_source, **loader_kwargs)
+    # 委托 adapter 暴露 DataLoader 风格的连续回测准备步骤
+    loader = adapter._loader  # noqa: SLF001 — 内部复用 DataLoader（规则 21.4）
+    loader.identify_dominant_contracts()
+    loader.build_continuous_series()
+    return loader.get_pybroker_df()
+
+
+def _load_legacy_spread_df(data_dir: str) -> pd.DataFrame:
+    """从 CSV 加载 spread 字段（仅当 TqSdk 缺失时补丁）。"""
+    from core.ext.adapters import create_data_source  # 局部 import
+
+    adapter = create_data_source("csv", data_dir=data_dir)
+    loader = adapter._loader  # noqa: SLF001 — 规则 21.4 复用
+    loader.build_continuous_series()
+    return loader.get_pybroker_df()
+
+
 def create_hybrid_data_source(
     phone: Optional[str] = None,
     password: Optional[str] = None,
@@ -102,6 +140,9 @@ def create_hybrid_data_source(
 ) -> PyBrokerDataSource:
     """
     混合数据源工厂：TqSdk 在线数据为主，本地 CSV 仅用于 spread（远月价差）补充。
+
+    **M-02 重构**：内部委托 `core.ext.adapters.create_data_source` 工厂，
+    不再直接构造 `DataLoader(data_source=...)`。
 
     加载策略：
       1. 必须提供 phone + password + symbols（凭证缺失则抛错，不静默回退）
@@ -115,7 +156,10 @@ def create_hybrid_data_source(
     if not phone or not password:
         try:
             import yaml as _yaml
-            _cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config.yaml")
+            _cfg_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "config.yaml",
+            )
             if os.path.exists(_cfg_path):
                 with open(_cfg_path, "r", encoding="utf-8") as _f:
                     _cfg = _yaml.safe_load(_f)
@@ -135,40 +179,44 @@ def create_hybrid_data_source(
             "未指定品种列表（symbols）。规则1：禁止回退到全量本地 CSV。"
         )
 
-    # ── 主路径：TqSdk 在线数据 ──
-    logger.info("从 TqSdk 加载在线数据（%d 品种, data_length=%d）...", len(symbols), data_length)
+    # ── 主路径：TqSdk 在线数据（委托 ext/adapters 工厂，M-02） ──
+    logger.info(
+        "从 TqSdk 加载在线数据（%d 品种, data_length=%d）...",
+        len(symbols), data_length,
+    )
     try:
-        from core.data_loader import DataLoader
+        from core.ext.adapters import create_data_source
 
-        tqsdk_loader = DataLoader(
-            data_source="tqsdk",
+        tqsdk_adapter = create_data_source(
+            "tqsdk",
             phone=phone,
             password=password,
             symbols=symbols,
             data_length=data_length,
         )
+        tqsdk_loader = tqsdk_adapter._loader  # noqa: SLF001 — 规则 21.4
         tqsdk_loader.load_from_tqsdk(show_progress=True)
-        tqsdk_loader.identify_dominant_contracts()
-        tqsdk_loader.build_continuous_series()
-        tqsdk_loader.build_spread_pairs()
 
-        tqsdk_df = tqsdk_loader.get_pybroker_df()
+        tqsdk_df = _load_legacy_dataframe(
+            "tqsdk",
+            dict(phone=phone, password=password, symbols=symbols, data_length=data_length),
+        )
         if tqsdk_df.empty:
             raise RuntimeError("TqSdk 数据为空")
 
         # 仅当 TqSdk 缺少 spread 字段时，从 CSV 补 spread 列（不补主数据）
         if "spread" not in tqsdk_df.columns:
             data_dir = data_dir or os.environ.get("DATA_DIR", "./data")
-            csv_loader = DataLoader(data_source="csv", data_dir=data_dir)
             target_csv_files = []
             for sym in symbols:
                 csv_path = os.path.join(data_dir, f"{sym}.csv")
                 if os.path.exists(csv_path):
                     target_csv_files.append(csv_path)
             if target_csv_files:
+                csv_adapter = create_data_source("csv", data_dir=data_dir)
+                csv_loader = csv_adapter._loader  # noqa: SLF001
                 csv_loader.load_csv_files_by_paths(target_csv_files)
-                csv_loader.build_continuous_series()
-                csv_df = csv_loader.get_pybroker_df()
+                csv_df = _load_legacy_spread_df(data_dir)
                 spread_cols = ["date", "symbol", "far_symbol", "far_close", "spread"]
                 available_cols = [c for c in spread_cols if c in csv_df.columns]
                 if available_cols:

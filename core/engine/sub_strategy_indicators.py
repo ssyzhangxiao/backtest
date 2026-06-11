@@ -27,10 +27,10 @@ from core.engine.strategy_indicators import (
     StrategyIndicatorRegistry,
     StrategyExitHookRegistry,
 )
-from core.factors.alpha_futures.sub_strategy_aggregator import (
+from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
     compute_sub_strategy_scores_from_ohlcv,
 )
-from core.factors.alpha_futures.config import AlphaFuturesConfig
+from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 
 
 # ---------------------------------------------------------------------------

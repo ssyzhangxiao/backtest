@@ -1,3 +1,5 @@
+# 核心依赖（与 pyproject.toml::dependencies 保持同步）
+# 安装：pip install -r requirements.txt
 pybroker>=1.0.0
 numba>=0.56.0
 streamlit>=1.28.0
@@ -6,3 +8,8 @@ numpy>=1.23.0
 plotly>=5.15.0
 scikit-learn>=1.2.0
 python-dotenv>=1.0.0
+loguru>=0.7.0
+statsmodels>=0.14.0
+scipy>=1.10.0
+pyyaml>=6.0
+tqdm>=4.65.0

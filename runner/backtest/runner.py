@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from core.config import BacktestConfig
-from core.engine.backtest_runner import (
+from core.execution.backtest_runner import (
     PyBrokerBacktestRunner,
     PyBrokerResult,
 )

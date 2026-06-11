@@ -1,0 +1,5 @@
+# LLM 因子生成（规则21.2）
+# 安装：pip install -r requirements-llm.txt
+# 或：pip install -e .[llm]
+openai>=1.0.0
+anthropic>=0.18.0

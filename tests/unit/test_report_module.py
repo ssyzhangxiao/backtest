@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.engine.backtest_runner import PyBrokerResult
+from core.execution._result_types import PyBrokerResult
 from runner.report.exporters import (
     export_metrics_summary,
     export_results_csv,
