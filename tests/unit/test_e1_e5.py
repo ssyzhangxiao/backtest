@@ -1,137 +1,159 @@
 """
-测试 e1_e5.py 模块
+测试 e1_e5.py 模块（2026-06-11 整改：适配 P2 公共系统迁移）。
+
+WeightedSignalFusion / _calculate_rolling_volatility / _calculate_risk_parity_weights
+已被提取到 runner/common/portfolio_utils，本测试改为测：
+  - e1_e5._run_weighted_fusion：E2/E3 通用加权融合
+  - e1_e5.PortfolioResult：TypedDict 字段约束
+  - runner.common.portfolio_utils.fuse_equities_by_weights / calculate_risk_parity_fusion
 """
 
-import pytest
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
-from runner.backtest.experiments.e1_e5 import (
-    WeightedSignalFusion,
-    _calculate_rolling_volatility,
-    _calculate_risk_parity_weights,
-    PortfolioResult,
-)
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-class TestWeightedSignalFusion:
-    """测试加权信号融合类"""
-
-    def test_combine_signals_equal_weights(self):
-        """测试等权信号融合"""
-        fusion = WeightedSignalFusion({"a": 0.5, "b": 0.5})
-        result = fusion.combine({"a": 10, "b": 20})
-        assert result == 15.0
-
-    def test_combine_signals_unequal_weights(self):
-        """测试不等权信号融合"""
-        fusion = WeightedSignalFusion({"a": 0.3, "b": 0.7})
-        result = fusion.combine({"a": 10, "b": 20})
-        assert result == 17.0
-
-    def test_combine_signals_missing_strategy(self):
-        """测试缺少策略的情况"""
-        fusion = WeightedSignalFusion({"a": 0.5, "b": 0.5})
-        result = fusion.combine({"a": 10})
-        assert result == 10.0  # 只有 a 的信号，权重归一化后全部在 a
-
-
-class TestCalculateRollingVolatility:
-    """测试滚动波动率计算"""
-
-    def test_calculate_rolling_volatility(self):
-        """测试正常计算"""
-        # 创建收益率序列
-        dates = pd.date_range(start="2020-01-01", periods=100)
-        returns = pd.Series(np.random.normal(0, 0.01, 100), index=dates)
-
-        # 计算滚动波动率
-        vol = _calculate_rolling_volatility(returns, window=20)
-
-        # 验证结果
-        assert isinstance(vol, pd.Series)
-        assert len(vol) == 100
-        # 前 window-1 个值可能是 NaN
-        assert not vol.isna().all()
-
-    def test_calculate_rolling_volatility_short_series(self):
-        """测试短序列计算"""
-        dates = pd.date_range(start="2020-01-01", periods=10)
-        returns = pd.Series(np.random.normal(0, 0.01, 10), index=dates)
-
-        vol = _calculate_rolling_volatility(returns, window=20)
-
-        assert isinstance(vol, pd.Series)
-        # 由于序列太短，min_periods 会被应用
-        assert not vol.isna().all()
-
-
-class TestCalculateRiskParityWeights:
-    """测试风险平价权重计算"""
-
-    def test_calculate_risk_parity_weights(self):
-        """测试正常计算"""
-        # 创建策略收益率
-        dates = pd.date_range(start="2020-01-01", periods=100)
-        strategy_returns = {
-            "strategy1": pd.Series(np.random.normal(0, 0.01, 100), index=dates),
-            "strategy2": pd.Series(np.random.normal(0, 0.02, 100), index=dates),
-            "strategy3": pd.Series(np.random.normal(0, 0.03, 100), index=dates),
-        }
-
-        # 计算风险平价权重
-        weights_df = _calculate_risk_parity_weights(strategy_returns, window=20)
-
-        # 验证结果
-        assert isinstance(weights_df, pd.DataFrame)
-        assert list(weights_df.columns) == ["strategy1", "strategy2", "strategy3"]
-
-        # 验证权重总和接近 1
-        row_sums = weights_df.sum(axis=1)
-        assert all((row_sums >= 0.999) & (row_sums <= 1.001) | row_sums.isna())
-
-        # 验证波动率越高的策略权重越低（使用最后一行的平均权重）
-        avg_weights = weights_df.mean()
-        # strategy1 波动率最低，应该权重最高
-        assert avg_weights["strategy1"] > avg_weights["strategy2"]
-        assert avg_weights["strategy2"] > avg_weights["strategy3"]
-
-    def test_calculate_risk_parity_weights_single_strategy(self):
-        """测试单策略情况"""
-        dates = pd.date_range(start="2020-01-01", periods=100)
-        strategy_returns = {
-            "strategy1": pd.Series(np.random.normal(0, 0.01, 100), index=dates),
-        }
-
-        weights_df = _calculate_risk_parity_weights(strategy_returns, window=20)
-
-        assert isinstance(weights_df, pd.DataFrame)
-        assert list(weights_df.columns) == ["strategy1"]
-        # 单策略权重应该总是 1
-        assert (weights_df["strategy1"] == 1.0).all()
-
-
+# ══════════════════════════════════════════════════════════════════════════════
+# PortfolioResult TypedDict 字段约束
+# ══════════════════════════════════════════════════════════════════════════════
 class TestPortfolioResult:
-    """测试 PortfolioResult 类型"""
+    """PortfolioResult 必含 metrics + equity 字段。"""
 
-    def test_portfolio_result_creation(self):
-        """测试创建 PortfolioResult"""
-        metrics = {"total_return": 0.1, "sharpe": 1.5}
+    def test_required_keys(self):
+        from runner.backtest.experiments.e1_e5 import PortfolioResult
+
+        # TypedDict 在 runtime 是普通 dict，验证构造后键可访问
+        result: PortfolioResult = {
+            "metrics": {"sharpe": 0.5},
+            "equity": pd.DataFrame(
+                {"date": pd.date_range("2020-01-01", periods=5), "equity": [1.0] * 5}
+            ),
+        }
+        assert "sharpe" in result["metrics"]
+        assert len(result["equity"]) == 5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 公共系统 fuse_equities_by_weights（WeightedSignalFusion 替代）
+# 接口契约（2026-06-11）：输入策略净值 DataFrame（首值=1.0），输出融合净值 Series（首值=1.0）
+# ══════════════════════════════════════════════════════════════════════════════
+class TestFuseEquitiesByWeights:
+    """fuse_equities_by_weights：公共系统替代 WeightedSignalFusion。"""
+
+    def test_equal_weights(self):
+        from runner.common.portfolio_utils import fuse_equities_by_weights
+
+        # 输入策略净值（首值=1.0），不是 raw score
         equity = pd.DataFrame(
             {
-                "date": pd.date_range("2020-01-01", periods=10),
-                "equity": np.linspace(1000000, 1100000, 10),
+                "a": [1.0, 1.10, 1.21],  # 收益 0.10, 0.10
+                "b": [1.0, 1.20, 1.32],  # 收益 0.20, 0.10
             }
         )
+        out = fuse_equities_by_weights(equity, {"a": 0.5, "b": 0.5})
+        # 融合净值首值固定=1.0（接口契约）
+        assert out.iloc[0] == 1.0
+        # 长度对齐
+        assert len(out) == 3
+        # 等权融合日收益：d1=(0.10+0.20)/2=0.15, d2=(0.10+0.10)/2=0.10
+        # 净值: 1.0 → 1.15 → 1.265
+        assert abs(out.iloc[1] - 1.15) < 1e-6
+        assert abs(out.iloc[2] - 1.265) < 1e-6
 
-        # PortfolioResult 是 TypedDict，所以我们创建一个符合的字典
-        result: PortfolioResult = {
-            "metrics": metrics,
-            "equity": equity,
+    def test_unequal_weights(self):
+        from runner.common.portfolio_utils import fuse_equities_by_weights
+
+        equity = pd.DataFrame(
+            {
+                "a": [1.0, 1.10, 1.21],
+                "b": [1.0, 1.20, 1.32],
+            }
+        )
+        out = fuse_equities_by_weights(equity, {"a": 0.3, "b": 0.7})
+        # 首值=1.0
+        assert out.iloc[0] == 1.0
+        # 加权日收益 = 0.3*0.10 + 0.7*0.20 = 0.17
+        # 第 1 日净值 = 1.17
+        assert abs(out.iloc[1] - 1.17) < 1e-6
+
+    def test_weights_sum_not_one_normalized(self):
+        """权重 sum != 1 时应归一化。"""
+        from runner.common.portfolio_utils import fuse_equities_by_weights
+
+        equity = pd.DataFrame(
+            {
+                "a": [1.0, 1.10],
+                "b": [1.0, 1.20],
+            }
+        )
+        out = fuse_equities_by_weights(
+            equity, {"a": 1.0, "b": 1.0}
+        )  # sum=2 → 归一为 0.5/0.5
+        # 归一化后等权，结果同 test_equal_weights
+        assert abs(out.iloc[1] - 1.15) < 1e-6
+
+    def test_all_zero_weights_returns_ones(self):
+        """全部权重为 0 → 返回全 1.0 净值。"""
+        from runner.common.portfolio_utils import fuse_equities_by_weights
+
+        equity = pd.DataFrame(
+            {
+                "a": [1.0, 1.10, 1.21],
+                "b": [1.0, 1.20, 1.32],
+            }
+        )
+        out = fuse_equities_by_weights(equity, {"a": 0.0, "b": 0.0})
+        # 全部 1.0
+        assert (out == 1.0).all()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 公共系统 calculate_risk_parity_fusion（_calculate_risk_parity_weights 替代）
+# 接口契约（2026-06-11）：输入策略收益率时序 dict，输出 {策略: 权重} 字典
+# ══════════════════════════════════════════════════════════════════════════════
+class TestCalculateRiskParityFusion:
+    """calculate_risk_parity_fusion：公共系统替代 _calculate_risk_parity_weights。"""
+
+    def test_equal_volatility_inverse_weights(self):
+        from runner.common.portfolio_utils import calculate_risk_parity_fusion
+
+        # 输入是收益率时序，不是净值
+        import numpy as np
+
+        returns = {
+            "a": pd.Series(np.full(120, 0.001)),  # 恒定收益
+            "b": pd.Series(np.full(120, 0.001)),  # 恒定收益
         }
+        weights = calculate_risk_parity_fusion(returns, window=60)
+        # 等波动率时权重应近似相等（a:b ≈ 0.5:0.5）
+        assert abs(weights["a"] - 0.5) < 0.05
+        assert abs(weights["b"] - 0.5) < 0.05
+        # 权重和=1
+        assert abs(sum(weights.values()) - 1.0) < 1e-6
 
-        assert "metrics" in result
-        assert "equity" in result
-        assert isinstance(result["equity"], pd.DataFrame)
+    def test_high_vol_strategy_gets_lower_weight(self):
+        """高波动率策略应获得更低权重。"""
+        from runner.common.portfolio_utils import calculate_risk_parity_fusion
+        import numpy as np
+
+        np.random.seed(0)
+        returns = {
+            "stable": pd.Series(np.random.normal(0, 0.005, 200)),
+            "volatile": pd.Series(np.random.normal(0, 0.05, 200)),
+        }
+        weights = calculate_risk_parity_fusion(returns, window=60)
+        assert weights["stable"] > weights["volatile"]
+        assert abs(sum(weights.values()) - 1.0) < 1e-6
+
+    def test_empty_returns_returns_empty_dict(self):
+        """空输入应返回空字典。"""
+        from runner.common.portfolio_utils import calculate_risk_parity_fusion
+
+        assert calculate_risk_parity_fusion({}) == {}

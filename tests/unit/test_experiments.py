@@ -1,10 +1,10 @@
 """
-实验模块（E1-E11）单元测试：P2 整改后回归测试（2026-06-07）。
+实验模块（E1-E11）单元测试：P2 整改后回归测试（2026-06-11 适配）。
 
 覆盖范围：
 - _run_weighted_fusion：E2/E3 合并后行为等价性
-- calculate_risk_parity_fusion：E4 风险平价融合数值正确性
-- _compute_monte_carlo_stats：E9 蒙特卡洛破产概率计算
+- calculate_risk_parity_fusion / calculate_risk_parity_weights：E4 风险平价融合数值正确性
+- _run_per_strategy_mc：E9 蒙特卡洛单策略路径生成（_compute_monte_carlo_stats 已迁移到公共模块）
 - BootstrapResult：E8 数据类字段约束
 """
 
@@ -15,14 +15,12 @@ import pandas as pd
 import pytest
 
 from runner.backtest.experiments.e1_e5 import _run_weighted_fusion
-from runner.backtest.experiments.e6_e11 import (
-    BootstrapResult,
-    _compute_monte_carlo_stats,
-)
+from runner.backtest.experiments.e6_e11 import BootstrapResult
 from runner.common.portfolio_utils import (
     calculate_risk_parity_fusion,
     calculate_risk_parity_weights,
 )
+from runner.validation.monte_carlo import _run_monte_carlo_sim
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -38,9 +36,7 @@ class TestRunWeightedFusion:
         captured: list[dict] = []
 
         def _fake_safe_run_backtest(runner, start, end, name, use_execute_fusion):
-            captured.append(
-                {"name": name, "use_execute_fusion": use_execute_fusion}
-            )
+            captured.append({"name": name, "use_execute_fusion": use_execute_fusion})
             return None
 
         monkeypatch.setattr(
@@ -128,50 +124,52 @@ class TestRiskParityFusion:
 
 
 class TestMonteCarloStats:
-    """E9 蒙特卡洛核心算法正确性。"""
+    """E9 蒙特卡洛核心算法正确性（_run_monte_carlo_sim 公共系统，2026-06 迁移）。"""
 
     def test_output_shapes(self):
         """final_values / max_drawdowns 应为 (n_simulations,)。"""
         rng = np.random.default_rng(42)
-        returns = rng.normal(0.0005, 0.01, 200)
-        stats = _compute_monte_carlo_stats(
+        returns = pd.Series(rng.normal(0.0005, 0.01, 200))
+        result = _run_monte_carlo_sim(
             returns,
             n_simulations=100,
-            random_seed=42,
+            seed=42,
             bankruptcy_threshold=0.5,
         )
-        assert stats["final_values"].shape == (100,)
-        assert stats["max_drawdowns"].shape == (100,)
-        assert 0.0 <= stats["bankruptcy_prob"] <= 1.0
+        assert result["final_values"].shape == (100,)
+        assert result["max_drawdowns"].shape == (100,)
+        assert 0.0 <= result["bankruptcy_prob"] <= 1.0
 
     def test_bankruptcy_probability_correctness(self):
         """破产概率 = 终值 < threshold 的样本占比。"""
-        # 构造一半终值必然 < 0.5 的数据：所有日收益 -0.05（净值持续衰减）
-        returns = np.full(100, -0.05)
-        stats = _compute_monte_carlo_stats(
+        # 持续亏损 → 全部破产
+        returns = pd.Series(np.full(100, -0.05))
+        result = _run_monte_carlo_sim(
             returns,
             n_simulations=200,
-            random_seed=0,
+            seed=0,
             bankruptcy_threshold=0.5,
         )
-        # 持续亏损必然全部破产
-        assert stats["bankruptcy_prob"] == pytest.approx(1.0, abs=1e-9)
+        assert result["bankruptcy_prob"] == pytest.approx(1.0, abs=1e-9)
 
     def test_max_drawdown_negative_or_zero(self):
         """最大回撤应为非正值（亏损为负，零回撤为边界）。"""
         rng = np.random.default_rng(42)
-        returns = rng.normal(0, 0.01, 150)
-        stats = _compute_monte_carlo_stats(
-            returns, n_simulations=50, random_seed=42, bankruptcy_threshold=0.5
+        returns = pd.Series(rng.normal(0, 0.01, 150))
+        result = _run_monte_carlo_sim(
+            returns,
+            n_simulations=50,
+            seed=42,
+            bankruptcy_threshold=0.5,
         )
-        assert np.all(stats["max_drawdowns"] <= 0.0)
+        assert np.all(result["max_drawdowns"] <= 0.0)
 
     def test_reproducibility_with_seed(self):
         """相同种子应产生相同结果。"""
         rng = np.random.default_rng(0)
-        returns = rng.normal(0.001, 0.02, 100)
-        s1 = _compute_monte_carlo_stats(returns, 50, random_seed=123, bankruptcy_threshold=0.5)
-        s2 = _compute_monte_carlo_stats(returns, 50, random_seed=123, bankruptcy_threshold=0.5)
+        returns = pd.Series(rng.normal(0.001, 0.02, 100))
+        s1 = _run_monte_carlo_sim(returns, 50, seed=123, bankruptcy_threshold=0.5)
+        s2 = _run_monte_carlo_sim(returns, 50, seed=123, bankruptcy_threshold=0.5)
         np.testing.assert_array_equal(s1["final_values"], s2["final_values"])
         assert s1["bankruptcy_prob"] == s2["bankruptcy_prob"]
 

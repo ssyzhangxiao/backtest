@@ -23,11 +23,14 @@ def _make_raw(n: int = 60) -> dict:
 
 
 def test_compute_all_runs_with_default_config():
-    """默认配置下，compute_all 应当能完整跑完所有 30 个因子。"""
+    """默认配置下，compute_all 应当能完整跑完所有因子。"""
     engine = FactorEngine(AlphaFuturesConfig())
     results = engine.compute_all(_make_raw(80))
-    # 30 因子全部产出（异常兜底也返回 NaN 模板）
-    assert len(results) == 30
+    # 2026-06-11 V_04 OI jump 修复后：CF_03 + H_01-05 + M_01-05 + R_01-05 + TS_01-03 + TS_composite + T_01-05 + V_01-04 = 31
+    assert len(results) == 31
+    # 关键因子必须存在（含 V_04 OI jump 因子）
+    assert "V_04" in results
+    assert "H_05" in results
     # ret 字段在公共数据中（验证 safe_div 修复后第一根不再产生 inf）
     # 注意：ret 由 _prepare_common_rolling 写入 public_data，外部不直接可见
 

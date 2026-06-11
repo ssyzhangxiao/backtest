@@ -25,10 +25,11 @@ class TestRollingICWeightEngine(unittest.TestCase):
         self.engine = RollingICWeightEngine(config=self.config)
 
     def test_initial_weights_are_default(self):
-        """初始权重应为默认固定权重。"""
+        """初始权重应为默认固定权重（5 子策略体系）。"""
         weights = self.engine.current_weights
-        self.assertIn("ts_momentum", weights)
-        self.assertIn("roll_yield", weights)
+        # 2026-06 架构：默认 5 子策略权重（不再是 ts_momentum/roll_yield 旧因子名）
+        self.assertIn("trend", weights)
+        self.assertIn("vol_breakout", weights)
         # 权重之和应接近1
         total = sum(weights.values())
         self.assertAlmostEqual(total, 1.0, places=2)

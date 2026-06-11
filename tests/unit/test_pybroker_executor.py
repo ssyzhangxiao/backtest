@@ -114,6 +114,9 @@ def _make_components(total_symbols: int = 3):
     risk_controller.check_concentration_dict = MagicMock(
         side_effect=lambda weights, max_concentration: dict(weights),
     )
+    # 2026-06-11 修复：spec=RiskController 会让 composite_stop 返回 MagicMock（truthy），
+    # 误触发止损。改为显式设置 None 走 PnL-based 回退路径。
+    risk_controller.composite_stop = None
     return cfg, scoring_engine, portfolio, risk_controller
 
 

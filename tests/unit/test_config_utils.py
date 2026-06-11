@@ -104,10 +104,11 @@ class TestConfigUtils:
         assert result == ["factor1", "factor2", "factor3"]
 
     def test_get_factors_list_default(self):
-        """测试默认因子列表"""
+        """测试默认因子列表：返回 5 子策略（2026-06 架构调整：子策略优先于具体因子名）"""
         result = get_factors_list({})
-        assert len(result) > 0
-        assert "ts_momentum" in result
+        assert len(result) == 5
+        assert "trend" in result
+        assert "vol_breakout" in result
 
     def test_get_missing_data_method(self):
         """测试获取缺失值处理方法"""
