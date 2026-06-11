@@ -21,7 +21,8 @@ PYBROKER_EXTRA_COLUMNS: list = [
 # 初始资金
 INITIAL_CASH: float = 1_000_000.0
 
-# 5子策略默认因子权重（等权）
+# 5 子策略默认因子权重（等权）
+# 2026-06-11 重构：vol_breakout 重写因子后回归 5 子策略等权 0.2
 DEFAULT_FACTOR_WEIGHTS: Dict[str, float] = {
     "trend": 0.20,
     "term_structure": 0.20,

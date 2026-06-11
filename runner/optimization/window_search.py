@@ -234,12 +234,10 @@ def out_of_sample_test(
     logger.info(f"\n  样本外测试: {strategy_name}")
 
     try:
-        bt_config = BacktestConfig(
-            initial_cash=config.initial_cash,
-            commission_rate=config.commission_rate,
-            slippage_rate=config.slippage_rate,
-        )
-        runner = PyBrokerBacktestRunner(ds, bt_config)
+        # 2026-06-11 修复：直接复用 config（含 factor_weights），不再 3 字段重建
+        # （同样 bug：3 字段重建 → factor_weights={} → 0 trade → 样本外 sharpe=0）
+        bt_config = config
+        runner = PyBrokerBacktestRunner(ds, bt_config, target_symbols=list(bt_config.symbols))
         runner.register_strategies([strategy_name])
 
         result = runner.run(

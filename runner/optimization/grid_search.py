@@ -54,19 +54,18 @@ def grid_search_single_strategy(
 
     logger.info(f"\n  策略: {strategy_name} | 参数组合数: {total}")
 
-    # 构建回测用的 BacktestConfig（复用传入的 config，仅覆盖交易参数）
-    bt_config = BacktestConfig(
-        initial_cash=config.initial_cash,
-        commission_rate=config.commission_rate,
-        slippage_rate=config.slippage_rate,
-    )
+    # 2026-06-11 修复：直接复用传入的 config（含 factor_weights / stop_loss_pct /
+    # rebalance_days / max_position_pct 等），不再重建 BacktestConfig(3 字段) 丢字段。
+    # 历史 bug：3 字段重建 → factor_weights={} → ScoringConfig 5 子策略权重=0 →
+    # 信号=0 → 0 trade → grid 16 组 sharpe 全=0 → e1 baseline 0 trade。
+    bt_config = config
 
     results = []
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
 
         try:
-            runner = PyBrokerBacktestRunner(ds, bt_config)
+            runner = PyBrokerBacktestRunner(ds, bt_config, target_symbols=list(bt_config.symbols))
             runner.register_strategies([strategy_name])
 
             result = runner.run(

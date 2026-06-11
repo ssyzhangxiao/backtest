@@ -6,6 +6,9 @@ AlphaFutures24 因子IC/IR验证。
 
 P0 整改：使用 core.factors.factor_evaluator.FactorEvaluator.evaluate_batch
 统一执行 IC/IR 计算，删除手写 corrcoef / 滚动 IC。
+
+TODO 2026-06-11: P0 整改部分完成，line 284/549/666 仍保留 np.corrcoef 兜底逻辑
+（异常路径），主路径已迁到 FactorEvaluator.evaluate_batch。下次清理时删除兜底。
 """
 
 from pathlib import Path

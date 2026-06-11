@@ -346,9 +346,22 @@ def run_full_validation(
     p1 = _phase1_optimize(pipe, in_sample_start, in_sample_end, oos_start, oos_end)
     best_params = p1.get("best_params", {})
 
+    # 2026-06-11 修复：把 numpy int64/float64 转为 Python 原生类型，确保 JSON 可序列化
+    def _to_jsonable(obj):
+        if isinstance(obj, dict):
+            return {k: _to_jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_jsonable(x) for x in obj]
+        if hasattr(obj, "item"):
+            try:
+                return obj.item()
+            except (ValueError, AttributeError):
+                return obj
+        return obj
+
     # 保存 best_params
     with open(output_dir / "phase1_best_params.json", "w", encoding="utf-8") as f:
-        json.dump(best_params, f, indent=2, ensure_ascii=False)
+        json.dump(_to_jsonable(best_params), f, indent=2, ensure_ascii=False)
 
     # Phase 2: 6 品种横截面 EW
     pipe = p1["pipe"]

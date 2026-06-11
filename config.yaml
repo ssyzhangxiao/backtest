@@ -39,19 +39,19 @@ factor_weights:
 strategies:
 - name: trend
   params:
-    window: 5.0
+    window: 10
 - name: term_structure
   params:
-    lookback: 5.0
-    entry_threshold: 0.5
+    lookback: 40
+    entry_threshold: 3.0
 - name: mean_reversion
   params:
-    short_window: 3.0
-    long_window: 120.0
+    short_window: 5
+    long_window: 360
 - name: vol_breakout
   params:
-    ma_window: 3.0
-    corr_window: 120.0
+    ma_window: 15
+    corr_window: 40
 - name: composite_resonance
   params: {}
 - name: cross_sectional

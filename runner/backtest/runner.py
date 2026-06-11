@@ -127,7 +127,11 @@ def safe_run_backtest(
             run_kwargs["initial_cash"] = initial_cash
         return runner.run(start_date=start_date, end_date=end_date, **run_kwargs)
     except Exception as e:
-        logger.error(f"{experiment_name} 回测执行失败: {e}", exc_info=True)
+        # 2026-06-11 修复：使用 logger.exception() 等价于 error+exc_info+diagnose，
+        # 确保完整 traceback 写入日志（不再因 exc_info=True 写法在某些 loguru
+        # sink 配置下不输出堆栈）。同时把异常对象 raise_with_traceback 抛回，
+        # 让 e1_e5 等编排层 try/except 能拿到原始异常 + 完整 traceback。
+        logger.exception(f"{experiment_name} 回测执行失败: {e}")
         return None
 
 

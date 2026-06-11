@@ -208,15 +208,12 @@ def _run_period_backtest(
     if mode == "regime":
         return _run_regime_backtest(strategy_names, ds, config, start, end)
 
-    # 固定参数回测
-    bt_config = BacktestConfig(
-        initial_cash=config.initial_cash,
-        commission_rate=config.commission_rate,
-        slippage_rate=config.slippage_rate,
-    )
+    # 2026-06-11 修复：直接复用 config（含 factor_weights），不再 3 字段重建
+    # （同样 bug：3 字段重建 → factor_weights={} → 0 trade → 固定参数回测 0 pnl）
+    bt_config = config
     for sname in strategy_names:
         try:
-            runner = PyBrokerBacktestRunner(ds, bt_config)
+            runner = PyBrokerBacktestRunner(ds, bt_config, target_symbols=list(bt_config.symbols))
             runner.register_strategies([sname])
 
             custom_params = None

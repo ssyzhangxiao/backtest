@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from core.engine.backtest_runner import PyBrokerResult
+from core.config import BacktestConfig  # 2026-06-11 修复：直接接受 BacktestConfig
+from core.engine.backtest_runner import PyBrokerBacktestRunner, PyBrokerResult
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from core.factors.factor_evaluator import FactorEvaluator
 from core.performance import PerformanceEvaluator
@@ -37,6 +38,11 @@ from runner.common.config_utils import (
     get_factors_list,
 )
 from runner.strategy.selector import get_strategy_names
+
+# 2026-06-11 修复：蒙特卡洛 MC 阶段的固定参数（无法从 BacktestConfig 直接读取）
+_E9_N_SIMULATIONS = 1000
+_E9_RANDOM_SEED = 42
+_E9_TRADING_DAYS_PER_YEAR = 252
 
 
 _EPSILON = 1e-10
@@ -330,7 +336,7 @@ def run_e8_bootstrap(
 @handle_backtest_errors(return_value=None)
 def run_e9_monte_carlo(
     data_source: PyBrokerDataSource,
-    config: Dict[str, Any],
+    config: BacktestConfig,
     output_dir: Path,
 ) -> Optional[pd.DataFrame]:
     """
@@ -347,31 +353,45 @@ def run_e9_monte_carlo(
       - Sharpe 的 5% 分位数 > 0 判定为稳健
       - 在 e9_monte_carlo_stats.csv 写入 is_robust 列
 
+    2026-06-11 修复（独立 bug）：改接受 BacktestConfig 而非 Dict。
+      此前通过 _build_mc_config 转 dict 后再 get_pybroker_runner → build_backtest_config
+      会丢失 factor_weights（默认空），导致 ScoringConfig 把 5 子策略权重置 0，
+      最终 0 trade → MC 1000 次 path 全 1.0。
+      修复后直接 PyBrokerBacktestRunner(data_source, config, target_symbols=config.symbols)，
+      BacktestConfig 全字段（含 factor_weights / stop_loss_pct / max_position_pct / rebalance_days）透传。
+
     Args:
         data_source: 数据源
-        config: 配置字典
+        config: BacktestConfig 实例（单一权威源，规则2）
         output_dir: 输出目录
 
     Returns:
         模拟结果 DataFrame，失败返回 None
     """
     logger.info("E9：蒙特卡洛模拟")
-    bt_cfg = config["backtest"]
-    mc_cfg = get_montecarlo_config(config)
-    n_simulations = int(mc_cfg.get("n_simulations", 1000))
-    random_seed = int(mc_cfg.get("random_seed", 42))
-    bankruptcy_threshold = float(mc_cfg.get("bankruptcy_threshold", 0.8))
-    trading_days_per_year = int(
-        mc_cfg.get("trading_days_per_year", 252)
-    )  # 兼容加密货币 365
+    # 2026-06-11 修复：直接读 BacktestConfig 字段，不再依赖 _build_mc_config 转 dict
+    full_start_date = config.full_start
+    full_end_date = config.full_end
+    n_simulations = _E9_N_SIMULATIONS
+    random_seed = _E9_RANDOM_SEED
+    bankruptcy_threshold = float(config.bankruptcy_threshold)
+    trading_days_per_year = _E9_TRADING_DAYS_PER_YEAR
+    # 过滤横截面组合模式（与 phase2 / get_strategy_names 对齐）
+    target_strategy_names = [
+        n
+        for n in (config.strategy_names or get_strategy_names({}))
+        if n != "cross_sectional"
+    ]
 
     try:
-        runner = get_pybroker_runner(
-            data_source, config, strategies=get_strategy_names(config)
+        # 2026-06-11 修复：直接用 BacktestConfig 构造 runner（与 phase2 风格一致），
+        # 避免 _build_mc_config + get_pybroker_runner 链路丢字段。
+        runner = PyBrokerBacktestRunner(
+            data_source, config, target_symbols=list(config.symbols)
         )
-        result = safe_run_backtest(
-            runner, bt_cfg["full_start_date"], bt_cfg["full_end_date"], "E9_base"
-        )
+        if target_strategy_names:
+            runner.register_strategies(target_strategy_names)
+        result = safe_run_backtest(runner, full_start_date, full_end_date, "E9_base")
         if result is None:
             return None
 
@@ -400,9 +420,7 @@ def run_e9_monte_carlo(
             return None
 
         # 终值 = 路径末端值（沿用旧 E9 字段命名以兼容下游）
-        final_values = (
-            mc_result.paths[:, -1] if mc_result.paths is not None else None
-        )
+        final_values = mc_result.paths[:, -1] if mc_result.paths is not None else None
         # 破产概率（终值 < 阈值）
         bankruptcy_prob = (
             float(np.mean(final_values < bankruptcy_threshold))
@@ -458,8 +476,12 @@ def run_e9_monte_carlo(
             ],
         }
         # P0 整改：把 MonteCarloResult 公共输出落到 stats csv，便于外部分析
-        stats_data["sharpe_quantile_05"] = [mc_result.sharpe_quantiles.get(0.05, 0.0)] * 5
-        stats_data["sharpe_quantile_50"] = [mc_result.sharpe_quantiles.get(0.50, 0.0)] * 5
+        stats_data["sharpe_quantile_05"] = [
+            mc_result.sharpe_quantiles.get(0.05, 0.0)
+        ] * 5
+        stats_data["sharpe_quantile_50"] = [
+            mc_result.sharpe_quantiles.get(0.50, 0.0)
+        ] * 5
         stats_data["is_robust"] = [is_robust] + [None] * 4  # 仅第一行有意义
         save_csv(pd.DataFrame(stats_data), output_dir / "e9_monte_carlo_stats.csv")
 
@@ -474,8 +496,7 @@ def run_e9_monte_carlo(
                 trading_days_per_year=trading_days_per_year,
             )
             logger.info(
-                f"  路径已保存: e9_monte_carlo_paths.npz "
-                f"shape={mc_result.paths.shape}"
+                f"  路径已保存: e9_monte_carlo_paths.npz shape={mc_result.paths.shape}"
             )
 
         return mc_results
@@ -573,7 +594,9 @@ def _run_factor_analysis_for_symbol(
     scored = compute_sub_strategy_scores_from_ohlcv(sym_df)
 
     # P0 整改：用公开数据结构维护 IC 历史（替代私有属性访问）
-    factor_scores_history: Dict[str, np.ndarray] = {n: np.array([]) for n in factor_names}
+    factor_scores_history: Dict[str, np.ndarray] = {
+        n: np.array([]) for n in factor_names
+    }
     forward_returns_arr: List[float] = []
     prev_weights: Optional[Dict[str, float]] = None
     last_sample_date: Optional[str] = None
@@ -595,9 +618,7 @@ def _run_factor_analysis_for_symbol(
 
         # 累积每个因子的得分历史
         for name, score in factor_scores.items():
-            factor_scores_history[name] = np.append(
-                factor_scores_history[name], score
-            )
+            factor_scores_history[name] = np.append(factor_scores_history[name], score)
         forward_returns_arr.append(forward_ret)
         last_sample_date = str(row["date"])[:10]
 

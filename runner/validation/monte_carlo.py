@@ -64,9 +64,10 @@ def task3_monte_carlo(
     strategy_names = list(config.strategy_names)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 调用标准蒙特卡洛实验
-    val_config = _build_mc_config(config, strategy_names)
-    mc_base_df = run_e9_monte_carlo(data_source, val_config, output_dir)
+    # 2026-06-11 修复：直接传 BacktestConfig 给 run_e9_monte_carlo，
+    # 避免 _build_mc_config → get_pybroker_runner 链路丢 factor_weights 等字段
+    # （导致 5 子策略权重=0、信号=0、0 trade、MC path 全 1.0）。
+    mc_base_df = run_e9_monte_carlo(data_source, config, output_dir)
 
     # 逐策略蒙特卡洛详细分析
     all_mc_results = _run_per_strategy_mc(
@@ -113,46 +114,6 @@ def task3_monte_carlo(
     return {"summary": df_mc, "details": all_mc_results, "base": mc_base_df}
 
 
-def _build_mc_config(
-    config: BacktestConfig,
-    strategy_names: List[str],
-) -> Dict[str, Any]:
-    """
-    构建蒙特卡洛实验配置。
-
-    Args:
-        config: 回测配置（BacktestConfig）
-        strategy_names: 策略名称列表
-
-    Returns:
-        实验配置字典
-    """
-    return {
-        "backtest": {
-            "initial_cash": config.initial_cash,
-            "commission_rate": config.commission_rate,
-            "slippage_rate": config.slippage_rate,
-            "full_start_date": config.full_start,
-            "full_end_date": config.full_end,
-            "in_sample_end_date": config.in_sample_end,
-            "out_sample_start_date": config.out_sample_start,
-        },
-        "symbols": config.symbols,
-        "strategies": [{"name": s} for s in strategy_names],
-        "risk_management": {
-            "stop_loss_pct": 0.05,
-            "position_limit_pct": 0.4,
-            "total_position_limit": 0.8,
-        },
-        "factor_weights": {},
-        "monte_carlo": {
-            "n_simulations": _N_MONTE_CARLO,
-            "random_seed": _RANDOM_SEED,
-        },
-        "output": {"output_dir": config.output_dir},
-    }
-
-
 def _run_per_strategy_mc(
     strategy_names: List[str],
     data_source: PyBrokerDataSource,
@@ -185,12 +146,11 @@ def _run_per_strategy_mc(
     for sname in strategy_names:
         logger.info(f"\n  策略: {sname}")
         try:
-            bt_config = BacktestConfig(
-                initial_cash=config.initial_cash,
-                commission_rate=config.commission_rate,
-                slippage_rate=config.slippage_rate,
+            # 2026-06-11 修复：直接用 BacktestConfig 构造 runner（与 phase2 风格一致），
+            # 避免重建 BacktestConfig(3 字段) 丢失 factor_weights/stop_loss_pct/rebalance_days 等。
+            runner = PyBrokerBacktestRunner(
+                data_source, config, target_symbols=list(config.symbols)
             )
-            runner = PyBrokerBacktestRunner(data_source, bt_config)
             runner.register_strategies([sname])
 
             custom_params = None

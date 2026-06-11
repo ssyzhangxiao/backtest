@@ -15,6 +15,15 @@ from loguru import logger
 from core.config import BacktestConfig
 from core.config.strategy_profiles import StrategyLibrary
 from runner.common.errors import PipelineError, ConfigError
+from runner.pipeline_factor_ops import (
+    _run_factor_review,
+    _run_factor_screening,
+)
+from runner.pipeline_helpers import (
+    _run_all_validations,
+    _run_optimization,
+    _verify_chain,
+)
 
 
 class Pipeline:
@@ -71,12 +80,11 @@ class Pipeline:
         # 同时重新加载原始配置
         if self._data is not None:
             from runner.data.loader import DataLoader
+
             loader = DataLoader(self._config_path)
             self._raw_config = loader.raw_config
         logger.info("配置热重载完成")
         return self
-
-
 
     def load_data(self) -> "Pipeline":
         """
@@ -379,37 +387,16 @@ class Pipeline:
         do_winsorize: bool = True,
     ) -> "Pipeline":
         """
-        因子筛选：对AlphaFutures全部30因子做IC/IR统计测试。
-
-        委托 runner.validation.factor_alpha24_screening（其内部已用
-        FactorEvaluator.evaluate_batch 批量评估），筛选出通过规则9
-        （|IC|>0.03且|IR|>0.5）的有效因子。
-
-        Args:
-            symbols: 测试品种列表，默认使用配置中的品种
-            do_winsorize: 是否对因子值做缩尾后处理
+        因子筛选（委托 runner.pipeline_factor_ops._run_factor_screening）。
 
         Returns:
             self（支持链式调用）
         """
-        if self._data is None:
-            raise PipelineError("请先调用 load_data() 加载数据")
-
-        if symbols is None:
-            symbols = self._config.symbols
-
-        logger.info("=" * 60)
-        logger.info("因子筛选: AlphaFutures 30因子IC/IR测试")
-        logger.info(f"  品种: {symbols}")
-        logger.info("=" * 60)
-
-        from runner.validation.factor_alpha24 import factor_alpha24_screening
-
-        results = factor_alpha24_screening(
-            data_source=self._data,
+        results = _run_factor_screening(
             config=self._config,
+            data=self._data,
             lib=self._lib,
-            output_dir=Path(self._config.output_dir),
+            symbols=symbols,
             do_winsorize=do_winsorize,
         )
         self._results["factor_screening"] = results
@@ -420,36 +407,16 @@ class Pipeline:
         symbols: Optional[List[str]] = None,
     ) -> "Pipeline":
         """
-        因子复核：对全部因子执行6项质量检查。
-
-        委托 runner.validation.factor_review.factor_review_validation，
-        执行数据存活率、缺失值占比、异常值抵抗、参数敏感性、
-        因子正交性、时序稳定性共6项复核。
-
-        Args:
-            symbols: 复核品种列表，默认使用配置中的品种
+        因子复核（委托 runner.pipeline_factor_ops._run_factor_review）。
 
         Returns:
             self（支持链式调用）
         """
-        if self._data is None:
-            raise PipelineError("请先调用 load_data() 加载数据")
-
-        if symbols is None:
-            symbols = self._config.symbols
-
-        logger.info("=" * 60)
-        logger.info("因子复核: 6项质量检查")
-        logger.info(f"  品种: {symbols}")
-        logger.info("=" * 60)
-
-        from runner.validation.factor_review import factor_review_validation
-
-        results = factor_review_validation(
-            data_source=self._data,
+        results = _run_factor_review(
             config=self._config,
+            data=self._data,
             lib=self._lib,
-            output_dir=Path(self._config.output_dir),
+            symbols=symbols,
         )
         self._results["factor_review"] = results
         return self
@@ -488,216 +455,10 @@ class Pipeline:
         """
         P0-任务5整改：验证完整调用链是否正确连接。
 
-        调用链（自下而上）:
-          因子层 FactorEngine
-            → 评估层 FactorEvaluator
-            → 子策略合成层 SubStrategyAdapter / PortfolioManager
-            → 横截面打分层 FactorScoringEngine
-            → 执行层 PyBrokerExecutorBuilder（蓝图模式）
-            → 风控层 RiskController
-
-        Returns:
-            {组件名: 是否就位}
+        委托给 runner.pipeline_helpers._verify_chain，避免 Pipeline 主体膨胀。
         """
-        chain_status: Dict[str, bool] = {
-            "config_loaded": self._config is not None,
-            "data_loaded": self._data is not None,
-            "strategy_library": self._lib is not None,
-        }
-
-        # 验证 BacktestConfig 关键字段
-        # P2 整改：删除 `backtest_config_has_factor_weights` 检查。
-        # 原因：factor_weights 是 Dict[str, float]，合法状态包含空字典（用户未启用任何
-        # 子策略时，default_factory=dict 即为空）。`bool({})` 与 `bool(None)` 均为 False，
-        # 会产生"未配置"的误导性告警；改用 `bool(self._config.factor_weights)` 仍无法
-        # 区分"空字典（合法）"与"字段缺失（异常）"。该字段的存在性已在 BacktestConfig
-        # dataclass 定义处保证，无需在 health check 中重复验证。
-        if self._config is not None:
-            chain_status["backtest_config_has_symbols"] = bool(self._config.symbols)
-
-        # 验证核心模块可导入且存在
-        try:
-            from core.engine.switch_engine import FactorScoringEngine
-            chain_status["factor_scoring_engine"] = FactorScoringEngine is not None
-        except ImportError:
-            chain_status["factor_scoring_engine"] = False
-
-        try:
-            from core.portfolio import PortfolioManager
-            chain_status["portfolio_manager"] = PortfolioManager is not None
-        except ImportError:
-            chain_status["portfolio_manager"] = False
-
-        try:
-            from core.engine.pybroker_data_source import create_hybrid_data_source
-            chain_status["hybrid_data_source"] = create_hybrid_data_source is not None
-        except ImportError:
-            chain_status["hybrid_data_source"] = False
-
-        try:
-            from core.engine.backtest_runner import PyBrokerBacktestRunner
-            chain_status["pybroker_runner"] = PyBrokerBacktestRunner is not None
-        except ImportError:
-            chain_status["pybroker_runner"] = False
-
-        # 验证数据加载策略：TqSdk 优先，CSV 仅用于 spread
-        try:
-            import inspect
-            from core.engine.pybroker_data_source import create_hybrid_data_source
-            source = inspect.getsource(create_hybrid_data_source)
-            chain_status["tqsdk_primary"] = "TqSdk" in source and "禁止静默回退" in source
-            chain_status["csv_only_for_spread"] = "spread" in source
-        except Exception:
-            chain_status["tqsdk_primary"] = False
-            chain_status["csv_only_for_spread"] = False
-
-        healthy = all(chain_status.values())
-        if not healthy:
-            failed = [k for k, v in chain_status.items() if not v]
-            logger.warning("调用链存在未就位组件: %s", failed)
-        else:
-            logger.info("完整调用链验证通过: %s", list(chain_status.keys()))
-
-        return chain_status
-
-
-def _run_optimization(
-    strategy: Optional[str],
-    tasks: List[str],
-    data,
-    lib: StrategyLibrary,
-    config: BacktestConfig,
-) -> Dict[str, Any]:
-    """
-    执行参数优化流程。
-
-    Args:
-        strategy: 策略名称
-        tasks: 优化任务列表
-        data: 数据源
-        lib: 策略库
-        config: 回测配置
-
-    Returns:
-        优化结果字典
-    """
-    from runner.strategy.selector import get_param_spaces
-    from runner.optimization.grid_search import grid_search_single_strategy
-    from runner.optimization.window_search import window_search_single_strategy
-
-    strategy_names = config.strategy_names
-    if strategy:
-        strategy_names = [strategy]
-
-    param_spaces = get_param_spaces(lib, strategy_names)
-    results = {}
-
-    # 网格搜索
-    if "grid" in tasks:
-        logger.info("优化: 网格搜索")
-        grid_results = {}
-        for sname, pspace in param_spaces.items():
-            grid_results[sname] = grid_search_single_strategy(
-                sname,
-                pspace,
-                data,
-                lib,
-                config,
-            )
-        results["grid"] = grid_results
-
-    # 窗口搜索
-    if "window" in tasks:
-        logger.info("优化: 窗口搜索")
-        window_results = {}
-        for sname, pspace in param_spaces.items():
-            grid_df = results.get("grid", {}).get(sname, None)
-            top_params = _extract_top_params(grid_df, pspace)
-            if top_params:
-                try:
-                    window_results[sname] = window_search_single_strategy(
-                        sname,
-                        top_params,
-                        data,
-                        lib,
-                        config,
-                    )
-                except Exception as e:
-                    logger.warning(f"窗口搜索 {sname} 失败: {e}")
-        results["window"] = window_results
-
-    # 样本外优先选择（简化版：直接取网格搜索 top 1）
-    if "oos" in tasks:
-        logger.info("优化: 样本外优先选择")
-        best_params = {}
-        for sname in strategy_names:
-            grid_df = results.get("grid", {}).get(sname, None)
-            if grid_df is not None and not grid_df.empty:
-                param_space = param_spaces[sname]
-                param_keys = list(param_space.keys())
-                best_row = grid_df.iloc[0]
-                best_params[sname] = {k: best_row[k] for k in param_keys}
-        results["best_params"] = best_params
-
-    return results
-
-
-def _extract_top_params(
-    grid_df,
-    param_space: Dict[str, Any],
-    top_n: int = 5,
-) -> List[Dict[str, Any]]:
-    """
-    从网格搜索结果中提取 Top N 参数组合。
-
-    Args:
-        grid_df: 网格搜索结果 DataFrame
-        param_space: 参数空间
-        top_n: 取前N个
-
-    Returns:
-        参数字典列表
-    """
-    if grid_df is None or grid_df.empty:
-        return []
-
-    param_keys = list(param_space.keys())
-    top_df = grid_df.head(top_n)
-    return [{k: row[k] for k in param_keys} for _, row in top_df.iterrows()]
-
-
-def _run_all_validations(
-    data,
-    lib: StrategyLibrary,
-    config: BacktestConfig,
-    output_dir: Path,
-    best_params: Optional[Dict[str, Dict[str, Any]]],
-    cross_sectional: bool = False,
-) -> Dict[str, Any]:
-    """
-    执行全部验证方法（委托 runner.validation._VALIDATOR_MAP）。
-
-    Args:
-        data: 数据源
-        lib: 策略库
-        config: 回测配置
-        output_dir: 输出目录
-        best_params: 优化参数
-        cross_sectional: 是否启用多策略横截面打分模式
-
-    Returns:
-        全部验证结果
-    """
-    from runner.validation import _VALIDATOR_MAP
-
-    common_kwargs = {
-        "best_params": best_params,
-        "cross_sectional": cross_sectional,
-    }
-    results: Dict[str, Any] = {}
-    for name, fn in _VALIDATOR_MAP.items():
-        logger.info("=" * 60)
-        logger.info(f"验证: {name}")
-        results[name] = fn(data, config, lib, output_dir, **common_kwargs)
-    return results
-
+        return _verify_chain(
+            config=self._config,
+            data=self._data,
+            lib=self._lib,
+        )
