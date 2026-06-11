@@ -111,7 +111,7 @@ class FactorTransformer:
         self,
         factor: np.ndarray,
         name: str = "",
-        clip_threshold: float = 10.0,
+        clip_threshold: float = 5.0,
     ) -> np.ndarray:
         """
         指数变换：sign(f) * (exp(|f|) - 1)
@@ -121,12 +121,13 @@ class FactorTransformer:
         Args:
             factor: 因子值序列
             name: 因子名（用于日志）
-            clip_threshold: |f| 裁剪上限（默认 10.0）。
+            clip_threshold: |f| 裁剪上限（默认 5.0）。
                             裁剪可避免 exp 数值溢出（exp(700) 即达 float64 上限）。
-                            调大可保留更多极端信号；设为 None 表示不裁剪（极端值会爆inf）。
                             推荐区间 [3, 10]：
-                              - 3：保守，避免极端值主导排序
-                              - 10：激进，保留尾部信号但已对超 10 部分饱和
+                              - 3：保守，避免极端值主导排序（exp(3)≈20）
+                              - 5：默认，平衡信号保留与数值稳定（exp(5)≈148）
+                              - 10：激进，保留尾部信号但已对超 10 部分饱和（exp(10)≈22026）
+                            设为 None 表示不裁剪（极端值会爆 inf，不推荐）。
         """
         arr = np.asarray(factor, dtype=float)
         if clip_threshold is None:

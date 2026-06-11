@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -244,7 +243,13 @@ class MLPPredictor(BasePredictor):
         logger.info("MLP 模型已保存到: %s", path)
 
     def load(self, path: Path) -> "MLPPredictor":
-        """加载模型。"""
+        """加载模型。
+
+        设备恢复策略：
+          1. 优先使用保存时的设备（从 meta.json 读取）
+          2. 若保存设备为 CUDA 但当前不可用，回退到 CPU
+          3. 通过 map_location 确保张量正确映射到目标设备
+        """
         try:
             import torch
         except ImportError:
@@ -256,13 +261,25 @@ class MLPPredictor(BasePredictor):
 
         model_path = path / "model.pt"
         if model_path.exists():
-            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # 恢复保存时的设备，CUDA 不可用时回退 CPU
+            saved_device_str = meta.get("train_stats", {}).get("device", "cpu")
+            if "cuda" in saved_device_str and not torch.cuda.is_available():
+                logger.warning(
+                    "模型保存于 %s 但当前 CUDA 不可用，回退到 CPU", saved_device_str
+                )
+                self._device = torch.device("cpu")
+            else:
+                self._device = torch.device(
+                    saved_device_str if torch.cuda.is_available() else "cpu"
+                )
+
             n_features = len(self._feature_names) if self._feature_names else 1
             self._model = self._build_model(n_features).to(self._device)
             self._model.load_state_dict(
                 torch.load(model_path, map_location=self._device, weights_only=True)
             )
+            self._model.eval()
             self._is_fitted = True
 
-        logger.info("MLP 模型已加载: %s", path)
+        logger.info("MLP 模型已加载: %s (设备: %s)", path, self._device)
         return self

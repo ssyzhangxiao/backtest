@@ -15,11 +15,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 
 from core.ext.factors.evaluator import FactorEvaluator, FactorEvalResult
 from core.ext.factors.selector import FactorSelector
@@ -106,9 +105,11 @@ class FactorPoolManager:
             )
             eval_results[name] = result
 
-        # 2. 筛选
-        scores_df = pd.DataFrame(factor_scores)
-        selection = self._selector.select(scores_df, forward_returns)
+        # 2. 筛选（传 eval_results + factor_scores_dict，与 FactorSelector.select 签名对齐）
+        selection = self._selector.select(
+            eval_results=eval_results,
+            factor_scores_dict=factor_scores,
+        )
 
         # 3. 更新池
         for name in selection.selected:
@@ -201,7 +202,6 @@ class FactorPoolManager:
     def summary(self) -> str:
         """返回因子池摘要。"""
         active = self.get_active_factors()
-        weights = self.get_weights()
         lines = [
             f"因子池: {len(active)}/{len(self._factors)} 活跃",
             f"权重分配: {self.config.weight_method}",

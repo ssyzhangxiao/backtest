@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -381,23 +381,35 @@ class FactorReviewer:
         参数敏感性检测：改变跳空修复权重(0.3/0.7)验证IC变化。
 
         简化实现：对因子值做 ±20% 扰动，计算IC变化率。
-        使用 Pearson 相关性，与 `factor_evaluator.FactorEvaluator` 保持一致
-        （规则17：复用同一相关性算法，避免评估口径不一致）。
+        统一使用 FactorEvaluator.evaluate().ic_mean 计算 IC（P1-1 整改），
+        与 _check_outlier_resistance / _check_stability 保持一致。
         """
         aligned = pd.DataFrame({"factor": factor, "ret": self._returns}).dropna()
         if len(aligned) < 30:
             return 1.0
 
-        # Pearson 与 FactorEvaluator._compute_ic_stats 保持一致
-        base_ic = abs(aligned["factor"].corr(aligned["ret"], method="pearson"))
+        # 基准 IC（委托 FactorEvaluator，与其他检查方法一致）
+        base_ic = abs(self._evaluator.evaluate(
+            factor_name="_base",
+            factor_scores=aligned["factor"].to_numpy(),
+            forward_returns=aligned["ret"].to_numpy(),
+        ).ic_mean)
 
         # 扰动 +20%
         perturbed_up = aligned["factor"] * 1.2
-        ic_up = abs(perturbed_up.corr(aligned["ret"], method="pearson"))
+        ic_up = abs(self._evaluator.evaluate(
+            factor_name="_up",
+            factor_scores=perturbed_up.to_numpy(),
+            forward_returns=aligned["ret"].to_numpy(),
+        ).ic_mean)
 
         # 扰动 -20%
         perturbed_down = aligned["factor"] * 0.8
-        ic_down = abs(perturbed_down.corr(aligned["ret"], method="pearson"))
+        ic_down = abs(self._evaluator.evaluate(
+            factor_name="_down",
+            factor_scores=perturbed_down.to_numpy(),
+            forward_returns=aligned["ret"].to_numpy(),
+        ).ic_mean)
 
         if base_ic < 1e-8:
             return 1.0

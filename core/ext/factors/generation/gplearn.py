@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -200,41 +200,62 @@ def _make_fitness_func(metric: str) -> Callable:
 def _make_factor_class(
     name: str,
     formula: str,
-    program_str: str,
+    program: Any,
     ic_value: float,
+    feature_names: Optional[List[str]] = None,
 ) -> Type[BaseFactor]:
     """从 gplearn 挖掘结果动态构造 BaseFactor 子类。
 
     Args:
         name: 因子编号（如 GP_001）
         formula: 因子公式描述
-        program_str: gplearn 程序的字符串表示（用于 debug）
+        program: gplearn _Program 对象（用于 compute 中重新求值）
         ic_value: 训练期 IC 值
+        feature_names: 特征列名列表（与训练时 X 的列序一致）
 
     Returns:
         继承 BaseFactor 的因子类
     """
+    # 闭包捕获 program 和 feature_names
+    _saved_program = program
+    _saved_feature_names = feature_names or ["close", "volume", "open_interest"]
+
     class _MinedFactor(BaseFactor):
-        # gplearn 程序对象保存在类属性上
-        _gp_program_str = program_str
+        _gp_program = _saved_program
+        _gp_feature_names = _saved_feature_names
         _train_ic = ic_value
 
         def compute(self, **kwargs: np.ndarray) -> np.ndarray:
-            """简化实现：返回常数（实际生产中应保留 program 对象并重新求值）。
+            """使用保存的 gplearn program 对象重新求值。
 
-            gplearn 程序的求值可通过内置 _program.execute(X) 完成，
-            此处为模板，实际部署时替换为重新求值逻辑。
+            构建特征矩阵 X（列序与训练时一致），然后调用 program.execute(X)。
             """
-            raise NotImplementedError(
-                f"挖掘因子 {name} 需要保存 gplearn program 对象并在 compute 中重新求值。"
-                f"公式: {program_str}"
-            )
+            if self._gp_program is None:
+                raise RuntimeError(
+                    f"挖掘因子 {name} 的 program 对象为 None，无法求值。"
+                    f"公式: {formula}"
+                )
+            # 按训练时的特征列序构建 X
+            arrays = []
+            for feat in self._gp_feature_names:
+                arr = kwargs.get(feat)
+                if arr is None:
+                    # 缺失特征填充零向量
+                    first_val = next(iter(kwargs.values()), None)
+                    length = len(first_val) if first_val is not None else 0
+                    arr = np.zeros(length, dtype=float)
+                    _logger.warning(
+                        "挖掘因子 %s 缺少特征 %s，已用零填充", name, feat
+                    )
+                arrays.append(np.asarray(arr, dtype=float))
+            X = np.column_stack(arrays)
+            return self._gp_program.execute(X)
 
     _MinedFactor.__name__ = f"GP_{name}"
     _MinedFactor.name = name
     _MinedFactor.category = "GP挖掘"
     _MinedFactor.formula = formula
-    _MinedFactor.dependencies = ["close", "volume", "open_interest"]  # 保守默认
+    _MinedFactor.dependencies = list(_saved_feature_names)
     return _MinedFactor
 
 
@@ -307,7 +328,7 @@ class GPLearnFactorMiner:
             top_n: 返回 top N 因子
 
         Returns:
-            DataFrame: name / formula / ic
+            DataFrame: name / formula / ic / program（gplearn _Program 对象）
         """
         if self._est is None:
             raise RuntimeError("请先调用 fit()")
@@ -316,14 +337,16 @@ class GPLearnFactorMiner:
         programs = self._est._programs[-1] if hasattr(self._est, "_programs") else []
         rows = []
         for i, prog in enumerate(programs[:top_n]):
+            if prog is None:
+                continue
             try:
                 program_str = str(prog)
                 # 重新求值估算 IC
-                y_pred = prog.execute(self._est._programs[0][0] if programs else None)
+                y_pred = prog.execute(self._est.X_transform_)
                 valid = ~np.isnan(y_pred)
                 if valid.sum() < 10:
                     continue
-                ic = np.corrcoef(self._est._y[valid], y_pred[valid])[0, 1]
+                ic = np.corrcoef(self._est.y_[valid], y_pred[valid])[0, 1]
             except Exception as e:  # noqa: BLE001
                 _logger.warning("程序 %d 评估失败: %s", i, e)
                 continue
@@ -333,6 +356,7 @@ class GPLearnFactorMiner:
                 "name": f"GP_{i+1:03d}",
                 "formula": program_str[:80] + ("..." if len(program_str) > 80 else ""),
                 "ic": float(ic) if np.isfinite(ic) else 0.0,
+                "program": prog,
             })
         return pd.DataFrame(rows)
 
@@ -340,12 +364,14 @@ class GPLearnFactorMiner:
         self,
         top_n: int = 5,
         name_prefix: str = "GP",
+        feature_names: Optional[List[str]] = None,
     ) -> List[str]:
         """把 top N 挖掘结果注册到全局因子注册表。
 
         Args:
             top_n: 注册数量
             name_prefix: 因子名前缀（最终名为 {prefix}_{001,002,...}）
+            feature_names: 训练时特征列名列表（用于 compute 求值）
 
         Returns:
             已注册的因子名列表
@@ -357,8 +383,9 @@ class GPLearnFactorMiner:
             factor_cls = _make_factor_class(
                 name=factor_name,
                 formula=row["formula"],
-                program_str=row["formula"],
+                program=row.get("program"),
                 ic_value=row["ic"],
+                feature_names=feature_names,
             )
             register_factor(factor_cls)
             registered.append(factor_name)

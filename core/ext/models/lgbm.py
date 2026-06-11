@@ -10,9 +10,8 @@
 
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -88,10 +87,16 @@ class LGBMPredictor(BasePredictor):
 
         self._feature_names = list(X.columns)
 
-        # 分离 LGB 参数和 fit 参数
-        early_stopping = self.config.pop("early_stopping_rounds", 20)
-        test_size = self.config.pop("test_size", 0.2)
-        n_estimators = self.config.pop("n_estimators", 200)
+        # 分离 LGB 参数和 fit 参数（不修改 self.config，避免多次 fit 时参数丢失）
+        early_stopping = self.config.get("early_stopping_rounds", 20)
+        test_size = self.config.get("test_size", 0.2)
+        n_estimators = self.config.get("n_estimators", 200)
+
+        # 构建 LGB 训练参数（排除 fit 专用参数）
+        lgb_params = {
+            k: v for k, v in self.config.items()
+            if k not in ("early_stopping_rounds", "test_size", "n_estimators")
+        }
 
         # 构建训练/验证集
         if eval_set is None and test_size > 0 and len(X) > 50:
@@ -113,7 +118,7 @@ class LGBMPredictor(BasePredictor):
 
         # 训练
         self._model = lgb.train(
-            params=self.config,
+            params=lgb_params,
             train_set=train_data,
             num_boost_round=n_estimators,
             valid_sets=[valid_data] if valid_data else None,
