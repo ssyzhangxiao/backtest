@@ -7,18 +7,33 @@
 
 from typing import Any, Callable, Dict, Optional
 
-from runner.backtest.experiments.e1_e5 import (
+# 拆分后的 6 个实验模块（按工作内容命名，规则 8）：
+# - e1_baselines          E1 单策略多品种基线
+# - e2_e3_fusion          E2 等权融合 + E3 环境动态加权
+# - e4_e5_portfolio       E4 风险平价 + E5 多品种分散
+# - e6_e7_validation      E6 WalkForward + E7 样本外
+# - e8_e9_resampling      E8 Bootstrap + E9 蒙特卡洛
+# - e10_e11_reporting     E10 HTML 报告 + E11 因子分析
+from runner.backtest.experiments.e1_baselines import (
     run_e1_single_strategy_baselines,
+)
+from runner.backtest.experiments.e2_e3_fusion import (
     run_e2_equal_weight,
     run_e3_dynamic_weight,
+)
+from runner.backtest.experiments.e4_e5_portfolio import (
     run_e4_risk_parity,
     run_e5_multi_symbol,
 )
-from runner.backtest.experiments.e6_e11 import (
+from runner.backtest.experiments.e6_e7_validation import (
     run_e6_walkforward,
     run_e7_out_of_sample,
+)
+from runner.backtest.experiments.e8_e9_resampling import (
     run_e8_bootstrap,
     run_e9_monte_carlo,
+)
+from runner.backtest.experiments.e10_e11_reporting import (
     run_e10_html_report,
     run_e11_factor_analysis,
 )
@@ -97,7 +112,14 @@ def run_experiment(
             if exp_name == "e10":
                 continue
             try:
-                results[exp_name] = func(data_source, raw_config, output_dir)
+                # E9 需要 BacktestConfig 而非 raw_config dict
+                if exp_name == "e9":
+                    from runner.backtest.runner import build_backtest_config
+
+                    bt_config = build_backtest_config(raw_config)
+                    results[exp_name] = func(data_source, bt_config, output_dir)
+                else:
+                    results[exp_name] = func(data_source, raw_config, output_dir)
             except Exception as e:
                 from loguru import logger
 
@@ -107,4 +129,9 @@ def run_experiment(
         func = get_experiment_runner(name)
         if name.lower() == "e10":
             return func(raw_config, {}, output_dir)
+        if name.lower() == "e9":
+            from runner.backtest.runner import build_backtest_config
+
+            bt_config = build_backtest_config(raw_config)
+            return func(data_source, bt_config, output_dir)
         return func(data_source, raw_config, output_dir)

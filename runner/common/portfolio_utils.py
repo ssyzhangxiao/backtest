@@ -1,8 +1,9 @@
 """
 组合层工具：风险平价融合（E4 整改 2026-06-07）。
 
-提取自 runner/backtest/experiments/e1_e5.py 的私有工具函数，
-统一为公共 API（重复#P1：避免 e1_e5.py 内重复实现）。
+提取自 runner/backtest/experiments/ E4 子策略实现（原 e1_e5.py，
+P1 整改后已拆分为 e4_e5_portfolio.py），统一为公共 API，避免编排层内
+重复实现。
 
 P2 整改（2026-06-09）：
   - 新增 fuse_equities_by_weights：通用多策略净值融合工具
@@ -73,7 +74,8 @@ def calculate_risk_parity_fusion(
           等）做**实时权重分配**，支持 top_n 截取、total_allocation 约束。属于组合管理
           运行时 API，输出当前调仓周期的目标权重。
 
-    P1 整改：原 e1_e5.py 中先调用 _calculate_risk_parity_weights 获取时间序列，
+    P1 整改：原编排层（e1_e5.py → 已拆分为 e4_e5_portfolio.py）
+    中先调用 _calculate_risk_parity_weights 获取时间序列，
     再用 .mean() 取平均权重。本函数直接返回平均权重字典，避免外部两步调用。
 
     Args:
@@ -98,7 +100,8 @@ def fuse_equities_by_weights(
     weights: Dict[str, float],
 ) -> pd.Series:
     """
-    多策略净值融合（P2 整改：从 e1_e5.py E4 实现提取）。
+    多策略净值融合（P2 整改：从 e4_e5_portfolio.py E4 实现提取，
+    原 e1_e5.py 已拆分）。
 
     对每行（日期）计算各策略的日收益率，按给定权重加权求和，
     然后从前一日的融合净值累积出新的融合净值序列。

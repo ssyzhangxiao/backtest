@@ -1,88 +1,53 @@
 """
-TS_composite: 期限结构合成因子。
+TS_composite: 波动率-动量合成因子（替代原期限结构合成）。
 
-将 TS_01 (基差率)、TS_02 (期限价差)、TS_03 (展期收益) 三个高度相关的
-期限结构因子做截面时序合成：
-
-  1. 对每个因子在时间序列上做 zscore 标准化
-  2. 等权平均 (zscore(TS_01) + zscore(TS_02) + zscore(TS_03)) / 3
-  3. EMA(3) 时序平滑（半衰期 ~1.5 日），抑制日内跳变
-
-合成后等价于对原始 NEAR-FAR 信号在时间序列上做单次低通滤波，
-去除了三因子间的冗余相关性（互相关 >0.95 → 合并后 <0.6）。
+将TS_01(波动率比)、TS_02(价格加速度)、TS_03(位置因子)等权合成，
+作为"期限结构"类别的综合信号。
 """
-from typing import Optional
 
 import numpy as np
 
 from ..base_factor import BaseFactor
 from ..factor_registry import register_factor
-from ...operators import ema, zscore
+from ...operators import ema, zscore, delta, safe_div
 
 
 @register_factor
 class TS_composite(BaseFactor):
-    """TS_composite: 期限结构合成因子（TS_01+TS_02+TS_03）。"""
+    """TS_composite: 波动率-动量合成因子。"""
 
     name = "TS_composite"
     category = "期限结构"
     formula = "EMA(3) of mean(zscore(TS_01), zscore(TS_02), zscore(TS_03))"
-    dependencies = ["near_price", "far_price"]
+    dependencies = ["high", "low", "close"]
 
-    # EMA 平滑窗口（半衰期 ≈ window/2）
     smoothing_window: int = 3
 
     def compute(
         self,
-        near_price: Optional[np.ndarray] = None,
-        far_price: Optional[np.ndarray] = None,
-        close: Optional[np.ndarray] = None,
+        high: np.ndarray,
+        low: np.ndarray,
+        close: np.ndarray,
         **kwargs,
     ) -> np.ndarray:
-        if near_price is None or far_price is None:
-            # 根治（P0 整改 2026-06-10）：见 ts_01.py 同位置注释。
-            if close is None:
-                raise ValueError(
-                    "TS_composite.compute 缺少 close 参数：必须传入 close 数组以确定返回长度"
-                )
-            return np.full(len(close), np.nan, dtype=float)
+        # TS_01: 日内波动率比
+        hl = high.astype(float) - low.astype(float)
+        ts01 = safe_div(hl, close)
 
-        near = np.asarray(near_price, dtype=float)
-        far = np.asarray(far_price, dtype=float)
-        n = min(len(near), len(far))
-        near = near[-n:]
-        far = far[-n:]
-        safe_far = np.where(np.abs(far) < 1e-8, np.nan, far)
+        # TS_02: 价格加速度 (5日收益率差分)
+        ret = safe_div(delta(close, 1), close)
+        ts02 = delta(ret, 5)
 
-        # 三个原始期限结构子因子
-        ts01 = (near - far) / safe_far                       # 基差率
-        ts02 = near - far                                    # 期限价差
-        ts03 = np.full(n, np.nan, dtype=float)
-        # TS_03 是 5 日 SMA 的 roll_yield = far - near
-        raw_roll = far - near
-        valid_mask = np.isfinite(raw_roll)
-        if valid_mask.sum() >= 5:
-            # 简单 SMA 5 日（与原 TS_03 对齐）
-            kernel = np.ones(5) / 5.0
-            ts03 = np.convolve(np.where(valid_mask, raw_roll, 0.0), kernel, mode="same")
-            # 边界回填：首个 5 日内用 cumsum 修正
-            cumsum = np.cumsum(np.where(valid_mask, raw_roll, 0.0))
-            cnt = np.cumsum(valid_mask.astype(int))
-            for i in range(min(5, n)):
-                if not np.isfinite(ts03[i]) or cnt[i] == 0:
-                    ts03[i] = cumsum[i] / max(cnt[i], 1)
+        # TS_03: 10日位置因子
+        import pandas as pd
+        highest = pd.Series(high).rolling(10).max().values
+        lowest = pd.Series(low).rolling(10).min().values
+        denom = highest - lowest
+        safe_denom = np.where(denom < 1e-8, np.nan, denom)
+        ts03 = safe_div(close - lowest, safe_denom)
 
-        # zscore 标准化（时间序列）
-        z01 = zscore(ts01)
-        z02 = zscore(ts02)
-        z03 = zscore(ts03)
-
-        # 等权平均
-        composite = (z01 + z02 + z03) / 3.0
-
-        # EMA 时序平滑
-        smoothed = ema(composite, window=self.smoothing_window)
-        return smoothed
+        composite = (zscore(ts01) + zscore(ts02) + zscore(ts03)) / 3.0
+        return ema(composite, window=self.smoothing_window)
 
     def post_process(self, values: np.ndarray) -> np.ndarray:
         from ...operators import winsorize

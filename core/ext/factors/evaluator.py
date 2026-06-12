@@ -48,9 +48,7 @@ class FactorEvalResult:
     def summary(self) -> str:
         """返回评估摘要字符串。"""
         status = "✅ 有效" if self.is_valid else f"❌ {self.reject_reason}"
-        periods_str = " | ".join(
-            f"{k}: {v:.4f}" for k, v in self.ic_by_period.items()
-        )
+        periods_str = " | ".join(f"{k}: {v:.4f}" for k, v in self.ic_by_period.items())
         return (
             f"[{self.name}] IC={self.ic_mean:.4f} IR={self.ir:.4f} "
             f"衰减={self.ic_decay_rate:.2%} {status} | {periods_str}"
@@ -232,9 +230,26 @@ class FactorEvaluator:
 
         if n < window:
             # 数据不足一个窗口，直接计算整体相关系数
-            if np.std(scores) < 1e-10 or np.std(returns) < 1e-10:
+            s_valid = (
+                scores[~np.isnan(scores)]
+                if np.issubdtype(scores.dtype, np.floating)
+                else scores
+            )
+            r_valid = (
+                returns[~np.isnan(returns)]
+                if np.issubdtype(returns.dtype, np.floating)
+                else returns
+            )
+            if len(s_valid) < 2 or len(r_valid) < 2:
                 return 0.0, 0.0, 0.0
-            ic = float(np.corrcoef(scores, returns)[0, 1])
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                if np.std(s_valid) < 1e-10 or np.std(r_valid) < 1e-10:
+                    return 0.0, 0.0, 0.0
+            with np.errstate(invalid="ignore"):
+                try:
+                    ic = float(np.corrcoef(s_valid, r_valid)[0, 1])
+                except Exception:
+                    ic = float("nan")
             if np.isnan(ic):
                 return 0.0, 0.0, 0.0
             return ic, 0.0, 0.0 if abs(ic) < 1e-10 else 1.0
@@ -244,10 +259,28 @@ class FactorEvaluator:
         for i in range(window, n + 1):
             s = scores[i - window : i]
             r = returns[i - window : i]
-            if np.std(s) < 1e-10 or np.std(r) < 1e-10:
+            # 2026-06-12：先做 NaN 过滤，避免 np.std 触发 RuntimeWarning 风暴
+            s_valid = s[~np.isnan(s)] if np.issubdtype(s.dtype, np.floating) else s
+            r_valid = r[~np.isnan(r)] if np.issubdtype(r.dtype, np.floating) else r
+            if len(s_valid) < 2 or len(r_valid) < 2:
                 ic_series.append(0.0)
                 continue
-            corr = float(np.corrcoef(s, r)[0, 1])
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                s_std = float(np.std(s_valid))
+                r_std = float(np.std(r_valid))
+            if (
+                not np.isfinite(s_std)
+                or not np.isfinite(r_std)
+                or s_std < 1e-10
+                or r_std < 1e-10
+            ):
+                ic_series.append(0.0)
+                continue
+            with np.errstate(invalid="ignore"):
+                try:
+                    corr = float(np.corrcoef(s_valid, r_valid)[0, 1])
+                except Exception:
+                    corr = float("nan")
             ic_series.append(0.0 if np.isnan(corr) else corr)
 
         ic_arr = np.array(ic_series)
@@ -418,10 +451,7 @@ class FactorEvaluator:
         if abs(std) < 1e-10:
             # 常数列：原样返回
             return dict(scores_by_symbol)
-        return {
-            sym: float((v - mean) / std)
-            for sym, v in scores_by_symbol.items()
-        }
+        return {sym: float((v - mean) / std) for sym, v in scores_by_symbol.items()}
 
     def cross_sectional_rank(
         self,

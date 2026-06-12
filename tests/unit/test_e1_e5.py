@@ -1,10 +1,11 @@
 """
-测试 e1_e5.py 模块（2026-06-11 整改：适配 P2 公共系统迁移）。
+测试 E1-E5 实验模块（2026-06-11 整改：适配 P2 公共系统迁移，
+2026-06-12 整改：原 e1_e5.py → 拆分为 e1_baselines / e2_e3_fusion / e4_e5_portfolio）。
 
 WeightedSignalFusion / _calculate_rolling_volatility / _calculate_risk_parity_weights
 已被提取到 runner/common/portfolio_utils，本测试改为测：
-  - e1_e5._run_weighted_fusion：E2/E3 通用加权融合
-  - e1_e5.PortfolioResult：TypedDict 字段约束
+  - e2_e3_fusion._run_weighted_fusion：E2/E3 通用加权融合
+  - e4_e5_portfolio.PortfolioResult：TypedDict 字段约束
   - runner.common.portfolio_utils.fuse_equities_by_weights / calculate_risk_parity_fusion
 """
 
@@ -27,7 +28,7 @@ class TestPortfolioResult:
     """PortfolioResult 必含 metrics + equity 字段。"""
 
     def test_required_keys(self):
-        from runner.backtest.experiments.e1_e5 import PortfolioResult
+        from runner.backtest.experiments.e4_e5_portfolio import PortfolioResult
 
         # TypedDict 在 runtime 是普通 dict，验证构造后键可访问
         result: PortfolioResult = {

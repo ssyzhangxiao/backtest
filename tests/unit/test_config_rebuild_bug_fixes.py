@@ -11,7 +11,8 @@
   2. runner/optimization/window_search.py::out_of_sample_test
   3. runner/validation/monte_carlo.py::_run_per_strategy_mc
   4. runner/validation/monte_carlo.py::task3_monte_carlo（含删除 _build_mc_config）
-  5. runner/backtest/experiments/e6_e11.py::run_e9_monte_carlo
+  5. runner/backtest/experiments/e8_e9_resampling.py::run_e9_monte_carlo
+     （原 e6_e11.py → 已拆分为 e8_e9_resampling.py）
   6. runner/validation/train_test.py::_run_period_backtest
 """
 
@@ -316,7 +317,7 @@ class TestRunE9MonteCarloFix:
         self, synth_ds, synth_config, tmp_path
     ):
         # Arrange
-        from runner.backtest.experiments.e6_e11 import run_e9_monte_carlo
+        from runner.backtest.experiments.e8_e9_resampling import run_e9_monte_carlo
 
         output_dir = tmp_path / "e9_fix"
         output_dir.mkdir()

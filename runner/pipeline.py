@@ -340,9 +340,14 @@ class Pipeline:
                 - "bootstrap": Bootstrap置信区间
                 - "factor_ic": 因子IC稳定性分析
                 - "factor_alpha24": AlphaFutures24因子IC/IR验证
-                - "factor_review": 因子6项复核
+                - "factor_review": 因子6项复核（含 Spearman 冗余/正交性）
                 - "cross_sectional": 多策略横截面打分验证
                 - "all": 执行全部验证方法
+                ─── 5 段式因子验证（规则 28 阶段 A 扩展） ───
+                - "factor_adf": ADF 单位根平稳性检验
+                - "factor_prf": Precision/Recall/Lift 离散信号检验
+                - "event_study": T+1/3/5/10 多窗口事件研究
+                - "standard_report": ADF+IC+PRF+事件研究+冗余 5 段式汇总报告
             best_params: 优化后的最优参数
             cross_sectional: 是否启用多策略横截面打分模式
 

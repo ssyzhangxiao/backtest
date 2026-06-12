@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from runner.backtest.experiments.e1_e5 import _run_weighted_fusion
-from runner.backtest.experiments.e6_e11 import BootstrapResult
+from runner.backtest.experiments.e2_e3_fusion import _run_weighted_fusion
+from runner.backtest.experiments.e8_e9_resampling import BootstrapResult
 from runner.common.portfolio_utils import (
     calculate_risk_parity_fusion,
     calculate_risk_parity_weights,
@@ -40,19 +40,19 @@ class TestRunWeightedFusion:
             return None
 
         monkeypatch.setattr(
-            "runner.backtest.experiments.e1_e5.safe_run_backtest",
+            "runner.backtest.experiments.e2_e3_fusion.safe_run_backtest",
             _fake_safe_run_backtest,
         )
         monkeypatch.setattr(
-            "runner.backtest.experiments.e1_e5.get_pybroker_runner",
+            "runner.backtest.experiments.e2_e3_fusion.get_pybroker_runner",
             lambda *a, **kw: None,
         )
         monkeypatch.setattr(
-            "runner.backtest.experiments.e1_e5.get_strategy_names",
+            "runner.backtest.experiments.e2_e3_fusion.get_strategy_names",
             lambda cfg: ["trend"],
         )
         monkeypatch.setattr(
-            "runner.backtest.experiments.e1_e5.save_csv",
+            "runner.backtest.experiments.e2_e3_fusion.save_csv",
             lambda *a, **kw: None,
         )
 
