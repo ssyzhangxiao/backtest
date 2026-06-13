@@ -30,7 +30,8 @@
 │   ├── 21-sub-strategies.md
 │   ├── 24-indicator-registry.md
 │   ├── 25-exit-hooks.md
-│   └── 27-strategy-base.md
+│   ├── 27-strategy-base.md
+│   └── 29-cta-architecture.md
 ├── 04-factors/            # 因子开发
 │   ├── 09-factor-dev.md
 │   ├── 20-factor-cleaning.md
@@ -81,6 +82,7 @@
 | 24 | 策略指标注册表 — 解耦指标计算与回测引擎 | [03-strategies/24-indicator-registry.md](./03-strategies/24-indicator-registry.md) |
 | 25 | 策略退出钩子注册表 — 解耦退出逻辑与执行器 | [03-strategies/25-exit-hooks.md](./03-strategies/25-exit-hooks.md) |
 | 27 | 策略基类设计 — 可配置化与可扩展性 | [03-strategies/27-strategy-base.md](./03-strategies/27-strategy-base.md) |
+| 29 | CTA 策略架构 — 三层信号 + 四层退出 + TSI 框架 | [03-strategies/29-cta-architecture.md](./03-strategies/29-cta-architecture.md) |
 
 ### 因子开发
 

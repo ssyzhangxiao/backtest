@@ -68,5 +68,8 @@ __all__ = [
     "factor_prf_validation",
     "factor_event_study_validation",
     "factor_standard_report_validation",
+    "run_signal_fusion",
+    "run_parameter_plateau",
+    "run_walk_forward",
     "get_validator",
 ]

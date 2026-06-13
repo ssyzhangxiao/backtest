@@ -478,6 +478,29 @@ class Pipeline:
         new_pipe._lib = self._lib
         return new_pipe
 
+    def signal_fusion(self, symbols=None, strategies=None, weights=None,
+                      mode="fixed", entry_threshold=0.05, output_dir=None) -> "Pipeline":
+        from runner.pipeline_helpers import _run_signal_fusion
+        self._results["signal_fusion"] = _run_signal_fusion(
+            self._config, symbols, strategies, weights, mode, entry_threshold, output_dir)
+        return self
+
+    def parameter_plateau(self, symbol, strategy_name, strategy_params,
+                          perturbation=0.20, steps=5, variation_threshold=0.15,
+                          output_dir=None) -> "Pipeline":
+        from runner.pipeline_helpers import _run_parameter_plateau
+        self._results["parameter_plateau"] = _run_parameter_plateau(
+            self._config, symbol, strategy_name, strategy_params,
+            perturbation, steps, variation_threshold, output_dir)
+        return self
+
+    def walk_forward(self, symbols=None, strategies=None, windows=None,
+                     entry_threshold=0.05, output_dir=None) -> "Pipeline":
+        from runner.pipeline_helpers import _run_walk_forward
+        self._results["walk_forward"] = _run_walk_forward(
+            self._config, symbols, strategies, windows, entry_threshold, output_dir)
+        return self
+
     def is_healthy(self) -> bool:
         """状态检查：数据已加载且无异常。"""
         return self._data is not None

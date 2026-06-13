@@ -18,6 +18,16 @@ PyBroker 的限制：
     - 在每个调仓日，第一个品种开始收集，最后一个品种触发 finalize
 
 P0-3 整改：完全使用 RiskController（而非旧的 RiskManagerAdapter）。
+
+改进（2026-06-13）：
+  - 横截面状态管理改用 set 去重，避免重复调用导致计数溢出
+  - 统一风险预算逻辑（risk_per_trade + target_vol 波动率平价）
+  - 止损使用 state 显式追踪 entry_price / entry_bar
+
+CTA 退出策略注入（2026-06-13）：
+  - 通过 cta_exit_policy 参数注入 CTAExitPolicy，启用四层退出 + 风险预算
+  - 未注入时保持原有 RiskController 行为
+  - 实现单品种 CTA 策略与多品种横截面策略共用同一执行器
 """
 
 from __future__ import annotations
@@ -26,8 +36,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
 from core.config import BacktestConfig
 from core.engine.switch_engine import FactorScoringEngine
+from core.execution.cta_exit_policy import CTAExitPolicy, CTAExitConfig
 from core.portfolio import PortfolioManager
 from core.risk_controller import RiskController, RiskConfig
 
@@ -75,6 +88,12 @@ def _get_close(ctx: Any) -> Optional[float]:
     return None
 
 
+def _get_atr(ctx: Any) -> float:
+    """获取 ATR 指标，若不可用返回 0。"""
+    atr = _get_indicator(ctx, "atr_14")
+    return float(atr) if atr is not None and atr > 0 else 0.0
+
+
 def _get_pos_shares(ctx: Any, side: str) -> int:
     """获取当前品种的多/空持仓数量。"""
     try:
@@ -99,9 +118,9 @@ class PyBrokerExecutorSharedState:
     """
 
     total_symbols: int
-    # 当前调仓日已收集的品种数
+    # 当前调仓日已收集的品种（用 set 去重）
     rebalance_date: Any = None
-    collected_symbols: List[str] = field(default_factory=list)
+    collected_symbols_set: set = field(default_factory=set)
     finalized: bool = False
     # 当前调仓日计算出的目标权重（finalize 之后才填充）
     target_weights: Dict[str, float] = field(default_factory=dict)
@@ -110,6 +129,16 @@ class PyBrokerExecutorSharedState:
     prev_factor_scores: Dict[str, Dict[str, float]] = field(default_factory=dict)
     # 历史调仓日权重
     last_weights: Dict[str, float] = field(default_factory=dict)
+
+    # ── 止损追踪（显式 tracking，不用反向推算） ──
+    entry_price: Dict[str, float] = field(default_factory=dict)
+    entry_bar: Dict[str, int] = field(default_factory=dict)
+    entry_direction: Dict[str, str] = field(default_factory=dict)  # "long" or "short"
+    highest_since_entry: Dict[str, float] = field(default_factory=dict)
+    lowest_since_entry: Dict[str, float] = field(default_factory=dict)
+
+    # ── CTA 退出策略持仓状态 ──
+    pos_state: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────
@@ -138,6 +167,11 @@ class PyBrokerExecutorBuilder:
         total_symbols: int,
         weight_method: str = "risk_parity",
         risk_estimates_provider: Optional[Callable[[str], Optional[float]]] = None,
+        *,
+        cta_exit_policy: Optional[CTAExitPolicy] = None,
+        cta_signal_provider: Optional[Callable[[Any, str], float]] = None,
+        cta_market_state_provider: Optional[Callable[[str], str]] = None,
+        cta_sigma_provider: Optional[Callable[[str], Optional[float]]] = None,
     ):
         self.scoring_engine = scoring_engine
         self.portfolio_manager = portfolio_manager
@@ -146,12 +180,22 @@ class PyBrokerExecutorBuilder:
         self.weight_method = weight_method
         self.risk_estimates_provider = risk_estimates_provider
         self.state = PyBrokerExecutorSharedState(total_symbols=total_symbols)
+        # ── CTA 退出策略注入 ──
+        self.cta_exit_policy = cta_exit_policy
+        self.cta_signal_provider = cta_signal_provider
+        self.cta_market_state_provider = cta_market_state_provider
+        self.cta_sigma_provider = cta_sigma_provider
 
     def build(
         self,
         strategy_params: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Callable[[ExecContext], None]:
-        """构建 PyBroker executor 函数。"""
+        """构建 PyBroker executor 函数。
+
+        支持两种模式：
+          1. 蓝图模式（默认）：横截面收集 → finalize → PortfolioManager → 下单
+          2. CTA 模式（注入 cta_exit_policy）：每 bar 信号 → 四层退出 → 风险预算 → 下单
+        """
         scoring_engine = self.scoring_engine
         portfolio_manager = self.portfolio_manager
         risk_controller = self.risk_controller
@@ -162,16 +206,120 @@ class PyBrokerExecutorBuilder:
         strategy_params = strategy_params or {}
         position_size = config.max_position_pct
         entry_threshold = config.entry_threshold
+        exit_policy = self.cta_exit_policy
+        signal_provider = self.cta_signal_provider
+        market_state_provider = self.cta_market_state_provider
+        sigma_provider = self.cta_sigma_provider
+        cta_mode = exit_policy is not None
 
         def executor_fn(ctx: ExecContext) -> None:
             symbol = ctx.symbol
             current_close = _get_close(ctx)
             current_date = ctx.dt
+            current_bar = len(getattr(ctx, "close", []))
 
-            # 1) 滚动IC：用上一bar的因子得分和当前bar收益更新
+            # 0) 更新止损追踪数据（持仓中品种）
+            if symbol in state.entry_price:
+                if current_close is not None:
+                    state.highest_since_entry[symbol] = max(
+                        state.highest_since_entry.get(symbol, current_close),
+                        current_close,
+                    )
+                    state.lowest_since_entry[symbol] = min(
+                        state.lowest_since_entry.get(symbol, current_close),
+                        current_close,
+                    )
+
+            # ─────────────────────────────────────────────────────
+            # CTA 模式：每 bar 执行，四层退出 + 风险预算
+            # ─────────────────────────────────────────────────────
+            if cta_mode:
+                assert exit_policy is not None  # narrow type
+                close_arr = getattr(ctx, "close", None)
+                high_arr = getattr(ctx, "high", None)
+                low_arr = getattr(ctx, "low", None)
+                if close_arr is None or len(close_arr) < 10:
+                    return
+
+                signal = signal_provider(ctx, symbol) if signal_provider else 0.0
+                market_state = market_state_provider(symbol) if market_state_provider else "oscillation"
+                sigma = sigma_provider(symbol) if sigma_provider else None
+
+                has_long = _get_pos_shares(ctx, "long") > 0
+                has_short = _get_pos_shares(ctx, "short") > 0
+                current_pos = 1 if has_long else -1 if has_short else 0
+
+                # 更新全局风控
+                exit_policy.update_global_risk(ctx.dt, symbol, close_arr)
+
+                if current_pos != 0:
+                    # 更新极值
+                    pstate = state.pos_state.get(symbol, {})
+                    if pstate:
+                        exit_policy.update_extreme(pstate, current_pos, current_close or 0.0)
+                        state.pos_state[symbol] = pstate
+
+                    # 四层退出
+                    reason = exit_policy.check_exits(
+                        symbol=symbol,
+                        current_pos=current_pos,
+                        current_price=current_close or 0.0,
+                        current_bar=current_bar,
+                        signal=signal,
+                        market_state=market_state,
+                        close=close_arr,
+                        high=high_arr,
+                        low=low_arr,
+                        pos_state=pstate,
+                    )
+                    if reason:
+                        self._close_all(ctx)
+                        self._clear_entry_state(symbol)
+                        state.pos_state.pop(symbol, None)
+                        return
+
+                    # 持仓中且无退出条件 → 维持
+                    return
+
+                # ── 空仓：入场逻辑 ──
+                if abs(signal) < entry_threshold:
+                    return
+
+                target_w = exit_policy.compute_risk_budget_position(
+                    signal=signal,
+                    market_state=market_state,
+                    current_price=current_close or 0.0,
+                    close=close_arr,
+                    high=high_arr,
+                    low=low_arr,
+                    sigma=sigma,
+                )
+                target_w = np.clip(target_w, -position_size, position_size)
+                dir_label = "long" if target_w > 0 else "short"
+                self._execute_rebalance(
+                    ctx, 1 if target_w > 0 else -1,
+                    abs(target_w), has_long, has_short,
+                )
+                # 记录开仓
+                if current_close is not None:
+                    state.entry_price[symbol] = current_close
+                    state.entry_bar[symbol] = current_bar
+                    state.entry_direction[symbol] = dir_label
+                    state.highest_since_entry[symbol] = current_close
+                    state.lowest_since_entry[symbol] = current_close
+                    state.pos_state[symbol] = CTAExitPolicy.make_pos_state(
+                        current_close, 1 if target_w > 0 else -1, current_bar,
+                    )
+                return
+
+            # ─────────────────────────────────────────────────────
+            # 蓝图模式（默认）：多品种横截面
+            # ─────────────────────────────────────────────────────
+
+            # 1) 滚动IC
             self._update_rolling_ic(symbol, current_close)
 
-            # 2) 提取当前bar的因子得分
+            # 2) 提取因子得分
             factor_scores = scoring_engine.extract_factor_scores(ctx, strategy_params)
             if factor_scores:
                 state.prev_factor_scores[symbol] = dict(factor_scores)
@@ -182,54 +330,52 @@ class PyBrokerExecutorBuilder:
             is_rebalance = scoring_engine.is_rebalance_day(current_date)
 
             if not is_rebalance:
+                # 非调仓日：仅检查止损
+                if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
+                    self._close_all(ctx)
+                    self._clear_entry_state(symbol)
                 return
 
-            # 4) 横截面数据收集
+            # 4) 横截面收集
             if state.rebalance_date != current_date:
-                # 新调仓日，重置
                 state.rebalance_date = current_date
-                state.collected_symbols = []
+                state.collected_symbols_set = set()
                 state.finalized = False
                 state.target_weights = {}
 
-            state.collected_symbols.append(symbol)
+            state.collected_symbols_set.add(symbol)
             scoring_engine.update_cross_section(
                 symbol, factor_scores, dt=current_date,
             )
 
-            # 5) 蓝图：收齐所有品种后 finalize 横截面
-            if not state.finalized and len(state.collected_symbols) >= state.total_symbols:
+            # 5) finalize 横截面
+            if not state.finalized and len(state.collected_symbols_set) >= state.total_symbols:
                 scoring_engine.finalize_cross_section()
                 state.finalized = True
                 scoring_engine.mark_rebalanced(current_date)
 
-                # 6) 蓝图：计算综合得分
                 signals: Dict[str, float] = {}
-                for sym in state.collected_symbols:
+                for sym in state.collected_symbols_set:
                     signals[sym] = scoring_engine.compute_composite_score(sym)
                 _logger.debug("调仓日 %s 综合得分: %s", current_date, signals)
 
-                # 7) 蓝图：PortfolioManager 分配权重
                 risk_estimates: Dict[str, float] = {}
                 if risk_estimates_provider:
                     for sym in signals:
                         est = risk_estimates_provider(sym)
                         if est is not None and est > 0:
                             risk_estimates[sym] = est
+
                 target_weights = portfolio_manager.allocate_weights(
-                    signals,
-                    method=weight_method,
+                    signals, method=weight_method,
                     risk_estimates=risk_estimates if risk_estimates else None,
                 )
-
-                # 8) 蓝图：RiskController 调整（集中度等）
                 target_weights = risk_controller.check_concentration_dict(
                     target_weights, max_concentration=config.max_position_pct,
                 )
                 state.target_weights = target_weights
                 state.last_weights = dict(target_weights)
 
-            # 9) 当前品种是否已 finalized，是则执行下单
             if not state.finalized:
                 return
 
@@ -238,31 +384,32 @@ class PyBrokerExecutorBuilder:
             if abs(score) < entry_threshold:
                 target_w = 0.0
 
-            # 单品种风控
-            target_w = self._apply_per_symbol_risk(
-                symbol=symbol,
-                target_weight=target_w,
-                ctx=ctx,
-                current_close=current_close,
-            )
-            if abs(target_w) < 1e-6:
-                # 平仓
+            if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
                 self._close_all(ctx)
+                self._clear_entry_state(symbol)
+                return
+
+            if abs(target_w) < 1e-6:
+                self._close_all(ctx)
+                self._clear_entry_state(symbol)
                 return
 
             direction = 1 if target_w > 0 else -1
             effective_size = min(abs(target_w), position_size)
-            if effective_size < config.min_position_pct:
-                effective_size = config.min_position_pct
-
-            # 止损检查
-            if self._check_stop_loss(ctx, current_close):
-                self._close_all(ctx)
-                return
-
             has_long = _get_pos_shares(ctx, "long") > 0
             has_short = _get_pos_shares(ctx, "short") > 0
+            old_pos = 1 if has_long else -1 if has_short else 0
             self._execute_rebalance(ctx, direction, effective_size, has_long, has_short)
+
+            if current_close is not None and (
+                old_pos == 0 or (old_pos > 0 and direction < 0) or (old_pos < 0 and direction > 0)
+            ):
+                dir_label = "long" if direction > 0 else "short"
+                state.entry_price[symbol] = current_close
+                state.entry_bar[symbol] = current_bar
+                state.entry_direction[symbol] = dir_label
+                state.highest_since_entry[symbol] = current_close
+                state.lowest_since_entry[symbol] = current_close
 
         executor_fn.__name__ = "blueprint_executor"
         return executor_fn
@@ -272,116 +419,76 @@ class PyBrokerExecutorBuilder:
     # ────────────────────────────────────────────────────────────
     def _update_rolling_ic(self, symbol: str, current_close: Optional[float]) -> None:
         """用上一bar因子得分 + 当前bar收益更新滚动IC引擎。"""
-        # 由外部注入的 IC 引擎通过 scoring_engine.set_ic_weights 调用
-        # 此处保留扩展点：实际计算由 scoring_engine 内部完成
         return
 
-    def _apply_per_symbol_risk(
+    def _check_stop_loss(
         self,
-        symbol: str,
-        target_weight: float,
         ctx: ExecContext,
         current_close: Optional[float],
-    ) -> float:
-        """单品种风控：仓位上限。"""
-        max_pct = self.config.max_position_pct
-        if abs(target_weight) > max_pct:
-            return max_pct * (1.0 if target_weight > 0 else -1.0)
-        return target_weight
+        symbol: str,
+        current_date: Any,
+        current_bar: int,
+    ) -> bool:
+        """复合止损检查。
 
-    def _check_stop_loss(self, ctx: ExecContext, current_close: Optional[float]) -> bool:
-        """检查止损：委托给 RiskController。
-
-        P0-2 整改（2026-06-10）：
-          - 复合止损启用（use_composite_stop=True）时优先走 check_composite_stop
-            路径，使用 entry_price + highest/lowest 跟踪追踪/时间止损
-          - 由于 PyBroker Pos 对象未直接暴露 entry_price/held_days，这里以
-            浮盈 PnL% 反向推算 entry_price：entry ≈ current_close - pnl/shares
-          - highest/lowest 不可获取时用 current_close 近似
-          - 复合止损禁用或调用失败时回退到 PnL-based 固定止损路径
+        使用 state 中显式追踪的 entry_price/highest/lowest，
+        优先走 RiskController 复合止损路径。
         """
-        atr = _get_indicator(ctx, "atr_14")
-        long_pos = ctx.pos(ctx.symbol, "long")
-        short_pos = ctx.pos(ctx.symbol, "short")
-        for pos, direction in ((long_pos, "long"), (short_pos, "short")):
-            if pos is None:
-                continue
+        if current_close is None or current_close <= 0:
+            return False
+
+        entry_p = self.state.entry_price.get(symbol)
+        if entry_p is None or entry_p <= 0:
+            return False
+
+        entry_bar = self.state.entry_bar.get(symbol, current_bar)
+        direction = self.state.entry_direction.get(symbol, "long")  # 用存储的方向
+        highest = self.state.highest_since_entry.get(symbol, current_close)
+        lowest = self.state.lowest_since_entry.get(symbol, current_close)
+        atr = _get_atr(ctx)
+
+        if self.risk_controller is not None and self.risk_controller.composite_stop is not None:
             try:
-                pnl = float(pos.pnl)
-                equity = float(pos.equity) - pnl
-                if equity <= 0:
-                    continue
-                pnl_pct = pnl / equity
-
-                # ── P0-2 整改：优先走复合止损（追踪/时间/固定） ──
-                if (
-                    self.risk_controller is not None
-                    and self.risk_controller.composite_stop is not None
-                    and current_close is not None
-                    and current_close > 0
-                ):
-                    # 反推 entry_price：equity = shares * entry_price,
-                    # pnl = shares * (current_close - entry_price)
-                    shares = float(equity) / current_close if pnl_pct == 0 else (
-                        abs(pnl) / max(abs(pnl_pct) * current_close, 1e-9)
-                    )
-                    if shares <= 0:
-                        continue
-                    entry_price = current_close - pnl / shares if direction == "long" \
-                        else current_close + pnl / shares
-                    # 多头用 current_close 近似 highest，空头用 lowest
-                    if direction == "long":
-                        result = self.risk_controller.check_composite_stop(
-                            symbol=ctx.symbol,
-                            direction="long",
-                            entry_price=entry_price,
-                            current_price=current_close,
-                            highest_since_entry=current_close,
-                            lowest_since_entry=current_close,
-                            entry_day=0,
-                            current_day=0,
-                            atr_value=float(atr) if atr else None,
-                            auto_register_entry=False,
-                        )
-                    else:
-                        result = self.risk_controller.check_composite_stop(
-                            symbol=ctx.symbol,
-                            direction="short",
-                            entry_price=entry_price,
-                            current_price=current_close,
-                            highest_since_entry=current_close,
-                            lowest_since_entry=current_close,
-                            entry_day=0,
-                            current_day=0,
-                            atr_value=float(atr) if atr else None,
-                            auto_register_entry=False,
-                        )
-                    if result.triggered:
-                        _logger.info(
-                            "%s 触发%s: %s",
-                            ctx.symbol, direction, result.trigger_reason,
-                        )
-                        return True
-                    # 复合止损未触发时，浮盈情况下也允许继续持有
-                    if pnl_pct >= 0:
-                        continue
-
-                # ── 回退路径：PnL-based 固定止损（兼容旧逻辑） ──
-                if pnl_pct >= 0:
-                    continue
-                effective_stop = self.config.stop_loss_pct
-                if current_close and current_close > 0 and atr:
-                    atr_stop = float(atr) * 2.0 / current_close
-                    effective_stop = max(effective_stop, atr_stop)
-                if -pnl_pct > effective_stop:
+                result = self.risk_controller.check_composite_stop(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_p,
+                    current_price=current_close,
+                    highest_since_entry=highest,
+                    lowest_since_entry=lowest,
+                    entry_day=entry_bar,
+                    current_day=current_bar,
+                    atr_value=atr if atr > 0 else None,
+                    auto_register_entry=False,
+                )
+                if result.triggered:
                     _logger.info(
-                        "%s 触发止损(fixed): 亏损=%.2f%%, 阈值=%.2f%%",
-                        ctx.symbol, pnl_pct * 100, effective_stop * 100,
+                        "%s 触发%s: %s",
+                        symbol, direction, result.trigger_reason,
                     )
                     return True
-            except Exception:  # noqa: BLE001
-                continue
+            except Exception as e:
+                _logger.debug("复合止损异常: %s", e)
+
+        # 回退：固定百分比止损
+        pnl_pct = (current_close - entry_p) / entry_p
+        stop_pct = self.config.stop_loss_pct
+        if direction == "long" and pnl_pct < -stop_pct:
+            _logger.info("%s 触发固定止损: pnl=%.2f%%", symbol, pnl_pct * 100)
+            return True
+        if direction == "short" and pnl_pct > stop_pct:
+            _logger.info("%s 触发固定止损: pnl=%.2f%%", symbol, pnl_pct * 100)
+            return True
+
         return False
+
+    def _clear_entry_state(self, symbol: str) -> None:
+        """清除品种的止损追踪状态。"""
+        self.state.entry_price.pop(symbol, None)
+        self.state.entry_bar.pop(symbol, None)
+        self.state.entry_direction.pop(symbol, None)
+        self.state.highest_since_entry.pop(symbol, None)
+        self.state.lowest_since_entry.pop(symbol, None)
 
     @staticmethod
     def _execute_rebalance(
@@ -414,8 +521,7 @@ class PyBrokerExecutorBuilder:
             ctx.cover_all_shares()
 
 
-# 给 RiskController 加一个 dict 版的集中度检查（避免污染核心类），
-# 直接用 RiskController.check_concentration 接受 {sym: market_value} 即可。
+# 给 RiskController 加一个 dict 版的集中度检查（避免污染核心类）
 def _patch_risk_controller_for_blueprint() -> None:
     """为 RiskController 添加 check_concentration_dict 便捷方法。"""
     if hasattr(RiskController, "check_concentration_dict"):
@@ -426,11 +532,6 @@ def _patch_risk_controller_for_blueprint() -> None:
         weights: Dict[str, float],
         max_concentration: float = 0.4,
     ) -> Dict[str, float]:
-        """
-        权重集中度调整：把 {sym: weight} 中超限的权重截断到 max_concentration。
-
-        与 check_concentration 不同：返回调整后的权重 dict 而非列表。
-        """
         if not weights:
             return {}
         result: Dict[str, float] = {}

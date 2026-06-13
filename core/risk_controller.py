@@ -10,11 +10,17 @@ BrokerAdapter 不再包含风控决策逻辑，仅负责执行。
   - 持仓上限：总持仓不超过设定比例
   - 单品种仓位上限：单品种不超过设定比例
   - 复合止损（追踪 + 时间 + 固定）：P0整改后整合为内部组件
+  - 风险预算仓位计算（risk_per_trade / stop_distance * price）：2026-06-13 融合
+  - 全局风控熔断（日 PnL 聚合）：2026-06-13 融合
 
 P0整改（2026-06-07）：
   - **CompositeStopManager 整合为内部组件**
   - 对外只暴露统一风控接口（check_stop_loss / check_composite_stop / check_position_limit）
   - 旧的 pnl-based check_stop_loss 已标记 @deprecated，新代码请用 check_composite_stop
+
+CTA 风控融合（2026-06-13）：
+  - CTAExitPolicy 的 risk_per_trade 风险预算 / 截断 ATR / 全局熔断 / 逻辑证伪 并入本类
+  - RiskController 成为全量风控单一入口
 """
 
 import warnings
@@ -22,6 +28,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
 import logging
+import numpy as np
 
 from core.risk.composite_stop import CompositeStopManager, CompositeStopResult
 
@@ -32,12 +39,13 @@ _logger = logging.getLogger(__name__)
 class RiskConfig:
     """风控配置。"""
 
+    # ── 基础止损 ──
     stop_loss_pct: float = 0.05
     max_position_pct: float = 0.2
     max_total_position_pct: float = 0.6
     stop_loss_cooldown: int = 1
 
-    # 复合止损参数（P0整改：合并到 RiskConfig）
+    # ── 复合止损（CompositeStopManager） ──
     use_composite_stop: bool = True
     fixed_stop_pct: float = 0.05
     trailing_mode: str = "pct"          # "pct" 或 "atr"
@@ -45,7 +53,15 @@ class RiskConfig:
     trailing_atr_mult: float = 2.0
     max_holding_days: int = 10
     time_target_return: float = 0.01
-    stop_loss_verbose: bool = False     # 默认 False 避免回测刷屏
+    stop_loss_verbose: bool = False
+
+    # ── 风险预算仓位计算（2026-06-13 从 CTAExitPolicy 融合） ──
+    risk_per_trade: float = 0.02         # 每笔交易风险预算（组合 %）
+    target_vol: float = 0.15             # 年化目标波动率（0=禁用波动率平价）
+    global_risk_pct: float = 0.03        # 日组合亏损熔断阈值
+    atr_window: int = 14                 # ATR 计算窗口
+    atr_stop_multiple: float = 3.0       # 趋势市场 ATR 止损倍数
+    logical_falsification_threshold: float = 0.1  # 逻辑证伪信号方向阈值
 
 
 class RiskController:
@@ -88,6 +104,12 @@ class RiskController:
         """
         self.config = config or RiskConfig()
         self._cooldown_until: Dict[str, int] = {}
+        self._global_risk: Dict[str, Any] = {
+            "last_date": None,
+            "daily_pnl_pct": 0.0,
+            "symbol_pnl": {},
+            "circuit_breaker": False,
+        }
 
         # P0整改：CompositeStopManager 作为内部组件初始化
         if self.config.use_composite_stop:
@@ -440,3 +462,215 @@ class RiskController:
             )
             return True
         return False
+
+    # ═══════════════════════════════════════════════════════════
+    # CTA 风控融合（2026-06-13）：风险预算 / 截断 ATR / 全局熔断 / 逻辑证伪
+    # ═══════════════════════════════════════════════════════════
+
+    # ────────────────────────────────────────────────────────
+    # 截断 ATR
+    # ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def compute_truncated_atr(
+        close: np.ndarray,
+        high: np.ndarray,
+        low: np.ndarray,
+        window: int = 14,
+    ) -> float:
+        """计算 ATR（带 5%~95% 分位数截断）。
+
+        华泰报告：对原始 TR 序列做 5%~95% 截断，
+        抑制单日极端脉冲对 ATR 的影响。
+
+        Returns:
+            ATR 值，数据不足时返回 0.0
+        """
+        if len(close) < 2:
+            return 0.0
+
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.maximum(
+                np.abs(high[1:] - close[:-1]),
+                np.abs(low[1:] - close[:-1]),
+            ),
+        )
+        if len(tr) < 5:
+            return float(np.mean(tr)) if len(tr) > 0 else 0.0
+
+        lo, hi = float(np.percentile(tr, 5)), float(np.percentile(tr, 95))
+        tr_clip = np.clip(tr, lo, hi)
+
+        if len(tr_clip) < window:
+            return float(np.mean(tr_clip))
+        return float(np.mean(tr_clip[-window:]))
+
+    # ────────────────────────────────────────────────────────
+    # 风险预算仓位计算
+    # ────────────────────────────────────────────────────────
+
+    def compute_risk_budget_weight(
+        self,
+        signal: float,
+        current_price: float,
+        market_state: str = "oscillation",
+        close: Optional[np.ndarray] = None,
+        high: Optional[np.ndarray] = None,
+        low: Optional[np.ndarray] = None,
+        sigma: Optional[float] = None,
+        max_weight: Optional[float] = None,
+    ) -> float:
+        """风险预算仓位计算（从 CTAExitPolicy 融合）。
+
+        weight = risk_per_trade * |signal| / (stop_distance / price)
+
+        趋势市场 → 基于 ATR 的止损距离（需传入 close/high/low）
+        震荡市场 → 基于固定百分比的止损距离
+
+        若 sigma 不为空且 target_vol > 0，叠加波动率平价。
+
+        Args:
+            signal: 策略信号 [-1, 1]
+            current_price: 当前价格
+            market_state: "trend" 或 "oscillation"
+            close: 收盘价序列（趋势市场需要）
+            high: 最高价序列（趋势市场需要）
+            low: 最低价序列（趋势市场需要）
+            sigma: 年化波动率估计（波动率平价需要）
+            max_weight: 最大仓位（默认使用 config.max_position_pct）
+
+        Returns:
+            [-max_weight, max_weight] 区间的目标权重
+        """
+        cfg = self.config
+        max_w = max_weight if max_weight is not None else cfg.max_position_pct
+        risk_budget = cfg.risk_per_trade * abs(signal)
+
+        if market_state == "trend" and close is not None and high is not None and low is not None:
+            atr = self.compute_truncated_atr(close, high, low, cfg.atr_window)
+            stop_distance = max(atr * cfg.atr_stop_multiple, 1e-6)
+        else:
+            stop_distance = current_price * cfg.stop_loss_pct
+
+        position_pct = risk_budget / (stop_distance / (current_price + 1e-10))
+
+        # 波动率平价
+        if cfg.target_vol > 0 and sigma is not None and sigma > 1e-8:
+            vol_parity = cfg.target_vol / (sigma / 100.0 * np.sqrt(252))
+            position_pct *= vol_parity
+
+        position_pct = min(position_pct, max_w)
+        return float(np.sign(signal) * position_pct)
+
+    # ────────────────────────────────────────────────────────
+    # 逻辑性证伪
+    # ────────────────────────────────────────────────────────
+
+    def check_logical_falsification(
+        self,
+        signal: float,
+        current_pos: int,
+    ) -> bool:
+        """检查信号方向是否与持仓方向明显相反。
+
+        信号强度超过 logical_falsification_threshold 且与持仓方向相反时返回 True。
+
+        Args:
+            signal: 策略信号 [-1, 1]
+            current_pos: 当前持仓方向（1=多, -1=空, 0=空仓）
+
+        Returns:
+            True 表示信号证伪，应平仓
+        """
+        if current_pos == 0:
+            return False
+        threshold = self.config.logical_falsification_threshold
+        if current_pos > 0 and signal < -threshold:
+            return True
+        if current_pos < 0 and signal > threshold:
+            return True
+        return False
+
+    # ────────────────────────────────────────────────────────
+    # 全局风控（日 PnL 熔断）
+    # ────────────────────────────────────────────────────────
+
+    def update_global_risk(
+        self,
+        date: Any,
+        symbol: str,
+        daily_return: float,
+    ) -> None:
+        """更新全局风控状态 — 按日聚合多品种 PnL。
+
+        检测日期变更 → 重置日累计器。
+        所有品种 PnL 均值超过 global_risk_pct 时触发熔断。
+
+        Args:
+            date: 当前 bar 的日期
+            symbol: 品种代码
+            daily_return: 该品种当日收益率
+        """
+        date_str = str(date)
+        if not date_str or date_str == "None":
+            return
+
+        if self._global_risk["last_date"] != date_str:
+            self._global_risk["last_date"] = date_str
+            self._global_risk["daily_pnl_pct"] = 0.0
+            self._global_risk["symbol_pnl"] = {}
+            self._global_risk["circuit_breaker"] = False
+
+        self._global_risk["symbol_pnl"][symbol] = daily_return
+
+        all_pnls = list(self._global_risk["symbol_pnl"].values())
+        if all_pnls:
+            self._global_risk["daily_pnl_pct"] = float(np.mean(all_pnls))
+
+    def is_global_risk_triggered(self) -> bool:
+        """全局熔断是否已触发。"""
+        if self._global_risk.get("circuit_breaker", False):
+            return True
+        daily_pnl = self._global_risk.get("daily_pnl_pct", 0.0)
+        if daily_pnl < -self.config.global_risk_pct:
+            _logger.warning(
+                "GlobalRisk: 日P&L=%.2f%% (阈值=%.1f%%)",
+                daily_pnl * 100, self.config.global_risk_pct * 100,
+            )
+            self._global_risk["circuit_breaker"] = True
+            return True
+        return False
+
+    def reset_global_risk(self) -> None:
+        """重置全局风控状态（新回测前调用）。"""
+        self._global_risk = {
+            "last_date": None,
+            "daily_pnl_pct": 0.0,
+            "symbol_pnl": {},
+            "circuit_breaker": False,
+        }
+
+    # ── 兼容别名（CTAExitPolicy 委托） ──
+    @staticmethod
+    def make_pos_state(entry_price: float, direction: int, entry_bar_idx: int) -> Dict[str, Any]:
+        """创建持仓状态记录（同上）。"""
+        return {
+            "entry_price": entry_price,
+            "entry_bar_idx": entry_bar_idx,
+            "direction": direction,
+            "peak": entry_price,
+            "trough": entry_price,
+        }
+
+    @staticmethod
+    def update_extreme(
+        pos_state: Dict[str, Any],
+        direction: int,
+        price: float,
+    ) -> None:
+        """更新持仓极值（用于 ATR 移动止损）。"""
+        if direction > 0:
+            pos_state["peak"] = max(pos_state.get("peak", price), price)
+        else:
+            pos_state["trough"] = min(pos_state.get("trough", price), price)

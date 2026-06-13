@@ -218,20 +218,22 @@ def test_sub_strategy_indicators_path_c_uses_factor_engine():
     ]:
         src = inspect.getsource(getattr(sub_strategy_indicators, name))
         # 统一委托给 _signal_from_factor_column → compute_sub_strategy_scores_from_ohlcv
-        assert "_signal_from_factor_column" in src, (
-            f"{name} 未走 _signal_from_factor_column（路径 A），请检查"
+        assert "signal_from_factor_column" in src, (
+            f"{name} 未走 signal_from_factor_column（路径 A），请检查"
         )
         # 不应再使用裸价算法（pct_change / tanh / rolling）
-        assert "pct_change" not in src or "_signal_from_factor_column" in src
-        assert "np.tanh" not in src or "_signal_from_factor_column" in src
+        assert "pct_change" not in src or "signal_from_factor_column" in src
+        assert "np.tanh" not in src or "signal_from_factor_column" in src
 
 
 def test_path_a_and_c_yield_identical_signals():
     """路径 A（因子聚合器）与路径 C（build_indicators）输出必须完全一致。"""
     import pandas as pd
 
+    from core.engine.sub_strategy_adapter import (
+        ohlcv_from_bar,
+    )
     from core.engine.sub_strategy_indicators import (
-        _ohlcv_from_bar,
         build_trend_indicators,
         build_term_structure_indicators,
         build_mean_reversion_indicators,
@@ -255,7 +257,7 @@ def test_path_a_and_c_yield_identical_signals():
         "date": pd.date_range("2025-01-01", periods=n),
     })()
 
-    df = _ohlcv_from_bar(bar_data)
+    df = ohlcv_from_bar(bar_data)
     assert df is not None and len(df) == n
     scored_A = compute_sub_strategy_scores_from_ohlcv(df, config=AlphaFuturesConfig())
 

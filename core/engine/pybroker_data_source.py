@@ -197,39 +197,20 @@ def create_hybrid_data_source(
         tqsdk_loader = tqsdk_adapter._loader  # noqa: SLF001 — 规则 21.4
         tqsdk_loader.load_from_tqsdk(show_progress=True)
 
-        tqsdk_df = _load_legacy_dataframe(
-            "tqsdk",
-            dict(phone=phone, password=password, symbols=symbols, data_length=data_length),
-        )
+        # 直接用已加载的 loader 做后续处理（避免 _load_legacy_dataframe 创建空 loader）
+        tqsdk_loader.identify_dominant_contracts()
+        tqsdk_loader.build_continuous_series()
+        # 构建价差对（spread / far_close）— 供 carry 策略使用
+        tqsdk_loader.build_spread_pairs()
+        tqsdk_df = tqsdk_loader.get_pybroker_df()
         if tqsdk_df.empty:
             raise RuntimeError("TqSdk 数据为空")
 
-        # 仅当 TqSdk 缺少 spread 字段时，从 CSV 补 spread 列（不补主数据）
-        if "spread" not in tqsdk_df.columns:
-            data_dir = data_dir or os.environ.get("DATA_DIR", "./data")
-            target_csv_files = []
-            for sym in symbols:
-                csv_path = os.path.join(data_dir, f"{sym}.csv")
-                if os.path.exists(csv_path):
-                    target_csv_files.append(csv_path)
-            if target_csv_files:
-                csv_adapter = create_data_source("csv", data_dir=data_dir)
-                csv_loader = csv_adapter._loader  # noqa: SLF001
-                csv_loader.load_csv_files_by_paths(target_csv_files)
-                csv_df = _load_legacy_spread_df(data_dir)
-                spread_cols = ["date", "symbol", "far_symbol", "far_close", "spread"]
-                available_cols = [c for c in spread_cols if c in csv_df.columns]
-                if available_cols:
-                    spread_df = csv_df[available_cols].copy()
-                    spread_df["date"] = pd.to_datetime(spread_df["date"]).dt.normalize()
-                    tqsdk_df["date"] = pd.to_datetime(tqsdk_df["date"]).dt.normalize()
-                    tqsdk_df = tqsdk_df.merge(spread_df, on=["date", "symbol"], how="left")
-                    logger.info("已从 CSV 补充 spread 字段（%d 品种）", csv_df["symbol"].nunique())
-
         logger.info(
-            "TqSdk 数据加载成功: %d 行, %d 品种",
+            "TqSdk 数据加载成功: %d 行, %d 品种 (含 spread=%s)",
             len(tqsdk_df),
             tqsdk_df["symbol"].nunique(),
+            "spread" in tqsdk_df.columns,
         )
         return PyBrokerDataSource(tqsdk_df)
 

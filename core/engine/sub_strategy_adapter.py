@@ -10,6 +10,8 @@
   - 2026-06-07：删除 core/strategies/sub_strategies/ 子策略类依赖，
                 子策略信号统一由 StrategyIndicatorRegistry + sub_strategy_aggregator
                 路径A提供（规则17 不重复造轮子）
+  - 2026-06-13：从 sub_strategy_indicators.py 迁入 _ohlcv_from_bar / _signal_from_factor_column
+                等 PyBroker 指标辅助函数，统一辅助函数出口。
 
 ⚠️ 重要（用户指令 2026-06-07）：
   - 完整集成新因子计算（use_new_factors 默认 True）
@@ -19,20 +21,105 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from core.ext.factors.alpha_futures.factor_engine import FactorEngine
-from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
 from core.config.strategy_profiles import SUB_STRATEGY_NAMES
+from core.ext.factors.alpha_futures.config import AlphaFuturesConfig
+from core.ext.factors.alpha_futures.factor_engine import FactorEngine
+from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
+    compute_sub_strategy_scores_from_ohlcv,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# 计算因子所需的核心字段（缺失时直接抛异常，禁止零填充）
+# ── 核心字段 ──
 _REQUIRED_FACTOR_FIELDS = ("close", "open", "high", "low")
+
+# 共享因子聚合器配置（避免每次创建新实例）
+_DEFAULT_ALPHA_CONFIG = AlphaFuturesConfig()
+
+
+# ═══════════════════════════════════════════════════════════════
+# PyBroker 指标辅助函数（从 sub_strategy_indicators.py 迁入）
+# ═══════════════════════════════════════════════════════════════
+
+
+def ohlcv_from_bar(bar_data) -> Optional[pd.DataFrame]:
+    """
+    从 PyBroker bar_data 提取 OHLCV DataFrame。
+
+    bar_data 通常具有 high/low/open/close/volume/open_interest 等 numpy 数组属性。
+    缺失字段用默认值填充（不含 spread 数据，由调用方负责注入）。
+    """
+    try:
+        close = getattr(bar_data, "close", None)
+        high = getattr(bar_data, "high", None)
+        low = getattr(bar_data, "low", None)
+        if close is None or high is None or low is None:
+            return None
+        n = len(close)
+        open_ = getattr(bar_data, "open", None)
+        if open_ is None:
+            open_ = close
+        volume = getattr(bar_data, "volume", None)
+        if volume is None:
+            volume = np.zeros(n)
+        oi = getattr(bar_data, "open_interest", None)
+        if oi is None:
+            oi = np.zeros(n)
+        fc = getattr(bar_data, "far_close", None)
+        fc = np.asarray(fc, dtype=float) if fc is not None else np.full(n, np.nan)
+        dates = getattr(bar_data, "date", None)
+        dates = pd.to_datetime(dates) if dates is not None else pd.date_range(
+            "2025-01-01", periods=n, freq="D",
+        )
+        return pd.DataFrame({
+            "date": dates,
+            "open": np.asarray(open_, dtype=float),
+            "high": np.asarray(high, dtype=float),
+            "low": np.asarray(low, dtype=float),
+            "close": np.asarray(close, dtype=float),
+            "volume": np.asarray(volume, dtype=float),
+            "open_interest": np.asarray(oi, dtype=float),
+            "far_close": fc,
+        })
+    except Exception:
+        return None
+
+
+def signal_from_factor_column(
+    bar_data, column: str, strategy_params: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> np.ndarray:
+    """
+    调路径 A 的因子聚合器，提取指定列作为 PyBroker 指标输出。
+
+    路径 C→A 合并后，所有 build_xxx_indicators 内部走此函数，
+    保证主回测与因子验证的算法一致性。
+
+    Args:
+        bar_data: PyBroker bar_data
+        column: 因子聚合器输出列名（如 "trend"、"term_structure"）
+        strategy_params: 透传 best_params（如 {"trend": {"window": 20}}）
+    """
+    df = ohlcv_from_bar(bar_data)
+    if df is None or len(df) < 30:
+        close_arr = getattr(bar_data, "close", None)
+        return np.zeros(len(close_arr) if close_arr is not None else 0, dtype=float)
+    try:
+        scored = compute_sub_strategy_scores_from_ohlcv(
+            df,
+            config=_DEFAULT_ALPHA_CONFIG,
+            strategy_params=strategy_params,
+        )
+        if column not in scored.columns:
+            return np.zeros(len(df), dtype=float)
+        return scored[column].fillna(0.0).to_numpy()
+    except Exception:
+        return np.zeros(len(df), dtype=float)
 
 
 class _PlaceholderSubStrategy:

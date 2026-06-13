@@ -158,6 +158,88 @@ def _run_all_validations(
     return results
 
 
+def _run_signal_fusion(
+    config: BacktestConfig,
+    symbols,
+    strategies,
+    weights,
+    mode,
+    entry_threshold,
+    output_dir,
+) -> Any:
+    """
+    多策略信号融合（委托 runner/validation/signal_fusion.run_signal_fusion）。
+    """
+    from runner.validation.signal_fusion import run_signal_fusion
+
+    return run_signal_fusion(
+        symbols=symbols or list(config.symbols),
+        strategies=strategies,
+        weights=weights,
+        mode=mode,
+        entry_threshold=entry_threshold,
+        initial_cash=float(config.initial_cash),
+        full_start=str(config.full_start),
+        test_start=str(config.full_end),
+        output_dir=Path(output_dir) if output_dir else Path(config.output_dir) / "validation" / "signal_fusion",
+    )
+
+
+def _run_parameter_plateau(
+    config: BacktestConfig,
+    symbol,
+    strategy_name,
+    strategy_params,
+    perturbation,
+    steps,
+    variation_threshold,
+    output_dir,
+) -> Any:
+    """
+    参数平原测试（委托 runner/validation/parameter_plateau.run_parameter_plateau）。
+    """
+    from runner.validation.parameter_plateau import run_parameter_plateau
+
+    od = Path(output_dir) if output_dir else Path(config.output_dir) / "validation" / "parameter_plateau"
+    return run_parameter_plateau(
+        symbol=symbol,
+        strategy_name=strategy_name,
+        strategy_params=strategy_params,
+        perturbation=perturbation,
+        steps=steps,
+        variation_threshold=variation_threshold,
+        entry_threshold=0.05,
+        initial_cash=float(config.initial_cash),
+        full_start=str(config.full_start),
+        test_start=str(config.full_end),
+        output_dir=od,
+    )
+
+
+def _run_walk_forward(
+    config: BacktestConfig,
+    symbols,
+    strategies,
+    windows,
+    entry_threshold,
+    output_dir,
+) -> Any:
+    """
+    Walk-Forward 滚动验证（委托 runner/validation/walk_forward.run_walk_forward）。
+    """
+    from runner.validation.walk_forward import run_walk_forward, DEFAULT_WINDOWS
+
+    od = Path(output_dir) if output_dir else Path(config.output_dir) / "validation" / "walk_forward"
+    return run_walk_forward(
+        symbols=symbols or list(config.symbols),
+        strategies=strategies or {},
+        windows=windows or DEFAULT_WINDOWS,
+        entry_threshold=entry_threshold,
+        initial_cash=float(config.initial_cash),
+        output_dir=od,
+     )
+
+
 def _verify_chain(
     config: Optional[BacktestConfig],
     data,

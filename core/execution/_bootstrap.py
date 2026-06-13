@@ -8,7 +8,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from core.engine._result_types import PyBrokerResult
+from core.execution._result_types import PyBrokerResult
 
 logger = logging.getLogger(__name__)
 

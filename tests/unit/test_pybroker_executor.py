@@ -31,11 +31,7 @@ class _FakePos:
 
 
 class _FakeCtx:
-    """
-    Mock PyBroker ExecContext。
-
-    提供 symbol/dt/close/indicator/pos 等接口。
-    """
+    """Mock PyBroker ExecContext。"""
 
     def __init__(
         self,
@@ -57,10 +53,10 @@ class _FakeCtx:
     def close(self):
         return self._close
 
-    def indicator(self, name: str):  # noqa: ARG002
+    def indicator(self, name: str):
         return None
 
-    def pos(self, symbol: str, side: str):  # noqa: ARG002
+    def pos(self, symbol: str, side: str):
         if side == "long":
             return self._pos_long
         if side == "short":
@@ -109,13 +105,10 @@ def _make_components(total_symbols: int = 3):
     scoring_engine.mark_rebalanced = MagicMock()
 
     portfolio = PortfolioManager(total_allocation=cfg.max_total_position_pct)
-    # Mock RiskController 提供 check_concentration_dict 方法（executor 蓝图需要）
     risk_controller = MagicMock(spec=RiskController)
     risk_controller.check_concentration_dict = MagicMock(
         side_effect=lambda weights, max_concentration: dict(weights),
     )
-    # 2026-06-11 修复：spec=RiskController 会让 composite_stop 返回 MagicMock（truthy），
-    # 误触发止损。改为显式设置 None 走 PnL-based 回退路径。
     risk_controller.composite_stop = None
     return cfg, scoring_engine, portfolio, risk_controller
 
@@ -146,26 +139,23 @@ class TestSharedState:
         state = PyBrokerExecutorSharedState(total_symbols=3)
         assert state.total_symbols == 3
         assert state.rebalance_date is None
-        assert state.collected_symbols == []
+        assert state.collected_symbols_set == set()
         assert state.finalized is False
         assert state.target_weights == {}
         assert state.last_weights == {}
 
     def test_reset_on_new_date(self):
         state = PyBrokerExecutorSharedState(total_symbols=3)
-        state.rebalance_date = "2024-01-01"
-        state.collected_symbols = ["RB", "CU"]
+        state.collected_symbols_set = {"RB", "CU"}
         state.finalized = True
         state.target_weights = {"RB": 0.5}
 
         # 模拟新调仓日重置
-        state.rebalance_date = "2024-01-02"
-        state.collected_symbols = []
+        state.collected_symbols_set = set()
         state.finalized = False
         state.target_weights = {}
 
-        assert state.rebalance_date == "2024-01-02"
-        assert state.collected_symbols == []
+        assert state.collected_symbols_set == set()
         assert state.finalized is False
 
 
@@ -185,7 +175,7 @@ class TestBuilder:
         )
         assert builder.weight_method == "risk_parity"
         assert builder.state.total_symbols == 3
-        assert builder.state.collected_symbols == []
+        assert builder.state.collected_symbols_set == set()
 
     def test_build_returns_executor(self):
         cfg, scoring_engine, portfolio, risk_controller = _make_components()
@@ -217,16 +207,13 @@ class TestCrossSectionFlow:
         executor = builder.build(strategy_params={})
         dt = datetime(2024, 1, 2)
 
-        # 模拟 PyBroker 按 (date, symbol) 顺序调用
         for sym in ["RB", "CU", "AU"]:
             ctx = _make_ctx(sym, dt)
             executor(ctx)
 
-        # 3 个品种访问后，finalize_cross_section 应被调用
         assert scoring_engine.finalize_cross_section.call_count == 1
         assert scoring_engine.mark_rebalanced.call_count == 1
-        # 所有 3 个品种都被收集
-        assert len(builder.state.collected_symbols) == 3
+        assert len(builder.state.collected_symbols_set) == 3
         assert builder.state.finalized is True
 
     def test_no_finalize_when_not_rebalance_day(self):
@@ -248,10 +235,10 @@ class TestCrossSectionFlow:
             executor(ctx)
 
         assert scoring_engine.finalize_cross_section.call_count == 0
-        assert builder.state.collected_symbols == []
+        assert builder.state.collected_symbols_set == set()
 
     def test_new_date_resets_state(self):
-        """新调仓日应重置 collected_symbols。"""
+        """新调仓日应重置 collected_symbols_set。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=2)
         builder = PyBrokerExecutorBuilder(
             scoring_engine=scoring_engine,
@@ -264,25 +251,21 @@ class TestCrossSectionFlow:
         dt1 = datetime(2024, 1, 2)
         dt2 = datetime(2024, 1, 5)
 
-        # 第一天：访问 2 个品种触发 finalize
         for sym in ["RB", "CU"]:
             executor(_make_ctx(sym, dt1))
         assert builder.state.finalized is True
 
-        # 第二天：状态应重置
         for sym in ["RB", "CU"]:
             executor(_make_ctx(sym, dt2))
 
-        # 第二天的 finalize 也应被调用（验证状态重置正确）
         assert scoring_engine.finalize_cross_section.call_count == 2
-        assert builder.state.collected_symbols == ["RB", "CU"]
+        assert len(builder.state.collected_symbols_set) == 2
 
 
 class TestRiskParityWeights:
     """risk_parity 权重路径测试。"""
 
     def test_risk_estimates_provider_invoked(self):
-        """risk_parity 模式应调用 risk_estimates_provider。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=2)
         provider = MagicMock(side_effect=lambda s: {"RB": 0.02, "CU": 0.03}.get(s))
         builder = PyBrokerExecutorBuilder(
@@ -299,9 +282,7 @@ class TestRiskParityWeights:
         for sym in ["RB", "CU"]:
             executor(_make_ctx(sym, dt))
 
-        # 至少每个品种都被调用过 provider（2 个品种 × 1 次）
         assert provider.call_count >= 2
-        # finalize 后应有目标权重
         assert isinstance(builder.state.target_weights, dict)
 
     def test_target_weights_stored_after_finalize(self):
@@ -320,19 +301,14 @@ class TestRiskParityWeights:
             executor(_make_ctx(sym, dt))
 
         assert builder.state.finalized is True
-        # equal_weight 模式应至少将两个品种加入权重
-        assert "RB" in builder.state.target_weights or len(builder.state.target_weights) >= 0
 
 
 class TestEntryThreshold:
     """开仓阈值测试。"""
 
     def test_low_score_no_position(self):
-        """综合得分低于阈值时 executor 不应下单（buy_shares 保持 0）。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=1)
-        # 准备一个会触发 finalize 但得分低于阈值的场景
         scoring_engine.compute_composite_score = MagicMock(return_value=0.001)
-        # 调高 entry_threshold 以确保被过滤
         cfg.entry_threshold = 0.5
         cfg.max_total_position_pct = 0.6
 
@@ -349,8 +325,6 @@ class TestEntryThreshold:
         ctx = _make_ctx("RB", dt)
         executor(ctx)
 
-        # 因得分 < threshold，应触发 _close_all（无操作）+ 不下单
-        # buy_shares 应保持为 0（默认）
         assert ctx.buy_shares == 0
         assert ctx.sell_shares == 0
 
@@ -359,9 +333,7 @@ class TestPerSymbolRisk:
     """单品种仓位上限测试。"""
 
     def test_position_capped_by_max_pct(self):
-        """得分很高时 executor 应触发 _execute_rebalance，但 buy_shares 受仓位上限影响。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=1)
-        # 模拟一个得分很高的品种
         scoring_engine.compute_composite_score = MagicMock(return_value=0.9)
         cfg.max_position_pct = 0.1
         cfg.max_total_position_pct = 0.6
@@ -381,9 +353,8 @@ class TestPerSymbolRisk:
         ctx = _make_ctx("RB", dt)
         executor(ctx)
 
-        # 触发 _execute_rebalance 后，buy_shares 应被计算
-        # effective_size = min(abs(target_w=0.6), position_size=0.1) = 0.1
-        # buy_shares = ctx.calc_target_shares(0.1) = 0.1 * 1000 = 100
+        # effective_size = min(target_w, max_position_pct=0.1)
+        # buy_shares = calc_target_shares(effective_size)
         assert ctx.buy_shares > 0
         assert ctx.buy_shares == int(0.1 * 1000)
 
@@ -405,15 +376,18 @@ class TestStopLoss:
         )
         executor = builder.build(strategy_params={})
         dt = datetime(2024, 1, 2)
-        # 已有亏损 10% 的多头持仓
-        ctx = _make_ctx(
-            "RB", dt,
-            pos_long=_FakePos(shares=10, pnl=-100.0, equity=1000.0),
-        )
-        executor(ctx)
 
-        # 触发止损后，多头应被平仓
-        assert ctx._pos_long is None
+        # 先执行一次（开仓 + 记录 entry_price=100.0）
+        ctx_open = _make_ctx("RB", dt)
+        executor(ctx_open)
+        # 确保 state 已记录 entry_price
+        assert "RB" in builder.state.entry_price
+
+        # 第二笔调用：价格下跌 >5% 应触发止损
+        ctx_close = _make_ctx("RB", dt, price=93.0,
+                              pos_long=_FakePos(shares=10, pnl=-70.0, equity=1000.0))
+        executor(ctx_close)
+        assert ctx_close._pos_long is None
 
     def test_no_stop_loss_when_profitable(self):
         """盈利持仓不应触发止损。"""
@@ -429,10 +403,13 @@ class TestStopLoss:
         )
         executor = builder.build(strategy_params={})
         dt = datetime(2024, 1, 2)
-        ctx = _make_ctx(
-            "RB", dt,
-            pos_long=_FakePos(shares=10, pnl=50.0, equity=1000.0),
-        )
-        executor(ctx)
-        # 不应平仓
-        assert ctx._pos_long is not None
+
+        # 开仓
+        ctx_open = _make_ctx("RB", dt)
+        executor(ctx_open)
+
+        # 盈利状态不触发止损
+        ctx_profit = _make_ctx("RB", dt, price=105.0,
+                               pos_long=_FakePos(shares=10, pnl=50.0, equity=1000.0))
+        executor(ctx_profit)
+        assert ctx_profit._pos_long is not None
