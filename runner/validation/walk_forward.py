@@ -7,7 +7,7 @@ Walk-Forward 滚动验证（年度滚动训练/测试）。
   2022 训练 → 2023 测试
   2023 训练 → 2024 测试
 
-委托 scripts/run_cta_batch._run_single 执行回测，以训练集上的 Sharpe 优选参数，
+基于 UnifiedFactorPool 统一计算信号，以训练集上的 Sharpe 优选参数，
 在测试集上验证。聚合多段 OOS 指标作为最终评价。
 """
 
@@ -55,10 +55,10 @@ def _run_window_backtest(
     由于 _run_single 使用统一的 warmup，我们直接用 test_start 作为回测起始，
     以 train_start 作为 full_start（确保有训练段数据供指标预热）。
     """
-    from scripts.run_cta_batch import _run_single
+    from runner.common.single_backtest import _run_single_backtest
 
     # 测试段回测（full_start 用训练起始确保有预热数据）
-    result = _run_single(
+    result = _run_single_backtest(
         symbol, strategy_name, strategy_params,
         entry_threshold=entry_threshold,
         full_start=train_start,

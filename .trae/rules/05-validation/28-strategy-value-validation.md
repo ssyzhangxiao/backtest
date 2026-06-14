@@ -134,8 +134,8 @@ python run_backtest.py --experiment e6
 python run_backtest.py --experiment e7
 ```
 
-- 样本内截止 `in_sample_end_date: '2023-01-01'`
-- **样本外 2023-01-01 至 2026-05-31**（动态滚动：默认过去 3 年样本内 + 最近 1 年样本外，随数据更新自动平移）
+- 样本内截止 `in_sample_end_date: '2024-05-31'`
+- **样本外 2024-06-01 至 2026-05-31**（24 个完整月，每月随 full_end_date 滚动更新）
 - **通过标准**：样本外 Sharpe > 0，最大回撤不超过样本内 1.5 倍
 
 ### 5.3 交易执行参数敏感性

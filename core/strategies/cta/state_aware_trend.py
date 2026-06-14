@@ -250,6 +250,7 @@ class MomentumMAStrategy(CTABaseStrategy):
 
         self.set_state(symbol, "market_state", "trend" if abs(signal) > 0.3 else "oscillation")
 
+        momentum_dir = int(np.sign(mom_mean))
         logger.debug("%s momentum_ma: RSI=%.1f rsi_sig=%.3f mom_dir=%d sig=%.4f",
                      symbol, rsi_val, rsi_signal, momentum_dir, signal)
         return signal

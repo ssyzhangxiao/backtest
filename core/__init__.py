@@ -22,12 +22,12 @@ from .portfolio import PortfolioManager
 from .risk_controller import RiskController, RiskConfig
 from .optimizer import ParameterOptimizer
 from .engine import (
-    CrossValidator,
     FactorScoringEngine,
     ScoringConfig,
     RebalanceDecision,
     RebalanceReason,
 )
+from .validation.cross_validator import CrossValidator
 from .performance import PerformanceEvaluator, PerformanceMonitor, PerformanceConfig
 
 # 策略档案（2026-06-07 从 core.strategy_registry 迁移）

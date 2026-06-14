@@ -41,6 +41,7 @@ import numpy as np
 from core.config import BacktestConfig
 from core.engine.switch_engine import FactorScoringEngine
 from core.execution.cta_exit_policy import CTAExitPolicy, CTAExitConfig
+from core.execution.signal_abstraction import SignalAbstractionLayer
 from core.portfolio import PortfolioManager
 from core.risk_controller import RiskController, RiskConfig
 
@@ -105,8 +106,45 @@ def _get_pos_shares(ctx: Any, side: str) -> int:
     return 0
 
 
+def _ohlcv_from_ctx(ctx: Any) -> Optional[pd.DataFrame]:
+    """从 PyBroker ExecContext 提取 OHLCV DataFrame。
+
+    用于 UnifiedFactorPool 的信号计算入口。
+
+    Returns:
+        DataFrame，含 date, open, high, low, close, volume(可选) 列
+    """
+    close = getattr(ctx, "close", None)
+    if close is None or len(close) < 10:
+        return None
+    n = len(close)
+    try:
+        import pandas as pd
+        dates = getattr(ctx, "date", None)
+        if dates is None:
+            # 回退：用索引模拟日期
+            dates = pd.date_range(end=pd.Timestamp(ctx.dt), periods=n)
+        result = {
+            "date": dates if hasattr(dates, "__len__") and len(dates) == n
+                    else pd.date_range(end=pd.Timestamp(ctx.dt), periods=n),
+            "open": getattr(ctx, "open", close),
+            "high": getattr(ctx, "high", close),
+            "low": getattr(ctx, "low", close),
+            "close": close,
+        }
+        vol = getattr(ctx, "volume", None)
+        if vol is not None:
+            result["volume"] = vol
+        df = pd.DataFrame(result)
+        if "date" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["date"]):
+            df["date"] = pd.to_datetime(df["date"])
+        return df
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ────────────────────────────────────────────────────────────
-# 共享状态（蓝图数据）
+# 共享状态（蓝图数据 + 预计算数据）
 # ────────────────────────────────────────────────────────────
 @dataclass
 class PyBrokerExecutorSharedState:
@@ -115,13 +153,17 @@ class PyBrokerExecutorSharedState:
 
     PyBroker 按 (date, symbol) 顺序调用 executor，
     横截面数据需要在所有品种间共享。
+
+    2026-06-14 改进：移除了 collected_symbols_set依赖，
+    改用预计算信号 + 时间驱动触发 finalize。
     """
 
     total_symbols: int
-    # 当前调仓日已收集的品种（用 set 去重）
+    # 当前调仓日
     rebalance_date: Any = None
-    collected_symbols_set: set = field(default_factory=set)
     finalized: bool = False
+    # 当前调仓日已收集的品种（蓝图模式使用；预计算模式不依赖）
+    collected_symbols_set: set = field(default_factory=set)
     # 当前调仓日计算出的目标权重（finalize 之后才填充）
     target_weights: Dict[str, float] = field(default_factory=dict)
     # 上一bar 数据（用于滚动IC更新）
@@ -172,6 +214,8 @@ class PyBrokerExecutorBuilder:
         cta_signal_provider: Optional[Callable[[Any, str], float]] = None,
         cta_market_state_provider: Optional[Callable[[str], str]] = None,
         cta_sigma_provider: Optional[Callable[[str], Optional[float]]] = None,
+        # ── 统一因子池注入（2026-06-13） ──
+        signal_abstraction: Optional[SignalAbstractionLayer] = None,
     ):
         self.scoring_engine = scoring_engine
         self.portfolio_manager = portfolio_manager
@@ -185,6 +229,69 @@ class PyBrokerExecutorBuilder:
         self.cta_signal_provider = cta_signal_provider
         self.cta_market_state_provider = cta_market_state_provider
         self.cta_sigma_provider = cta_sigma_provider
+        # ── 统一因子池注入 ──
+        self.signal_abstraction = signal_abstraction
+        # ── 预计算信号缓存 {symbol: {bar_idx: {name: value}}} ──
+        self._signal_cache: Dict[str, Dict[int, Dict[str, float]]] = {}
+
+    # ────────────────────────────────────────────────────────────
+    # 预计算信号（2026-06-14 新增：替代运行时 per-bar 计算）
+    # ────────────────────────────────────────────────────────────
+
+    def precompute_signals(
+        self,
+        full_df: pd.DataFrame,
+        strategy_params: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
+        """预计算所有品种在所有 bar 上的信号，存入 _signal_cache。
+
+        在 PyBroker backtest() 执行前调用，避免 executor 内逐 bar 计算和
+        横截面收集竞态。
+
+        Args:
+            full_df: PyBroker 格式 DataFrame（含所有品种 OHLCV）
+            strategy_params: 策略参数，CTA 模式下 keys 为活跃策略名
+        """
+        if self.signal_abstraction is None:
+            return  # 未注入统一因子池，跳过
+
+        strategy_params = strategy_params or {}
+        symbols = sorted(full_df["symbol"].unique().tolist())
+        _logger.info(
+            "预计算 %d 个品种的全部信号...", len(symbols),
+        )
+        for sym in symbols:
+            sym_df = full_df[full_df["symbol"] == sym].reset_index(drop=True)
+            if len(sym_df) < 30:
+                continue
+            signal_df = self.signal_abstraction.pool.compute_all(
+                sym_df, sym, strategy_params,
+            )
+            cache: Dict[int, Dict[str, float]] = {}
+            for bar_idx in range(len(signal_df)):
+                row = signal_df.iloc[bar_idx]
+                signals = {}
+                for col in signal_df.columns:
+                    val = row[col]
+                    if isinstance(val, (int, float)) and not (val != val):  # NaN check
+                        signals[col] = float(val)
+                if signals:
+                    cache[bar_idx] = signals
+            # CTA / HYBRID 模式：预计算 CTA 合成信号
+            if self.signal_abstraction.mode in ("cta", "hybrid"):
+                from core.execution.factor_pool import CTA_SIGNAL_NAMES
+                active_cta = [k for k in strategy_params if k in CTA_SIGNAL_NAMES] or CTA_SIGNAL_NAMES
+                equal_w = 1.0 / len(active_cta) if active_cta else 0.0
+                for bar_idx in list(cache.keys()):
+                    signals = cache[bar_idx]
+                    cta_val = 0.0
+                    for cname in active_cta:
+                        if cname in signals:
+                            cta_val += equal_w * signals[cname]
+                    if active_cta:
+                        cache[bar_idx]["_cta_composite"] = float(np.clip(cta_val, -1.0, 1.0))
+            self._signal_cache[sym] = cache
+        _logger.info("预计算完成: %d 个品种", len(self._signal_cache))
 
     def build(
         self,
@@ -211,6 +318,8 @@ class PyBrokerExecutorBuilder:
         market_state_provider = self.cta_market_state_provider
         sigma_provider = self.cta_sigma_provider
         cta_mode = exit_policy is not None
+        # ── 统一因子池模式（2026-06-13） ──
+        signal_layer = self.signal_abstraction
 
         def executor_fn(ctx: ExecContext) -> None:
             symbol = ctx.symbol
@@ -229,6 +338,150 @@ class PyBrokerExecutorBuilder:
                         state.lowest_since_entry.get(symbol, current_close),
                         current_close,
                     )
+
+            # ─────────────────────────────────────────────────────
+            # CTA 模式（统一因子池）：合成信号 → 直接执行
+            # ─────────────────────────────────────────────────────
+            if signal_layer is not None and signal_layer.mode == "cta":
+                sym_cache = self._signal_cache.get(symbol, {})
+                precomputed = sym_cache.get(current_bar, None)
+                cta_signal = precomputed.get("_cta_composite", 0.0) if precomputed else 0.0
+
+                if abs(cta_signal) >= entry_threshold:
+                    target_dir = 1 if cta_signal > 0 else -1
+                    effective_size = position_size
+                    has_long = _get_pos_shares(ctx, "long") > 0
+                    has_short = _get_pos_shares(ctx, "short") > 0
+                    self._execute_rebalance(ctx, target_dir, effective_size, has_long, has_short)
+                else:
+                    self._close_all(ctx)
+                    self._clear_entry_state(symbol)
+                return
+
+            # ─────────────────────────────────────────────────────
+            # 统一因子池模式：预计算信号 + 时间驱动横截面
+            # ─────────────────────────────────────────────────────
+            if signal_layer is not None:
+                # 1) 从预计算缓存获取当前 bar 的信号
+                sym_cache = self._signal_cache.get(symbol, {})
+                precomputed = sym_cache.get(current_bar, None)
+                if precomputed is None:
+                    # 缓存未命中（数据不足），尝试实时计算
+                    ohlcv = _ohlcv_from_ctx(ctx)
+                    if ohlcv is not None and len(ohlcv) >= 10:
+                        cs_signals = signal_layer.get_cross_sectional_signals(
+                            symbol, ohlcv, len(ohlcv) - 1, strategy_params,
+                        )
+                    else:
+                        cs_signals = {}
+                else:
+                    # 从预计算缓存提取子策略得分
+                    cs_signals = {}
+                    for sname in ["trend", "term_structure", "mean_reversion",
+                                  "vol_breakout", "composite_resonance"]:
+                        if sname in precomputed:
+                            cs_signals[sname] = precomputed[sname]
+
+                # 2) 更新横截面引擎
+                scoring_engine.update_cross_section(
+                    symbol, cs_signals, dt=current_date,
+                )
+
+                is_rebalance = scoring_engine.is_rebalance_day(current_date)
+
+                # 3) 时间驱动：调仓日触发 finalize（基于日期变化，而非品种计数）
+                if is_rebalance and state.rebalance_date != current_date:
+                    state.rebalance_date = current_date
+                    state.finalized = False
+                    state.target_weights = {}
+
+                    # 立即 finalize：所有品种的信号已预计算，无需等全部收集
+                    scoring_engine.finalize_cross_section()
+                    state.finalized = True
+                    scoring_engine.mark_rebalanced(current_date)
+
+                    all_syms = sorted(self._signal_cache.keys())
+                    signals_all: Dict[str, float] = {}
+                    for sym in all_syms:
+                        signals_all[sym] = scoring_engine.compute_composite_score(sym)
+
+                    # ── HYBRID 模式：横截面得分 × CTA 时序混合 ──
+                    if signal_layer.mode == "hybrid":
+                        cw = signal_layer.cta_weight
+                        for sym in all_syms:
+                            z = signals_all[sym]
+                            sym_cache = self._signal_cache.get(sym, {})
+                            pre = sym_cache.get(current_bar, None)
+                            cta_sig = pre.get("_cta_composite", 0.0) if pre else 0.0
+                            hybrid = (1.0 - cw) * z + cw * cta_sig
+                            signals_all[sym] = float(np.clip(hybrid, -1.0, 1.0))
+
+                    # 风险预算调整
+                    risk_estimates: Dict[str, float] = {}
+                    if risk_estimates_provider:
+                        for sym in signals_all:
+                            est = risk_estimates_provider(sym)
+                            if est is not None and est > 0:
+                                risk_estimates[sym] = est
+
+                    target_weights = portfolio_manager.allocate_weights(
+                        signals_all, method=weight_method,
+                        risk_estimates=risk_estimates if risk_estimates else None,
+                    )
+                    target_weights = risk_controller.check_concentration_dict(
+                        target_weights, max_concentration=config.max_position_pct,
+                    )
+                    state.target_weights = target_weights
+                    state.last_weights = dict(target_weights)
+
+                # 4) 交易执行
+                if not state.finalized:
+                    return
+
+                target_w = state.target_weights.get(symbol, 0.0)
+
+                # 混合 CTA 信号过滤（仅纯横截面模式需要）
+                if signal_layer is not None and signal_layer.mode not in ("hybrid", "cta") and precomputed is not None:
+                    cta_composite = (
+                        precomputed.get("carry", 0.0) * 0.3 +
+                        precomputed.get("vol_mean_reversion", 0.0) * 0.3 +
+                        precomputed.get("donchian_breakout", 0.0) * 0.2 +
+                        precomputed.get("momentum_ma", 0.0) * 0.1 +
+                        precomputed.get("tsi_garch", 0.0) * 0.05 +
+                        precomputed.get("pair_trading", 0.0) * 0.05
+                    )
+                    hybrid = (1.0 - 0.5) * (target_w / (abs(target_w) + 1e-10)) + 0.5 * np.clip(cta_composite, -1, 1)
+                    hybrid = float(np.clip(hybrid, -1.0, 1.0))
+                    if abs(hybrid) < entry_threshold:
+                        target_w = 0.0
+
+                if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
+                    self._close_all(ctx)
+                    self._clear_entry_state(symbol)
+                    return
+
+                if abs(target_w) < 1e-6:
+                    self._close_all(ctx)
+                    self._clear_entry_state(symbol)
+                    return
+
+                direction = 1 if target_w > 0 else -1
+                effective_size = min(abs(target_w), position_size)
+                has_long = _get_pos_shares(ctx, "long") > 0
+                has_short = _get_pos_shares(ctx, "short") > 0
+                old_pos = 1 if has_long else -1 if has_short else 0
+                self._execute_rebalance(ctx, direction, effective_size, has_long, has_short)
+
+                if current_close is not None and (
+                    old_pos == 0 or (old_pos > 0 and direction < 0) or (old_pos < 0 and direction > 0)
+                ):
+                    dir_label = "long" if direction > 0 else "short"
+                    state.entry_price[symbol] = current_close
+                    state.entry_bar[symbol] = current_bar
+                    state.entry_direction[symbol] = dir_label
+                    state.highest_since_entry[symbol] = current_close
+                    state.lowest_since_entry[symbol] = current_close
+                return
 
             # ─────────────────────────────────────────────────────
             # CTA 模式：每 bar 执行，四层退出 + 风险预算

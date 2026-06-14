@@ -287,39 +287,36 @@ def collect_from_directory(output_dir: Path) -> Dict[str, Any]:
         strategies[exp] = {"metrics": dict(row)}
 
     valid_experiments = {
-        "E1_trend",
-        "E1_term_structure",
-        "E1_mean_reversion",
-        "E1_vol_breakout",
-        "E1_composite_resonance",
-        "E2_Fusion",
+        "trend",
+        "term_structure",
+        "mean_reversion",
+        "vol_breakout",
+        "composite_resonance",
+        "cross_sectional",
+        "fusion",
     }
 
-    strategy_map = {
-        "trend": "E1_trend",
-        "term_structure": "E1_term_structure",
-        "mean_reversion": "E1_mean_reversion",
-        "vol_breakout": "E1_vol_breakout",
-        "fusion": "E2_Fusion",
-    }
+    strategy_map: Dict[str, str] = {}
 
     for equity_file in sorted(output_dir.glob("e*_equity_*.csv")):
         stem = equity_file.stem
-        parts = stem.replace("_equity_", "|").split("|")
-        if len(parts) < 2:
+        # 提取 _equity_ 之后的部分，取最后一个 _ 后的片段作为策略名
+        # e.g. e1_equity_CZCE_CF_trend → strategy = "trend"
+        # e.g. e2_equity_fusion → strategy = "fusion"
+        if "_equity_" not in stem:
             continue
-        strategy_key = parts[1]
-        mapped = strategy_map.get(strategy_key)
-        if mapped is None or mapped not in valid_experiments:
+        suffix = stem.split("_equity_", 1)[1]
+        strategy_key = suffix.rsplit("_", 1)[-1] if "_" in suffix else suffix
+        if strategy_key not in valid_experiments:
             continue
         dates, equity = read_equity_csv(equity_file)
         if not dates:
             continue
-        if mapped in strategies:
-            strategies[mapped]["dates"] = dates
-            strategies[mapped]["equity"] = equity
+        if strategy_key in strategies:
+            strategies[strategy_key]["dates"] = dates
+            strategies[strategy_key]["equity"] = equity
         else:
-            strategies[mapped] = {"metrics": {}, "dates": dates, "equity": equity}
+            strategies[strategy_key] = {"metrics": {}, "dates": dates, "equity": equity}
 
     rebalance_analysis = {}
     for switch_log_file in sorted(output_dir.glob("e*_switch_log_*.csv")):

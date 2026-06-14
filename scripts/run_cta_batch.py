@@ -1,4 +1,7 @@
 """
+⚠️ 已废弃（2026-06-13）— 信号计算已统一到 UnifiedFactorPool。
+保留作为参考，新功能请使用 core/execution/factor_pool.py。
+
 CTA 批处理脚本 — 全品种 × 多策略 × 参数扫描。
 
 用法:

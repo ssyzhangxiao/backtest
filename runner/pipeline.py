@@ -182,6 +182,63 @@ class Pipeline:
             logger.info("[%s] 实验完成", name)
         return self
 
+    def run_cta(
+        self,
+        strategies: Optional[List[str]] = None,
+        report: bool = True,
+    ) -> "Pipeline":
+        """
+        CTA 6 策略批量回测 — 全量 PyBroker 引擎。
+
+        使用 PyBrokerBacktestRunner 执行完整回测（含滑点、手续费、风控），
+        逐品种×CTA 策略调用 TqSDK/PyBroker 全链路。
+        结果保存到 self._results["cta"]（DataFrame）。
+
+        Args:
+            strategies: CTA 策略名列表（默认 6 个全部）
+            report: 是否生成 CSV 摘要
+
+        Returns:
+            self（支持链式调用）
+        """
+        from runner.backtest.cta_batch import run_cta_batch, CTA_STRATEGIES
+        from runner.backtest.cta_batch import summarize_cta_results
+
+        strategies = strategies or CTA_STRATEGIES
+
+        logger.info("=" * 80)
+        logger.info(
+            "  CTA 全量 PyBroker 回测 — %d 品种 × %d 策略",
+            len(self._config.symbols), len(strategies),
+        )
+        logger.info("=" * 80)
+
+        df = run_cta_batch(
+            data_source=self._data,
+            raw_config=self._raw_config,
+            symbols=self._config.symbols,
+            strategies=strategies,
+        )
+
+        summary = summarize_cta_results(df)
+        self._results["cta"] = {"df": df, "summary": summary}
+
+        if report:
+            from runner.common.utils import save_csv
+            from pathlib import Path
+            output_dir = Path(getattr(self._config, "output_dir", "output_backtest_pybroker"))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = output_dir / "cta_batch_results.csv"
+            save_csv(df, csv_path)
+            logger.info("CTA 结果已保存到: %s", csv_path)
+
+        logger.success(
+            "CTA 批跑完成: %s/%s 成功, 加权组合收益=%s%%",
+            summary["succeeded"], summary["total_combos"],
+            summary["weighted_composite_return_pct"],
+        )
+        return self
+
     def multi_oos(
         self,
         output_dir: Optional[Path] = None,

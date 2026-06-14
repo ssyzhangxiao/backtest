@@ -23,6 +23,8 @@ from core.config.strategy_profiles import StrategyLibrary
 from core.engine.switch_engine import FactorScoringEngine
 from core.engine.pybroker_data_source import PyBrokerDataSource
 from core.execution.pybroker_executor import PyBrokerExecutorBuilder
+from core.execution.factor_pool import UnifiedFactorPool
+from core.execution.signal_abstraction import SignalAbstractionLayer
 from core.portfolio import PortfolioManager
 from core.risk_controller import RiskController, RiskConfig
 from utils.indicators import compute_atr
@@ -300,6 +302,14 @@ class PyBrokerBacktestRunner:
 
         symbols = sorted(df["symbol"].unique().tolist())
 
+        # ── 统一因子池注入（2026-06-13） ──
+        factor_pool = UnifiedFactorPool()
+        signal_layer = SignalAbstractionLayer(
+            factor_pool,
+            default_mode=self.config.signal_mode,
+            cta_weight=self.config.cta_hybrid_weight,
+        ) if self.config.use_signal_abstraction else None
+
         blueprint_builder = PyBrokerExecutorBuilder(
             scoring_engine=self.switch_engine,
             portfolio_manager=self._portfolio,
@@ -308,7 +318,12 @@ class PyBrokerBacktestRunner:
             total_symbols=len(symbols),
             weight_method=getattr(self.config, "weight_method", "risk_parity"),
             risk_estimates_provider=self._estimate_symbol_risk,
+            signal_abstraction=signal_layer,
         )
+
+        # ── 预计算信号（2026-06-14：替代运行时 per-bar 计算） ──
+        blueprint_builder.precompute_signals(df, sub_params)
+
         blueprint_executor = blueprint_builder.build(strategy_params=sub_params)
         strategy.add_execution(
             blueprint_executor, symbols=symbols, indicators=_indicators

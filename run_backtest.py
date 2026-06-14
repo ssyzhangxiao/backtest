@@ -49,6 +49,10 @@ def main() -> None:
         help="启用多策略横截面打分模式（5子策略: 趋势/期限结构/均值回归/波动率突破/复合共振）",
     )
     parser.add_argument(
+        "--cta", action="store_true",
+        help="启用 CTA 6 策略批量回测（carry/vol_mr/donchian/momentum/tsi_garch/pair_trading）",
+    )
+    parser.add_argument(
         "--strategy", default=None,
         help="单策略名称（trend/term_structure/mean_reversion/vol_breakout/composite_resonance/cross_sectional），"
              "默认根据--cross-sectional自动选择",
@@ -98,6 +102,8 @@ def main() -> None:
     print("  多策略量化回测系统 — Pipeline 版")
     if args.cross_sectional:
         print("  模式: 多策略横截面打分")
+    if args.cta:
+        print("  模式: CTA 6 策略批量回测")
     if args.full:
         print("  模式: 完整流程测试")
     print(f"  开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -134,15 +140,20 @@ def main() -> None:
             strategy = args.strategy or ("cross_sectional" if args.cross_sectional else None)
             pipe.optimize(strategy=strategy, symbol=args.symbol)
 
-        # 回测实验
-        pipe.run_backtest(
-            args.experiment,
-            cross_sectional=args.cross_sectional,
-            strategy=args.strategy,
-        )
+        # CTA 批量回测
+        if args.cta:
+            pipe.run_cta()
 
-        # 验证
-        if args.validate:
+        # 横截面实验回测
+        if args.cross_sectional or not args.cta:
+            pipe.run_backtest(
+                args.experiment,
+                cross_sectional=args.cross_sectional,
+                strategy=args.strategy,
+            )
+
+        # 验证（CTA 模式跳过验证）
+        if args.validate and not args.cta:
             best_params = None
             opt_results = pipe.results.get("optimization", {})
             if opt_results and "best_params" in opt_results:

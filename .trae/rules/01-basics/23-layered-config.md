@@ -88,12 +88,19 @@ cfg = BacktestConfig.from_yaml("config.yaml", overrides={"backtest__rebalance_fr
 `load_env_overrides()` 在 `from_yaml()` 内部调用一次，结果冻结到 BacktestConfig 实例。
 后续修改 `os.environ` 不影响已加载的实例（避免 race condition）。
 
-### 规则 23.7：secret 不应进 yaml
+### 规则 23.7：secret 不应进 yaml（用 `${VAR}` 占位符）
 
 API key、密码、token 等敏感值：
-- ✅ 走 env 变量（`QUANT_TQSDK__PHONE=...`）
-- ✅ 走运行时 overrides（程序传入）
-- ❌ 写进 yaml 文件（进 git 仓库就泄露）
+- ✅ 在 config.yaml 中用 `${VAR_NAME}` 占位（如 `tqsdk_phone: ${TQSDK_PHONE}`）
+- ✅ 实际值存 `.env` 文件（gitignored，不会泄露）
+- ✅ 由 `yaml_utils.load_yaml()` 内 `load_dotenv()` + 正则替换自动展开
+- ❌ 直接把明文密码写进 yaml
+
+**历史教训**（2026-06-14）：
+原 `pybroker_data_source.py` 中手工读 config.yaml 拿到的 `${TQSDK_PHONE}` 是字面量，
+因为 YAML 本身不展开 `${VAR}`。必须在 `load_yaml()` 内先 `load_dotenv()`，再做正则
+`re.sub(r"\$\{(\w+)\}", ...)` 替换。仅靠调用方侧 `load_dotenv()` 不可靠（模块导入
+顺序影响）。
 
 ---
 

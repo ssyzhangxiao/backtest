@@ -1609,8 +1609,8 @@ python run_backtest.py --experiment e6
 python run_backtest.py --experiment e7
 ```
 
-- 样本内截止 `in_sample_end_date: '2023-01-01'`
-- **样本外 2023-01-01 至 2026-05-31**（动态滚动：默认过去 3 年样本内 + 最近 1 年样本外，随数据更新自动平移）
+- 样本内截止 `in_sample_end_date: '2024-05-31'`
+- **样本外 2024-06-01 至 2026-05-31**（24 个完整月，每月随 full_end_date 滚动更新）
 - **通过标准**：样本外 Sharpe > 0，最大回撤不超过样本内 1.5 倍
 
 ### 5.3 交易执行参数敏感性
@@ -2127,6 +2127,26 @@ Calmar = 年化收益率 / 最大回撤
 
 ### 2. TqSDK 自动补数据流程
 - 当 `_run_single()` 检测到策略需要 spread/far_close 但缓存数据中无此列时：
+
+---
+
+## 规则33：OOS截止日期 + 年化折算
+
+详见 `.trae/rules/01-basics/33-oos-cutoff-annualized.md`
+
+### 关键要点
+
+1. **OOS 截止日期** = 当前时间上个月底，每月更新 `config.yaml#backtest.full_end_date`
+2. **年化折算**：所有报告中的收益指标必须按回测期年化展示，禁止裸展示合计收益
+3. **动态计算**：从 `config.yaml` 读取日期，不允许代码中硬编码年数
+
+**当前值**（2026-06-14）：
+```yaml
+full_start_date: '2020-01-01'
+full_end_date: '2026-05-31'       # 上个月底
+in_sample_end_date: '2024-05-31'  # OOS 起点 - 1 天
+out_sample_start_date: '2024-06-01' # 倒退 24 个月
+```
   1. 通过 `DataLoader(data_source="tqsdk")` 加载该品种数据
   2. 调用 `identify_dominant_contracts()` → `build_continuous_series()` → `build_spread_pairs()`
   3. 调用 `get_pybroker_df()` 获取含 spread/far_close 列的完整数据

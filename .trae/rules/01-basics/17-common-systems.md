@@ -24,6 +24,8 @@
 - **报告生成**：`core/report_builder.py` - 使用 `generate_report()`
 - **绘图**：`utils/plots.py` - 使用 `PlotManager`
 - **策略注册**：`core/strategy_registry.py` - 使用 `StrategyLibrary`
+- **统一因子池**：`core/execution/factor_pool.py` - 使用 `UnifiedFactorPool` 单入口计算所有信号（24 Alpha + 6 CTA）
+- **信号抽象层**：`core/execution/signal_abstraction.py` - 使用 `SignalAbstractionLayer` 按模式提取信号（横截面/CTA/混合）
 
 **官方入口脚本（必须使用，禁止重复实现）**：
 - **回测**：`run_backtest.py` - 执行回测流程，支持多策略横截面打分模式

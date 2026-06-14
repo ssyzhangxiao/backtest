@@ -7,7 +7,7 @@
   1. 识别参数的稳定区域（plateau），避免尖峰参数选择
   2. 子样本一致性检查（牛/熊/震荡/高波四个环境 Sharpe 不异号）
 
-委托 scripts/run_cta_batch._run_single 执行回测。
+使用 UnifiedFactorPool 统一计算信号并执行回测。
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def run_parameter_plateau(
     Returns:
         DataFrame，每行一个参数组合，含指标和"平原"标记
     """
-    from scripts.run_cta_batch import _run_single
+    from runner.common.single_backtest import _run_single_backtest
 
     core_keys = _CORE_PARAMS.get(strategy_name, [])
     if not core_keys:
@@ -109,7 +109,7 @@ def run_parameter_plateau(
     )
 
     rows: List[Dict[str, Any]] = []
-    base_result = _run_single(
+    base_result = _run_single_backtest(
         symbol, strategy_name, strategy_params,
         entry_threshold=entry_threshold,
         full_start=full_start,
@@ -124,7 +124,7 @@ def run_parameter_plateau(
     base_sharpe = safe_float(base_result.get("sharpe_ratio", 0))
 
     for params in grid:
-        result = _run_single(
+        result = _run_single_backtest(
             symbol, strategy_name, params,
             entry_threshold=entry_threshold,
             full_start=full_start,

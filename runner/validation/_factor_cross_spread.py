@@ -9,6 +9,7 @@ import pandas as pd
 from loguru import logger
 
 from core.ext.factors.alpha_futures.cross_spread import (
+    CHAIN_PAIRS,
     STRONG_IC_PAIRS,
     compute_pair_spread_factor,
 )
@@ -61,7 +62,7 @@ def build_cross_spread_panel(
     for pair_name in pair_names:
         if pair_name not in STRONG_IC_PAIRS:
             continue
-        a_sym, b_sym = STRONG_IC_PAIRS[pair_name]
+        a_sym, b_sym = CHAIN_PAIRS[pair_name]
         sig = compute_pair_signal(data_source, a_sym, b_sym, start, end)
         if sig is None or sig.empty:
             continue

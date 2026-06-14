@@ -7,10 +7,10 @@
   - "fixed": 使用上述固定权重（默认）
   - "rolling_sharpe": 按月度滚动窗口的 Sharpe 比率动态更新权重
 
-每个策略独立运行后提取日收益率序列，按权重融合后计算组合绩效。
-
-委托 scripts/run_cta_batch._run_single 执行回测，利用 pybroker.Strategy 的
-backtest() 方法获取完整 equity_curve 以支持滚动权重更新。
+2026-06-13 重构：
+  - 内部改用 UnifiedFactorPool 统一计算所有信号
+  - 移除对 scripts/run_cta_batch 和 CTAExecutorBuilder 的依赖
+  - 每品种每策略信号从 UnifiedFactorPool 获取，不再单独建 CTAExecutorBuilder
 """
 
 from __future__ import annotations
@@ -22,17 +22,12 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.execution.factor_pool import UnifiedFactorPool
+from core.execution.signal_abstraction import DEFAULT_CTA_WEIGHTS
 from runner.common.utils import sanitize_filename
 
 # ── 固定权重（与用户要求一致） ──
-_DEFAULT_WEIGHTS: Dict[str, float] = {
-    "carry": 0.30,
-    "vol_mean_reversion": 0.30,
-    "donchian_breakout": 0.20,
-    "momentum_ma": 0.10,
-    "tsi_garch": 0.05,
-    "pair_trading": 0.05,
-}
+_DEFAULT_WEIGHTS: Dict[str, float] = DEFAULT_CTA_WEIGHTS.copy()
 
 # 默认6策略及其参数
 _DEFAULT_STRATEGIES: Dict[str, Dict[str, Any]] = {
@@ -49,108 +44,45 @@ _SHARPE_WINDOW = 21  # 月度滚动（约 21 个交易日）
 _SHARPE_MIN_PERIODS = 63  # 最少 3 个月数据才开始更新
 _WEIGHT_SMOOTH = 0.3  # 权重平滑系数（防止突变）
 
+# 品种相关参数（兼容旧 signal_fusion 调用方）
+_WARMUP = 30
+_TEST_START = "2023-01-01"
 
-def _run_single_with_equity(
+
+def _extract_cta_returns(
+    df_pb: pd.DataFrame,
     symbol: str,
-    strategy_name: str,
-    strategy_params: Dict[str, Any],
-    entry_threshold: float = 0.05,
+    signal_series: pd.Series,
     initial_cash: float = 1_000_000,
-    full_start: str = "2020-01-01",
-    test_start: str = "2023-01-01",
+    entry_threshold: float = 0.05,
 ) -> Optional[pd.Series]:
-    """运行单个策略回测并返回日收益率序列。"""
-    try:
-        import pybroker
-        from pybroker import StrategyConfig
-    except ImportError:
+    """从 CTA 信号序列提取日收益率（模拟简单 CTA 执行）。
+
+    用信号方向做每日调仓，信号绝对值需超过 entry_threshold 才开仓。
+    返回日收益率序列。
+    """
+    if signal_series is None or len(signal_series) < 20:
         return None
+    # 对齐日期
+    df = df_pb.copy()
+    df = df.sort_values("date").reset_index(drop=True)
+    # 信号右对齐到 DataFrame 尾部
+    sig = signal_series.values
+    if len(sig) > len(df):
+        sig = sig[-len(df):]
+    elif len(sig) < len(df):
+        pad = np.full(len(df) - len(sig), np.nan)
+        sig = np.concatenate([pad, sig])
 
-    from core.engine.cta_executor_builder import CTAExecutorBuilder
-    from core.strategies.cta.registry import get_cta_strategy
-
-    # 加载数据
-    from scripts.run_cta_batch import _load_symbol_data, _WARMUP, _STRATEGY_EXIT_PARAMS, _DEFAULT_EXIT_PARAMS
-
-    df = _load_symbol_data(symbol)
-    if df is None:
-        return None
-    from core.engine.pybroker_data_source import PyBrokerDataSource
-    ds = PyBrokerDataSource(df)
-    try:
-        symbol_data = ds.for_symbol(symbol)
-    except ValueError:
-        return None
-    df_pb = symbol_data.to_pybroker_df()
-    if len(df_pb) < 100:
-        return None
-
-    try:
-        cta = get_cta_strategy(strategy_name, strategy_params)
-    except ValueError:
-        return None
-
-    # 注入 spread 数据
-    if "spread" in df_pb.columns:
-        spread_arr = df_pb["spread"].to_numpy(dtype=float, copy=True)
-        cta.set_state(symbol, "_spread", spread_arr)
-    elif "far_close" in df_pb.columns:
-        far = df_pb["far_close"].to_numpy(dtype=float, copy=True)
-        close_val = df_pb["close"].to_numpy(dtype=float, copy=True)
-        spread_synth = np.where(
-            np.isfinite(far) & np.isfinite(close_val) & (close_val > 0),
-            (far - close_val) / close_val * 100, np.nan,
-        )
-        cta.set_state(symbol, "_spread", spread_synth)
-
-    # 退出参数
-    ep = {**(dict(_DEFAULT_EXIT_PARAMS))}
-    if strategy_name in _STRATEGY_EXIT_PARAMS:
-        for k, v in _STRATEGY_EXIT_PARAMS[strategy_name].items():
-            ep[k] = v
-
-    builder = CTAExecutorBuilder(
-        cta_strategy=cta,
-        entry_threshold=entry_threshold,
-        max_position_pct=0.3,
-        max_holding_days=ep["max_holding_days"],
-        atr_stop_multiple=ep["atr_stop_multiple"],
-        atr_window=ep["atr_window"],
-        stop_loss_pct=ep["stop_loss_pct"],
-        global_risk_pct=ep["global_risk_pct"],
-        risk_per_trade=ep.get("risk_per_trade", 0.01),
-        target_vol=ep.get("target_vol", 0.0),
-    )
-    executor_fn = builder.build()
-
-    pb_config = StrategyConfig(initial_cash=initial_cash)
-    strategy = pybroker.Strategy(df_pb, full_start, test_start, config=pb_config)
-    strategy.add_execution(executor_fn, symbols=[symbol])
-
-    try:
-        result = strategy.backtest(warmup=_WARMUP)
-    except ValueError as e:
-        logger.warning("%s %s 回测失败: %s", symbol, strategy_name, e)
-        return None
-
-    # 提取 equity 序列
-    if hasattr(result, "equity") and result.equity is not None:
-        eq = result.equity
-        if isinstance(eq, pd.DataFrame) and "equity" in eq.columns:
-            eq_sorted = eq.sort_values("date")
-            returns = eq_sorted["equity"].pct_change().dropna()
-            returns.name = strategy_name
-            return returns
-    if result.trades is not None and not result.trades.empty:
-        # fallback: 从 trades 构造
-        trades = result.trades
-        if "exit_date" in trades.columns and "pnl" in trades.columns:
-            daily = trades.groupby("exit_date")["pnl"].sum()
-            daily = daily / initial_cash
-            daily.name = strategy_name
-            return daily
-
-    return None
+    df["signal"] = sig
+    df["position"] = np.where(df["signal"] > entry_threshold, 1,
+                              np.where(df["signal"] < -entry_threshold, -1, 0))
+    df["ret"] = df["close"].pct_change()
+    df["strategy_ret"] = df["position"].shift(1) * df["ret"]
+    df["equity"] = (1 + df["strategy_ret"].fillna(0)).cumsum()
+    returns = df["strategy_ret"].dropna()
+    returns.name = symbol
+    return returns if len(returns) > 20 else None
 
 
 def _compute_rolling_sharpe_weights(
@@ -159,7 +91,6 @@ def _compute_rolling_sharpe_weights(
     min_periods: int = _SHARPE_MIN_PERIODS,
 ) -> Dict[str, np.ndarray]:
     """按月度滚动窗口计算各策略 Sharpe 并归一化为权重。"""
-    # 对齐日期
     dfs = []
     for name, sr in returns_dict.items():
         sr = sr.copy()
@@ -169,21 +100,17 @@ def _compute_rolling_sharpe_weights(
     if len(aligned) < min_periods + window:
         return {}
 
-    # 滚动 Sharpe
     rolling_sharpe = aligned.rolling(window, min_periods=min_periods).apply(
         lambda x: (x.mean() / x.std() * np.sqrt(252)) if x.std() > 1e-10 else 0.0,
         raw=False,
     )
     rolling_sharpe = rolling_sharpe.fillna(0.0)
 
-    # 归一化权重（softmax 风格）
     weights_dict: Dict[str, np.ndarray] = {}
     for col in rolling_sharpe.columns:
         s = rolling_sharpe[col].values
-        # 取正部分
         s_pos = np.maximum(s, 0.0)
         weights_dict[col] = s_pos
-
     return weights_dict
 
 
@@ -200,6 +127,9 @@ def run_signal_fusion(
 ) -> pd.DataFrame:
     """
     主入口：多策略信号融合。
+
+    使用 UnifiedFactorPool 统一计算所有 CTA 信号，
+    不再依赖旧的 CTAExecutorBuilder 和 scripts/run_cta_batch 数据加载。
 
     Args:
         symbols: 品种列表
@@ -224,18 +154,54 @@ def run_signal_fusion(
 
     all_rows: List[Dict[str, Any]] = []
 
+    # 每个品种创建一次 UnifiedFactorPool（内部缓存）
+    pool = UnifiedFactorPool()
+
     for symbol in symbols:
         logger.info(f"[信号融合] 品种: {symbol} 模式: {mode}")
+
+        # 通过 core.data.DataLoader（规则 17 统一数据加载器）加载数据
+        try:
+            from core.data import DataLoader
+            loader = DataLoader(data_source="tqsdk", symbols=[symbol])
+            loader.load_data(show_progress=False)
+            loader.identify_dominant_contracts()
+            loader.build_continuous_series()
+            df = loader.get_pybroker_df()
+        except Exception:
+            # fallback: 尝试 CSV 模式
+            try:
+                from core.data import DataLoader
+                import os
+                data_dir = os.environ.get("DATA_DIR", "data")
+                loader = DataLoader(data_source="csv", data_dir=data_dir)
+                loader.load_data(show_progress=False)
+                df = loader.get_pybroker_df()
+            except Exception:
+                logger.warning(f"  {symbol}: 无法加载数据（tqsdk/csv 均失败）")
+                continue
+
+        if df is None or len(df) < 100:
+            logger.warning(f"  {symbol}: 数据不足")
+            continue
+
+        # 用 UnifiedFactorPool 一次性计算所有信号
+        try:
+            signal_df = pool.compute_all(df, symbol, strategy_params=strategies)
+        except Exception as e:
+            logger.warning(f"  {symbol}: 因子计算失败 {e}")
+            continue
+
         returns_dict: Dict[str, pd.Series] = {}
         metrics_dict: Dict[str, Dict[str, float]] = {}
 
-        for sname, sparams in strategies.items():
-            sr = _run_single_with_equity(
-                symbol, sname, sparams,
-                entry_threshold=entry_threshold,
+        for sname in strategies:
+            if sname not in signal_df.columns:
+                continue
+            sr = _extract_cta_returns(
+                df, symbol, signal_df[sname],
                 initial_cash=initial_cash,
-                full_start=full_start,
-                test_start=test_start,
+                entry_threshold=entry_threshold,
             )
             if sr is not None and len(sr) > 20:
                 returns_dict[sname] = sr
@@ -252,10 +218,8 @@ def run_signal_fusion(
 
         # ── 融合 ──
         if mode == "rolling_sharpe" and len(returns_dict) > 1:
-            # 滚动夏普权重
             W = _compute_rolling_sharpe_weights(returns_dict)
             if W and len(next(iter(W.values()))) > 10:
-                # 对齐日期后计算加权组合收益
                 aligned = pd.concat(
                     [sr.copy().rename(name) for name, sr in returns_dict.items()],
                     axis=1, join="inner",
@@ -301,7 +265,6 @@ def run_signal_fusion(
         all_rows.append(row)
 
         if output_dir:
-            # 保存融合净值
             if combined_returns is not None and len(combined_returns) > 5:
                 eq_df = pd.DataFrame({
                     "date": combined_returns.index,
@@ -331,7 +294,6 @@ def _combine_fixed(
     if aligned.empty:
         return pd.Series(dtype=float)
 
-    # 仅用有权重的策略
     cols = [c for c in aligned.columns if c in weights]
     if not cols:
         return pd.Series(dtype=float)

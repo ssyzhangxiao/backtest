@@ -51,6 +51,10 @@ def build_backtest_config(config: Dict[str, Any]) -> BacktestConfig:
         use_cross_section=bool(bt_cfg.get("use_cross_section", True)),
         use_rank_score=bool(bt_cfg.get("use_rank_score", True)),
         use_rolling_ic=bool(bt_cfg.get("use_rolling_ic", True)),
+        # CTA / 信号抽象层配置
+        use_signal_abstraction=bool(bt_cfg.get("use_signal_abstraction", False)),
+        signal_mode=str(bt_cfg.get("signal_mode", "cross_sectional")),
+        cta_hybrid_weight=float(bt_cfg.get("cta_hybrid_weight", 0.5)),
     )
     bt_config.rebalance_days = bt_cfg.get("rebalance_freq", 3)
     return bt_config

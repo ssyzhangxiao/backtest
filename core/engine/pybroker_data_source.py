@@ -25,6 +25,14 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
+# 自动加载 .env 文件（规则 23：分层配置 — env 覆盖 yaml）
+# 必须在 os.environ.get("TQSDK_PHONE") 前调用
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,18 +162,18 @@ def create_hybrid_data_source(
     phone = phone or os.environ.get("TQSDK_PHONE")
     password = password or os.environ.get("TQSDK_PASSWORD")
     if not phone or not password:
+        # 兜底：从 config.yaml data 段读取（依赖 load_yaml 已展开 ${VAR}）
         try:
-            import yaml as _yaml
-            _cfg_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                "config.yaml",
+            from core.config.yaml_utils import load_yaml as _load_yaml
+            _cfg = _load_yaml(
+                os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    "config.yaml",
+                )
             )
-            if os.path.exists(_cfg_path):
-                with open(_cfg_path, "r", encoding="utf-8") as _f:
-                    _cfg = _yaml.safe_load(_f)
-                _data_cfg = _cfg.get("data", {})
-                phone = phone or _data_cfg.get("tqsdk_phone")
-                password = password or _data_cfg.get("tqsdk_password")
+            _data_cfg = _cfg.get("data", {})
+            phone = phone or _data_cfg.get("tqsdk_phone")
+            password = password or _data_cfg.get("tqsdk_password")
         except Exception:
             pass
 

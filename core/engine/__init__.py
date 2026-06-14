@@ -17,12 +17,10 @@ from core.engine.switch_engine import (
     RebalanceDecision,
     RebalanceReason,
 )
-from core.validation.cross_validator import CrossValidator
 
 __all__ = [
     "FactorScoringEngine",
     "ScoringConfig",
     "RebalanceDecision",
     "RebalanceReason",
-    "CrossValidator",
 ]

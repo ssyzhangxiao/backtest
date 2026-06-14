@@ -64,17 +64,36 @@ def load_yaml(path: str) -> dict:
     """
     从 YAML 文件加载字典（不存在时返回空字典）。
 
+    支持 `${VAR_NAME}` 环境变量替换：
+      - `tqsdk_phone: ${TQSDK_PHONE}` → 展开为 `os.environ["TQSDK_PHONE"]`
+      - 变量不存在时保留原样（不抛错）
+      - 自动加载 .env 文件（调用 `load_dotenv()`）
+
     Args:
         path: YAML 文件路径
 
     Returns:
         解析后的字典
     """
+    # 确保 .env 已加载，使 ${VAR} 展开生效
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv()
+    except ImportError:
+        pass
+    import os, re
+
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            text = f.read()
     except FileNotFoundError:
         return {}
+
+    def _replace_var(m: re.Match) -> str:
+        return os.environ.get(m.group(1), m.group(0))
+
+    text = re.sub(r"\$\{(\w+)\}", _replace_var, text)
+    return yaml.safe_load(text) or {}
 
 
 __all__ = ["convert_numpy_types", "dump_yaml", "load_yaml"]

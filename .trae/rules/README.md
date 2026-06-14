@@ -18,7 +18,8 @@
 │   ├── 17-common-systems.md
 │   ├── 18-pipeline.md
 │   ├── 19-dependencies.md
-│   └── 21-ext-directory.md
+│   ├── 21-ext-directory.md
+│   └── 32-factor-pool.md
 ├── 02-engine/             # 回测引擎
 │   ├── 01-no-fallback.md
 │   └── 26-cross-validation.md
@@ -62,6 +63,7 @@
 | 19 | 依赖方向检查 — 禁止反向依赖 | [01-basics/19-dependencies.md](./01-basics/19-dependencies.md) |
 | 20 | 根目录脚本迁移 — run_*.py 必须收敛到 Pipeline | [01-basics/20-root-scripts-migration.md](./01-basics/20-root-scripts-migration.md) |
 | 21 | 扩展目录 ext/ — 借鉴 QuantML-Qlib 按需加载 + 工厂注册 | [01-basics/21-ext-directory.md](./01-basics/21-ext-directory.md) |
+| 32 | 统一因子池架构 — 所有信号单入口，抽象层按模式提取 | [01-basics/32-factor-pool.md](./01-basics/32-factor-pool.md) |
 
 ### 回测引擎
 
@@ -129,7 +131,7 @@
 
 ---
 
-*最后更新：2026-06-06*
+*最后更新：2026-06-13*
 *参考指南：商品期货量化模型改造指南.docx*
 *参考指南：商品期货 Alpha 因子库工程化重构提示词.docx*
 *相关知识文档：../knowledges/20260602_001_workflow_strategy-enhancement-roadmap.md*

@@ -1,4 +1,7 @@
 """
+⚠️ 已废弃（2026-06-13）— 信号计算已统一到 UnifiedFactorPool。
+保留作为参考，新功能请使用 core/execution/factor_pool.py。
+
 单品种 CTA 回测入口脚本。
 
 平行模式（Step 1）：为 2-3 个品种独立运行 CTA 策略，

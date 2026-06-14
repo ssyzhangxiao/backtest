@@ -146,16 +146,13 @@ class TestSharedState:
 
     def test_reset_on_new_date(self):
         state = PyBrokerExecutorSharedState(total_symbols=3)
-        state.collected_symbols_set = {"RB", "CU"}
         state.finalized = True
         state.target_weights = {"RB": 0.5}
 
-        # 模拟新调仓日重置
-        state.collected_symbols_set = set()
+        # 模拟新调仓日重置（预计算模式：不再依赖 collected_symbols_set）
         state.finalized = False
         state.target_weights = {}
 
-        assert state.collected_symbols_set == set()
         assert state.finalized is False
 
 
@@ -192,10 +189,10 @@ class TestBuilder:
 
 
 class TestCrossSectionFlow:
-    """横截面收集与 finalize 测试。"""
+    """横截面收集与 finalize 测试（2026-06-14 改进：预计算 + 时间驱动）。"""
 
     def test_collect_all_symbols_then_finalize(self):
-        """3 品种全部访问后应触发 finalize。"""
+        """蓝图模式：3 品种全部访问后应触发 finalize。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=3)
         builder = PyBrokerExecutorBuilder(
             scoring_engine=scoring_engine,
@@ -238,7 +235,7 @@ class TestCrossSectionFlow:
         assert builder.state.collected_symbols_set == set()
 
     def test_new_date_resets_state(self):
-        """新调仓日应重置 collected_symbols_set。"""
+        """新调仓日应重置状态。"""
         cfg, scoring_engine, portfolio, risk_controller = _make_components(total_symbols=2)
         builder = PyBrokerExecutorBuilder(
             scoring_engine=scoring_engine,

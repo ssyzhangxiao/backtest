@@ -18,6 +18,85 @@ from core.execution._result_types import PyBrokerResult
 from utils.metrics import MetricsCalculator
 
 
+def _fill_missing_equity_from_csv(
+    output_dir: Path,
+    strategies_data: Dict[str, Dict[str, Any]],
+) -> None:
+    """
+    为没有净值曲线的策略子项（如 E1 子策略）从 equity CSV 文件补充数据。
+
+    E1 会为每个品种×策略写入独立的 equity CSV 文件（e1_equity_{symbol}_{strategy}.csv）。
+    此函数按策略名称聚合这些文件，生成平均净值曲线。
+
+    Args:
+        output_dir: 输出目录
+        strategies_data: 策略数据字典（原地修改）
+    """
+    from collections import defaultdict
+
+    # 收集所有 e1_equity_* 文件，按策略分组
+    strategy_curves: Dict[str, List[pd.DataFrame]] = defaultdict(list)
+    for eq_file in sorted(output_dir.glob("e1_equity_*.csv")):
+        stem = eq_file.stem  # e1_equity_CZCE_CF_trend
+        # 去掉前缀 "e1_equity_"
+        suffix = stem[len("e1_equity_"):]  # CZCE_CF_trend
+        # 策略名是最后一个下划线后的部分
+        if "_" not in suffix:
+            continue
+        # 策略名 = suffix 中最后一个 _ 之后的部分
+        parts = suffix.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        strategy_name = parts[1]  # trend
+        try:
+            df = pd.read_csv(eq_file)
+            if "equity" not in df.columns or df.empty:
+                continue
+            strategy_curves[strategy_name].append(df)
+        except Exception:
+            continue
+
+    # 为 strategies_data 中缺少 equity 的策略补充数据
+    for name, sd in strategies_data.items():
+        if sd.get("equity"):
+            continue  # 已有曲线
+        curves = strategy_curves.get(name)
+        if not curves:
+            continue
+
+        try:
+            # 对齐日期：取所有曲线中日期的并集
+            date_sets = [set(c["date"].astype(str)) for c in curves]
+            all_dates = sorted(set.union(*date_sets)) if date_sets else []
+            if not all_dates:
+                continue
+
+            # 对每个日期，取所有曲线的等权均值
+            date_to_equity: Dict[str, List[float]] = {d: [] for d in all_dates}
+            for c in curves:
+                c = c.drop_duplicates(subset=["date"])
+                eq_dict = dict(zip(c["date"].astype(str), c["equity"].astype(float)))
+                for d in all_dates:
+                    if d in eq_dict:
+                        date_to_equity[d].append(eq_dict[d])
+
+            agg_equity: List[float] = []
+            agg_dates: List[str] = []
+            for d in all_dates:
+                vals = date_to_equity[d]
+                if vals:
+                    agg_equity.append(sum(vals) / len(vals))
+                    agg_dates.append(d)
+
+            if agg_equity:
+                strategies_data[name]["equity"] = agg_equity
+                strategies_data[name]["dates"] = agg_dates
+                logger.debug(f"已从 CSV 补充 {name} 净值曲线 ({len(agg_dates)} 天)")
+        except Exception as e:
+            logger.warning(f"聚合 {name} 净值曲线失败: {e}")
+            continue
+
+
 def generate_html_report(
     config: Dict[str, Any],
     results: Dict[str, Any],
@@ -98,6 +177,12 @@ def generate_html_report(
         _pending_factor5_link = link_html
     else:
         _pending_factor5_link = None
+
+    # ── 为没有净值曲线的策略补充 equity 数据 ──
+    try:
+        _fill_missing_equity_from_csv(output_dir, strategies_data)
+    except Exception as e:
+        logger.warning(f"补充 equity 曲线失败（非致命）: {e}")
 
     if subtitle is None:
         subtitle = f"PyBroker 多策略回测 · {datetime.now().strftime('%Y-%m-%d')}"

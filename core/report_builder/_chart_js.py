@@ -48,17 +48,17 @@ var reportData = $chart_data_json;
     var keys = Object.keys(ad);
     if (!keys.length) return;
     var DD_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var DD_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var DD_BG = {
-        E1_trend: 'rgba(59,130,246,0.08)', E1_term_structure: 'rgba(245,158,11,0.08)',
-        E1_mean_reversion: 'rgba(139,92,246,0.08)', E1_vol_breakout: 'rgba(6,182,212,0.08)',
-        E2_Fusion: 'rgba(16,185,129,0.08)', E4_Switching: 'rgba(239,68,68,0.08)'
+        trend: 'rgba(59,130,246,0.08)', term_structure: 'rgba(245,158,11,0.08)',
+        mean_reversion: 'rgba(139,92,246,0.08)', vol_breakout: 'rgba(6,182,212,0.08)',
+        cross_sectional: 'rgba(16,185,129,0.08)', fusion: 'rgba(16,185,129,0.08)'
     };
     var firstKey = keys[0];
     var labels = ad[firstKey].dates;
@@ -205,12 +205,12 @@ var reportData = $chart_data_json;
     var keys = Object.keys(ahm);
     if (!keys.length) return;
     var HM_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var HM_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
     var container = document.getElementById('allHeatmapsContainer');
@@ -296,12 +296,12 @@ var reportData = $chart_data_json;
     var keys = Object.keys(ars);
     if (!keys.length) return;
     var RS_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var RS_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var firstKey = keys[0];
     var labels = ars[firstKey].dates;
@@ -340,17 +340,17 @@ var reportData = $chart_data_json;
     var keys = Object.keys(ard);
     if (!keys.length) return;
     var RDD_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var RDD_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var RDD_BG = {
-        E1_trend: 'rgba(59,130,246,0.06)', E1_term_structure: 'rgba(245,158,11,0.06)',
-        E1_mean_reversion: 'rgba(139,92,246,0.06)', E1_vol_breakout: 'rgba(6,182,212,0.06)',
-        E2_Fusion: 'rgba(16,185,129,0.06)', E4_Switching: 'rgba(239,68,68,0.06)'
+        trend: 'rgba(59,130,246,0.06)', term_structure: 'rgba(245,158,11,0.06)',
+        mean_reversion: 'rgba(139,92,246,0.06)', vol_breakout: 'rgba(6,182,212,0.06)',
+        cross_sectional: 'rgba(16,185,129,0.06)', fusion: 'rgba(16,185,129,0.06)'
     };
     var firstKey = keys[0];
     var labels = ard[firstKey].dates;
@@ -419,12 +419,12 @@ var reportData = $chart_data_json;
     var keys = Object.keys(aie);
     if (!keys.length) return;
     var IS_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var IS_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var firstKey = keys[0];
     var labels = aie[firstKey].dates;
@@ -462,12 +462,12 @@ var reportData = $chart_data_json;
     var keys = Object.keys(aoe);
     if (!keys.length) return;
     var OS_COLORS = {
-        E1_trend: '#3b82f6', E1_term_structure: '#f59e0b', E1_mean_reversion: '#8b5cf6',
-        E1_vol_breakout: '#06b6d4', E2_Fusion: '#10b981', E4_Switching: '#ef4444'
+        trend: '#3b82f6', term_structure: '#f59e0b', mean_reversion: '#8b5cf6',
+        vol_breakout: '#06b6d4', cross_sectional: '#10b981', fusion: '#10b981'
     };
     var OS_LABELS = {
-        E1_trend: '趋势策略', E1_term_structure: '期限结构', E1_mean_reversion: '均值回归',
-        E1_vol_breakout: '波动率突破', E2_Fusion: '融合策略', E4_Switching: '策略切换'
+        trend: '趋势策略', term_structure: '期限结构', mean_reversion: '均值回归',
+        vol_breakout: '波动率突破', cross_sectional: '横截面打分', fusion: '融合策略'
     };
     var firstKey = keys[0];
     var labels = aoe[firstKey].dates;

@@ -110,6 +110,16 @@ class BacktestConfig:
     use_new_factors: bool = True
     """是否启用新 24 因子引擎（替代旧 basic_factors）。P0 整改补全：to_yaml 写入。"""
 
+    # ── 统一因子池配置（规则32，2026-06-14） ──
+    use_signal_abstraction: bool = False
+    """是否启用 SignalAbstractionLayer（统一因子池模式）。"""
+
+    signal_mode: str = "cross_sectional"
+    """信号模式：cross_sectional / cta / hybrid。"""
+
+    cta_hybrid_weight: float = 0.5
+    """混合模式下 CTA 信号权重（0~1），对应 cross_section_z 权重为 1 - cta_hybrid_weight。"""
+
     weight_method: str = "risk_parity"
     """权重分配方法：equal_weight / risk_parity / score_weighted / top_n。P0 整改补全。"""
 
@@ -241,6 +251,9 @@ class BacktestConfig:
             signal_merge_method=bt.get("signal_merge_method", "equal_weight"),
             use_sub_strategies=bool(bt.get("use_sub_strategies", True)),
             use_new_factors=bool(bt.get("use_new_factors", True)),
+            use_signal_abstraction=bool(bt.get("use_signal_abstraction", False)),
+            signal_mode=str(bt.get("signal_mode", "cross_sectional")),
+            cta_hybrid_weight=float(bt.get("cta_hybrid_weight", 0.5)),
             # 品种与策略
             symbols=raw.get(
                 "symbols", ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]
@@ -249,6 +262,7 @@ class BacktestConfig:
                 s["name"]
                 for s in raw.get("strategies", [])
                 if isinstance(s, dict) and "name" in s
+                and s["name"] != "cross_sectional"  # 模式标志，非子策略名
             ],
             # 输出与风控
             output_dir=raw.get("output", {}).get("output_dir", "output_validation"),
@@ -300,6 +314,9 @@ class BacktestConfig:
             "use_sub_strategies": self.use_sub_strategies,
             "use_new_factors": self.use_new_factors,
             "cross_validate": self.cross_validate,
+            "use_signal_abstraction": self.use_signal_abstraction,
+            "signal_mode": self.signal_mode,
+            "cta_hybrid_weight": self.cta_hybrid_weight,
         }
 
         raw["factor_weights"] = self.factor_weights
