@@ -74,7 +74,11 @@ class SignalMode(Enum):
     """单品种 CTA 模式：提取 6 策略信号"""
 
     HYBRID = "hybrid"
-    """混合模式：横截面排名 × CTA 时序互补"""
+    """混合模式：横截面排名 × CTA 时序互补（线性加权）"""
+
+    HYBRID_DYNAMIC = "hybrid_dynamic"
+    """动态混合模式：横截面作为 CTA 的仓位缩放因子（不减仓不减收益，
+    异号时减仓，方向由 CTA 决定）。"""
 
 
 class SignalAbstractionLayer:
@@ -88,12 +92,22 @@ class SignalAbstractionLayer:
         factor_pool: UnifiedFactorPool,
         default_mode: str = "cross_sectional",
         cta_weight: float = 0.5,
+        xs_position_base: float = 0.5,
+        xs_position_ceiling: float = 1.0,
+        xs_opposite_penalty: float = 0.5,
     ) -> None:
         self._pool = factor_pool
         self.mode = default_mode
         """当前信号模式（可运行时切换）。"""
         self.cta_weight = cta_weight
         """混合模式下 CTA 信号权重（0~1）。"""
+        # 动态混合模式参数（方向二：横截面作为仓位缩放因子）
+        self.xs_position_base = xs_position_base
+        """横截面信号弱时 CTA 仓位缩放下限（0~1）。"""
+        self.xs_position_ceiling = xs_position_ceiling
+        """横截面信号强时 CTA 仓位缩放上限（0~1）。"""
+        self.xs_opposite_penalty = xs_opposite_penalty
+        """CTA 与横截面异号时的额外仓位惩罚系数（0~1）。"""
 
     # ────────────────────────────────────────────────────────────
     # 模式 A：横截面信号
@@ -121,7 +135,10 @@ class SignalAbstractionLayer:
             {子策略名: 得分 [-1, 1]}
         """
         signals = self._pool.compute_signals_for_bar(
-            ohlcv, symbol, bar_idx, strategy_params,
+            ohlcv,
+            symbol,
+            bar_idx,
+            strategy_params,
         )
         return {
             name: float(np.clip(signals.get(name, 0.0), -1.0, 1.0))
@@ -189,7 +206,7 @@ class SignalAbstractionLayer:
         cross_section_z: float,
         cta_weight: Optional[float] = None,
     ) -> float:
-        """混合信号：横截面排名与 CTA 时序信号的互补组合。
+        """混合信号：横截面排名与 CTA 时序信号的互补组合（线性加权）。
 
         逻辑：
           - cross_section_z > 0 → 品种相对偏强，cross_section_z < 0 → 偏弱
@@ -211,6 +228,57 @@ class SignalAbstractionLayer:
         cta_sig = self.get_cta_composite_signal(symbol, ohlcv, bar_idx)
         blended = (1.0 - cw) * cross_section_z + cw * cta_sig
         return float(np.clip(blended, -1.0, 1.0))
+
+    def get_hybrid_signal_dynamic(
+        self,
+        symbol: str,
+        ohlcv: pd.DataFrame,
+        bar_idx: int,
+        cross_section_z: float,
+    ) -> float:
+        """动态混合信号：横截面作为 CTA 的仓位缩放因子（方向二实现）。
+
+        设计思想（2026-06-15）：
+          - 方向完全由 CTA 信号决定（保留趋势跟随能力）
+          - 横截面信号只影响仓位大小：信号强→满仓，信号弱→半仓
+          - CTA 与横截面异号时（趋势末期 / 反向市）→ 额外减仓，充当过滤器
+          - 不要求横截面本身盈利，只需其绝对值能反映市场分歧/状态
+
+        公式：
+          cross_strength = clip(|z|, 0, 1)          # 横截面强度（0~1）
+          position_scale = base + (ceiling-base)*cross_strength
+          if cta_sig * z < 0:                       # 异号
+              position_scale *= opposite_penalty
+          final_signal = cta_sig * position_scale
+
+        默认参数下：
+          - 横截面无信息时，CTA 仓位 = 0.5（半仓）
+          - 横截面强且与 CTA 同向时，CTA 仓位 = 1.0（满仓）
+          - 异号时，CTA 仓位 = 0.25（半仓的半仓）
+
+        Args:
+            symbol: 品种代码
+            ohlcv: OHLCV DataFrame
+            bar_idx: 当前 bar 索引
+            cross_section_z: 来自 FactorScoringEngine 的品种横截面 z-score
+
+        Returns:
+            仓位缩放后的信号，符号同 cta_sig，幅度 ≤ |cta_sig|
+        """
+        cta_sig = self.get_cta_composite_signal(symbol, ohlcv, bar_idx)
+        # 横截面强度（裁剪到 [0, 1]）
+        cross_strength = float(np.clip(abs(cross_section_z), 0.0, 1.0))
+        # 基础仓位缩放
+        position_scale = (
+            self.xs_position_base
+            + (self.xs_position_ceiling - self.xs_position_base) * cross_strength
+        )
+        # CTA 与横截面异号 → 额外减仓
+        if float(cta_sig) * float(cross_section_z) < 0.0:
+            position_scale *= self.xs_opposite_penalty
+        # 缩放后的信号：方向由 CTA 决定
+        scaled = float(cta_sig) * float(np.clip(position_scale, 0.0, 1.0))
+        return float(np.clip(scaled, -1.0, 1.0))
 
     # ────────────────────────────────────────────────────────────
     # 工具

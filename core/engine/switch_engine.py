@@ -276,9 +276,10 @@ class FactorScoringEngine:
         self,
         symbol: str,
         factor_scores: Optional[Dict[str, float]] = None,
+        clip_output: bool = True,
     ) -> float:
         """
-        计算指定品种的综合得分（-1..1）。
+        计算指定品种的综合得分（默认 [-1, 1]，可关闭裁剪）。
 
         数据来源优先级：
         1. 排名叠加结果（_rank_scores）—— 当 use_rank_score=True 时
@@ -288,9 +289,11 @@ class FactorScoringEngine:
         Args:
             symbol: 品种代码
             factor_scores: 备选因子得分（仅当无 finalized/rank 数据时使用）
+            clip_output: 是否裁剪到 [-1, 1]。方向二 dynamic 模式需要连续变化的
+                强度信号（用作 cross_strength），应传 False。
 
         Returns:
-            综合得分，范围 [-1, 1]
+            综合得分；clip_output=True 时范围 [-1, 1]，否则为原始 z-score 加权值
         """
         # 1. 排名叠加得分优先
         if self.config.use_rank_score and self._rank_scores:

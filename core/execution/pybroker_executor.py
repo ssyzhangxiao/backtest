@@ -49,6 +49,7 @@ _logger = logging.getLogger(__name__)
 
 try:
     from pybroker import ExecContext
+
     PYBROKER_AVAILABLE = True
 except ImportError:
     PYBROKER_AVAILABLE = False
@@ -120,13 +121,15 @@ def _ohlcv_from_ctx(ctx: Any) -> Optional[pd.DataFrame]:
     n = len(close)
     try:
         import pandas as pd
+
         dates = getattr(ctx, "date", None)
         if dates is None:
             # 回退：用索引模拟日期
             dates = pd.date_range(end=pd.Timestamp(ctx.dt), periods=n)
         result = {
-            "date": dates if hasattr(dates, "__len__") and len(dates) == n
-                    else pd.date_range(end=pd.Timestamp(ctx.dt), periods=n),
+            "date": dates
+            if hasattr(dates, "__len__") and len(dates) == n
+            else pd.date_range(end=pd.Timestamp(ctx.dt), periods=n),
             "open": getattr(ctx, "open", close),
             "high": getattr(ctx, "high", close),
             "low": getattr(ctx, "low", close),
@@ -136,7 +139,9 @@ def _ohlcv_from_ctx(ctx: Any) -> Optional[pd.DataFrame]:
         if vol is not None:
             result["volume"] = vol
         df = pd.DataFrame(result)
-        if "date" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        if "date" in df.columns and not pd.api.types.is_datetime64_any_dtype(
+            df["date"]
+        ):
             df["date"] = pd.to_datetime(df["date"])
         return df
     except Exception:  # noqa: BLE001
@@ -171,6 +176,8 @@ class PyBrokerExecutorSharedState:
     prev_factor_scores: Dict[str, Dict[str, float]] = field(default_factory=dict)
     # 历史调仓日权重
     last_weights: Dict[str, float] = field(default_factory=dict)
+    # 方向二 dynamic 模式下每品种的仓位缩放系数 [0, 1]
+    dynamic_pos_scales: Dict[str, float] = field(default_factory=dict)
 
     # ── 止损追踪（显式 tracking，不用反向推算） ──
     entry_price: Dict[str, float] = field(default_factory=dict)
@@ -258,14 +265,17 @@ class PyBrokerExecutorBuilder:
         strategy_params = strategy_params or {}
         symbols = sorted(full_df["symbol"].unique().tolist())
         _logger.info(
-            "预计算 %d 个品种的全部信号...", len(symbols),
+            "预计算 %d 个品种的全部信号...",
+            len(symbols),
         )
         for sym in symbols:
             sym_df = full_df[full_df["symbol"] == sym].reset_index(drop=True)
             if len(sym_df) < 30:
                 continue
             signal_df = self.signal_abstraction.pool.compute_all(
-                sym_df, sym, strategy_params,
+                sym_df,
+                sym,
+                strategy_params,
             )
             cache: Dict[int, Dict[str, float]] = {}
             for bar_idx in range(len(signal_df)):
@@ -280,7 +290,10 @@ class PyBrokerExecutorBuilder:
             # CTA / HYBRID 模式：预计算 CTA 合成信号
             if self.signal_abstraction.mode in ("cta", "hybrid"):
                 from core.execution.factor_pool import CTA_SIGNAL_NAMES
-                active_cta = [k for k in strategy_params if k in CTA_SIGNAL_NAMES] or CTA_SIGNAL_NAMES
+
+                active_cta = [
+                    k for k in strategy_params if k in CTA_SIGNAL_NAMES
+                ] or CTA_SIGNAL_NAMES
                 equal_w = 1.0 / len(active_cta) if active_cta else 0.0
                 for bar_idx in list(cache.keys()):
                     signals = cache[bar_idx]
@@ -289,7 +302,9 @@ class PyBrokerExecutorBuilder:
                         if cname in signals:
                             cta_val += equal_w * signals[cname]
                     if active_cta:
-                        cache[bar_idx]["_cta_composite"] = float(np.clip(cta_val, -1.0, 1.0))
+                        cache[bar_idx]["_cta_composite"] = float(
+                            np.clip(cta_val, -1.0, 1.0)
+                        )
             self._signal_cache[sym] = cache
         _logger.info("预计算完成: %d 个品种", len(self._signal_cache))
 
@@ -345,14 +360,18 @@ class PyBrokerExecutorBuilder:
             if signal_layer is not None and signal_layer.mode == "cta":
                 sym_cache = self._signal_cache.get(symbol, {})
                 precomputed = sym_cache.get(current_bar, None)
-                cta_signal = precomputed.get("_cta_composite", 0.0) if precomputed else 0.0
+                cta_signal = (
+                    precomputed.get("_cta_composite", 0.0) if precomputed else 0.0
+                )
 
                 if abs(cta_signal) >= entry_threshold:
                     target_dir = 1 if cta_signal > 0 else -1
                     effective_size = position_size
                     has_long = _get_pos_shares(ctx, "long") > 0
                     has_short = _get_pos_shares(ctx, "short") > 0
-                    self._execute_rebalance(ctx, target_dir, effective_size, has_long, has_short)
+                    self._execute_rebalance(
+                        ctx, target_dir, effective_size, has_long, has_short
+                    )
                 else:
                     self._close_all(ctx)
                     self._clear_entry_state(symbol)
@@ -370,21 +389,31 @@ class PyBrokerExecutorBuilder:
                     ohlcv = _ohlcv_from_ctx(ctx)
                     if ohlcv is not None and len(ohlcv) >= 10:
                         cs_signals = signal_layer.get_cross_sectional_signals(
-                            symbol, ohlcv, len(ohlcv) - 1, strategy_params,
+                            symbol,
+                            ohlcv,
+                            len(ohlcv) - 1,
+                            strategy_params,
                         )
                     else:
                         cs_signals = {}
                 else:
                     # 从预计算缓存提取子策略得分
                     cs_signals = {}
-                    for sname in ["trend", "term_structure", "mean_reversion",
-                                  "vol_breakout", "composite_resonance"]:
+                    for sname in [
+                        "trend",
+                        "term_structure",
+                        "mean_reversion",
+                        "vol_breakout",
+                        "composite_resonance",
+                    ]:
                         if sname in precomputed:
                             cs_signals[sname] = precomputed[sname]
 
                 # 2) 更新横截面引擎
                 scoring_engine.update_cross_section(
-                    symbol, cs_signals, dt=current_date,
+                    symbol,
+                    cs_signals,
+                    dt=current_date,
                 )
 
                 is_rebalance = scoring_engine.is_rebalance_day(current_date)
@@ -408,13 +437,43 @@ class PyBrokerExecutorBuilder:
                     # ── HYBRID 模式：横截面得分 × CTA 时序混合 ──
                     if signal_layer.mode == "hybrid":
                         cw = signal_layer.cta_weight
+                        # 方向二 dynamic 模式：收集每品种的仓位缩放系数
+                        pos_scales: Dict[str, float] = {}
                         for sym in all_syms:
                             z = signals_all[sym]
                             sym_cache = self._signal_cache.get(sym, {})
                             pre = sym_cache.get(current_bar, None)
                             cta_sig = pre.get("_cta_composite", 0.0) if pre else 0.0
-                            hybrid = (1.0 - cw) * z + cw * cta_sig
+                            if (
+                                getattr(signal_layer, "hybrid_blend_method", "linear")
+                                == "dynamic"
+                            ):
+                                # 关键：用未裁剪的 z-score 计算 cross_strength，
+                                # 避免 |rank*2-1| 恒等于 1.0 导致 dynamic 退化为纯 CTA
+                                raw_z = scoring_engine.compute_composite_score(
+                                    sym,
+                                    clip_output=False,
+                                )
+                                cross_strength = float(np.clip(abs(raw_z), 0.0, 1.0))
+                                pos_scale = (
+                                    signal_layer.xs_position_base
+                                    + (
+                                        signal_layer.xs_position_ceiling
+                                        - signal_layer.xs_position_base
+                                    )
+                                    * cross_strength
+                                )
+                                if cta_sig * raw_z < 0.0:
+                                    pos_scale *= signal_layer.xs_opposite_penalty
+                                pos_scale = float(np.clip(pos_scale, 0.0, 1.0))
+                                pos_scales[sym] = pos_scale
+                                hybrid = cta_sig * pos_scale
+                            else:
+                                # 默认：线性加权
+                                hybrid = (1.0 - cw) * z + cw * cta_sig
+                                pos_scales[sym] = 1.0
                             signals_all[sym] = float(np.clip(hybrid, -1.0, 1.0))
+                        state.dynamic_pos_scales = pos_scales
 
                     # 风险预算调整
                     risk_estimates: Dict[str, float] = {}
@@ -425,12 +484,26 @@ class PyBrokerExecutorBuilder:
                                 risk_estimates[sym] = est
 
                     target_weights = portfolio_manager.allocate_weights(
-                        signals_all, method=weight_method,
+                        signals_all,
+                        method=weight_method,
                         risk_estimates=risk_estimates if risk_estimates else None,
                     )
                     target_weights = risk_controller.check_concentration_dict(
-                        target_weights, max_concentration=config.max_position_pct,
+                        target_weights,
+                        max_concentration=config.max_position_pct,
                     )
+                    # 方向二 dynamic 模式：把 pos_scale 应用到 final weights
+                    # （equal_weight 模式下 allocator 只看符号，必须显式缩放）
+                    if (
+                        signal_layer is not None
+                        and signal_layer.mode == "hybrid"
+                        and getattr(signal_layer, "hybrid_blend_method", "linear")
+                        == "dynamic"
+                        and state.dynamic_pos_scales
+                    ):
+                        for sym in list(target_weights.keys()):
+                            scale = state.dynamic_pos_scales.get(sym, 1.0)
+                            target_weights[sym] = target_weights[sym] * scale
                     state.target_weights = target_weights
                     state.last_weights = dict(target_weights)
 
@@ -441,21 +514,29 @@ class PyBrokerExecutorBuilder:
                 target_w = state.target_weights.get(symbol, 0.0)
 
                 # 混合 CTA 信号过滤（仅纯横截面模式需要）
-                if signal_layer is not None and signal_layer.mode not in ("hybrid", "cta") and precomputed is not None:
+                if (
+                    signal_layer is not None
+                    and signal_layer.mode not in ("hybrid", "cta")
+                    and precomputed is not None
+                ):
                     cta_composite = (
-                        precomputed.get("carry", 0.0) * 0.3 +
-                        precomputed.get("vol_mean_reversion", 0.0) * 0.3 +
-                        precomputed.get("donchian_breakout", 0.0) * 0.2 +
-                        precomputed.get("momentum_ma", 0.0) * 0.1 +
-                        precomputed.get("tsi_garch", 0.0) * 0.05 +
-                        precomputed.get("pair_trading", 0.0) * 0.05
+                        precomputed.get("carry", 0.0) * 0.3
+                        + precomputed.get("vol_mean_reversion", 0.0) * 0.3
+                        + precomputed.get("donchian_breakout", 0.0) * 0.2
+                        + precomputed.get("momentum_ma", 0.0) * 0.1
+                        + precomputed.get("tsi_garch", 0.0) * 0.05
+                        + precomputed.get("pair_trading", 0.0) * 0.05
                     )
-                    hybrid = (1.0 - 0.5) * (target_w / (abs(target_w) + 1e-10)) + 0.5 * np.clip(cta_composite, -1, 1)
+                    hybrid = (1.0 - 0.5) * (
+                        target_w / (abs(target_w) + 1e-10)
+                    ) + 0.5 * np.clip(cta_composite, -1, 1)
                     hybrid = float(np.clip(hybrid, -1.0, 1.0))
                     if abs(hybrid) < entry_threshold:
                         target_w = 0.0
 
-                if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
+                if self._check_stop_loss(
+                    ctx, current_close, symbol, current_date, current_bar
+                ):
                     self._close_all(ctx)
                     self._clear_entry_state(symbol)
                     return
@@ -470,10 +551,14 @@ class PyBrokerExecutorBuilder:
                 has_long = _get_pos_shares(ctx, "long") > 0
                 has_short = _get_pos_shares(ctx, "short") > 0
                 old_pos = 1 if has_long else -1 if has_short else 0
-                self._execute_rebalance(ctx, direction, effective_size, has_long, has_short)
+                self._execute_rebalance(
+                    ctx, direction, effective_size, has_long, has_short
+                )
 
                 if current_close is not None and (
-                    old_pos == 0 or (old_pos > 0 and direction < 0) or (old_pos < 0 and direction > 0)
+                    old_pos == 0
+                    or (old_pos > 0 and direction < 0)
+                    or (old_pos < 0 and direction > 0)
                 ):
                     dir_label = "long" if direction > 0 else "short"
                     state.entry_price[symbol] = current_close
@@ -495,7 +580,11 @@ class PyBrokerExecutorBuilder:
                     return
 
                 signal = signal_provider(ctx, symbol) if signal_provider else 0.0
-                market_state = market_state_provider(symbol) if market_state_provider else "oscillation"
+                market_state = (
+                    market_state_provider(symbol)
+                    if market_state_provider
+                    else "oscillation"
+                )
                 sigma = sigma_provider(symbol) if sigma_provider else None
 
                 has_long = _get_pos_shares(ctx, "long") > 0
@@ -509,7 +598,9 @@ class PyBrokerExecutorBuilder:
                     # 更新极值
                     pstate = state.pos_state.get(symbol, {})
                     if pstate:
-                        exit_policy.update_extreme(pstate, current_pos, current_close or 0.0)
+                        exit_policy.update_extreme(
+                            pstate, current_pos, current_close or 0.0
+                        )
                         state.pos_state[symbol] = pstate
 
                     # 四层退出
@@ -550,8 +641,11 @@ class PyBrokerExecutorBuilder:
                 target_w = np.clip(target_w, -position_size, position_size)
                 dir_label = "long" if target_w > 0 else "short"
                 self._execute_rebalance(
-                    ctx, 1 if target_w > 0 else -1,
-                    abs(target_w), has_long, has_short,
+                    ctx,
+                    1 if target_w > 0 else -1,
+                    abs(target_w),
+                    has_long,
+                    has_short,
                 )
                 # 记录开仓
                 if current_close is not None:
@@ -561,7 +655,9 @@ class PyBrokerExecutorBuilder:
                     state.highest_since_entry[symbol] = current_close
                     state.lowest_since_entry[symbol] = current_close
                     state.pos_state[symbol] = CTAExitPolicy.make_pos_state(
-                        current_close, 1 if target_w > 0 else -1, current_bar,
+                        current_close,
+                        1 if target_w > 0 else -1,
+                        current_bar,
                     )
                 return
 
@@ -584,7 +680,9 @@ class PyBrokerExecutorBuilder:
 
             if not is_rebalance:
                 # 非调仓日：仅检查止损
-                if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
+                if self._check_stop_loss(
+                    ctx, current_close, symbol, current_date, current_bar
+                ):
                     self._close_all(ctx)
                     self._clear_entry_state(symbol)
                 return
@@ -598,11 +696,16 @@ class PyBrokerExecutorBuilder:
 
             state.collected_symbols_set.add(symbol)
             scoring_engine.update_cross_section(
-                symbol, factor_scores, dt=current_date,
+                symbol,
+                factor_scores,
+                dt=current_date,
             )
 
             # 5) finalize 横截面
-            if not state.finalized and len(state.collected_symbols_set) >= state.total_symbols:
+            if (
+                not state.finalized
+                and len(state.collected_symbols_set) >= state.total_symbols
+            ):
                 scoring_engine.finalize_cross_section()
                 state.finalized = True
                 scoring_engine.mark_rebalanced(current_date)
@@ -620,11 +723,13 @@ class PyBrokerExecutorBuilder:
                             risk_estimates[sym] = est
 
                 target_weights = portfolio_manager.allocate_weights(
-                    signals, method=weight_method,
+                    signals,
+                    method=weight_method,
                     risk_estimates=risk_estimates if risk_estimates else None,
                 )
                 target_weights = risk_controller.check_concentration_dict(
-                    target_weights, max_concentration=config.max_position_pct,
+                    target_weights,
+                    max_concentration=config.max_position_pct,
                 )
                 state.target_weights = target_weights
                 state.last_weights = dict(target_weights)
@@ -637,7 +742,9 @@ class PyBrokerExecutorBuilder:
             if abs(score) < entry_threshold:
                 target_w = 0.0
 
-            if self._check_stop_loss(ctx, current_close, symbol, current_date, current_bar):
+            if self._check_stop_loss(
+                ctx, current_close, symbol, current_date, current_bar
+            ):
                 self._close_all(ctx)
                 self._clear_entry_state(symbol)
                 return
@@ -655,7 +762,9 @@ class PyBrokerExecutorBuilder:
             self._execute_rebalance(ctx, direction, effective_size, has_long, has_short)
 
             if current_close is not None and (
-                old_pos == 0 or (old_pos > 0 and direction < 0) or (old_pos < 0 and direction > 0)
+                old_pos == 0
+                or (old_pos > 0 and direction < 0)
+                or (old_pos < 0 and direction > 0)
             ):
                 dir_label = "long" if direction > 0 else "short"
                 state.entry_price[symbol] = current_close
@@ -700,7 +809,10 @@ class PyBrokerExecutorBuilder:
         lowest = self.state.lowest_since_entry.get(symbol, current_close)
         atr = _get_atr(ctx)
 
-        if self.risk_controller is not None and self.risk_controller.composite_stop is not None:
+        if (
+            self.risk_controller is not None
+            and self.risk_controller.composite_stop is not None
+        ):
             try:
                 result = self.risk_controller.check_composite_stop(
                     symbol=symbol,
@@ -717,7 +829,9 @@ class PyBrokerExecutorBuilder:
                 if result.triggered:
                     _logger.info(
                         "%s 触发%s: %s",
-                        symbol, direction, result.trigger_reason,
+                        symbol,
+                        direction,
+                        result.trigger_reason,
                     )
                     return True
             except Exception as e:

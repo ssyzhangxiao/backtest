@@ -308,7 +308,13 @@ class PyBrokerBacktestRunner:
             factor_pool,
             default_mode=self.config.signal_mode,
             cta_weight=self.config.cta_hybrid_weight,
+            xs_position_base=self.config.xs_position_base,
+            xs_position_ceiling=self.config.xs_position_ceiling,
+            xs_opposite_penalty=self.config.xs_opposite_penalty,
         ) if self.config.use_signal_abstraction else None
+        # 同步 hybrid_blend_method（方向二 2026-06-15）
+        if signal_layer is not None:
+            signal_layer.hybrid_blend_method = self.config.hybrid_blend_method
 
         blueprint_builder = PyBrokerExecutorBuilder(
             scoring_engine=self.switch_engine,

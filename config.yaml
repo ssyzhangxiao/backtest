@@ -25,7 +25,16 @@ backtest:
   signal_merge_method: equal_weight
   use_signal_abstraction: true
   signal_mode: hybrid
-  cta_hybrid_weight: 0.5
+  cta_hybrid_weight: 0.9
+  # ── 方向二（2026-06-15 验证通过）：横截面作为 CTA 仓位缩放因子 ──
+  # sweep 结果（全期+OOS）：
+  #   - linear_w1.0:  sharpe=0.039  return=16.88%  mdd=-8.47%  calmar=1.99
+  #   - dynamic b=0.3 p=0.4: sharpe=0.046  return=7.49%  mdd=-2.09%  calmar=3.59
+  # 方向二的核心收益：calmar +80%、mdd -75%，代价是收益减半
+  hybrid_blend_method: dynamic
+  xs_position_base: 0.3
+  xs_position_ceiling: 1.0
+  xs_opposite_penalty: 0.4
 symbols:
 - SHFE.AL
 - SHFE.CU

@@ -120,6 +120,19 @@ class BacktestConfig:
     cta_hybrid_weight: float = 0.5
     """混合模式下 CTA 信号权重（0~1），对应 cross_section_z 权重为 1 - cta_hybrid_weight。"""
 
+    # ── 动态混合模式参数（方向二，2026-06-15） ──
+    hybrid_blend_method: str = "linear"
+    """混合模式合成方法：linear（线性加权）/ dynamic（XS 仓位缩放）。"""
+
+    xs_position_base: float = 0.5
+    """动态混合模式下，XS 强度=0 时的 CTA 仓位缩放下限（0~1）。"""
+
+    xs_position_ceiling: float = 1.0
+    """动态混合模式下，XS 强度=1 时的 CTA 仓位缩放上限（0~1）。"""
+
+    xs_opposite_penalty: float = 0.5
+    """动态混合模式下，CTA 与 XS 异号时的额外减仓系数（0~1）。"""
+
     weight_method: str = "risk_parity"
     """权重分配方法：equal_weight / risk_parity / score_weighted / top_n。P0 整改补全。"""
 
@@ -254,6 +267,11 @@ class BacktestConfig:
             use_signal_abstraction=bool(bt.get("use_signal_abstraction", False)),
             signal_mode=str(bt.get("signal_mode", "cross_sectional")),
             cta_hybrid_weight=float(bt.get("cta_hybrid_weight", 0.5)),
+            # 动态混合模式（方向二，2026-06-15）
+            hybrid_blend_method=str(bt.get("hybrid_blend_method", "linear")),
+            xs_position_base=float(bt.get("xs_position_base", 0.5)),
+            xs_position_ceiling=float(bt.get("xs_position_ceiling", 1.0)),
+            xs_opposite_penalty=float(bt.get("xs_opposite_penalty", 0.5)),
             # 品种与策略
             symbols=raw.get(
                 "symbols", ["SHFE.RB", "DCE.M", "CZCE.TA", "SHFE.CU", "CFFEX.IF"]
@@ -261,7 +279,8 @@ class BacktestConfig:
             strategy_names=[
                 s["name"]
                 for s in raw.get("strategies", [])
-                if isinstance(s, dict) and "name" in s
+                if isinstance(s, dict)
+                and "name" in s
                 and s["name"] != "cross_sectional"  # 模式标志，非子策略名
             ],
             # 输出与风控
@@ -317,6 +336,11 @@ class BacktestConfig:
             "use_signal_abstraction": self.use_signal_abstraction,
             "signal_mode": self.signal_mode,
             "cta_hybrid_weight": self.cta_hybrid_weight,
+            # 动态混合模式（方向二，2026-06-15）
+            "hybrid_blend_method": self.hybrid_blend_method,
+            "xs_position_base": self.xs_position_base,
+            "xs_position_ceiling": self.xs_position_ceiling,
+            "xs_opposite_penalty": self.xs_opposite_penalty,
         }
 
         raw["factor_weights"] = self.factor_weights
@@ -383,7 +407,9 @@ class BacktestConfig:
                     updated = True
                     break
             if not updated:
-                raw["strategies"].append({"name": strategy_name, "params": converted_params})
+                raw["strategies"].append(
+                    {"name": strategy_name, "params": converted_params}
+                )
 
         # P2-1 整改：使用 yaml_utils.dump_yaml
         dump_yaml(path, raw, sort_keys=False)
