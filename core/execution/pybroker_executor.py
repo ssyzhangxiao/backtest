@@ -37,13 +37,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 
 from core.config import BacktestConfig
 from core.engine.switch_engine import FactorScoringEngine
-from core.execution.cta_exit_policy import CTAExitPolicy, CTAExitConfig
+from core.execution.cta_exit_policy import CTAExitPolicy
 from core.execution.signal_abstraction import SignalAbstractionLayer
 from core.portfolio import PortfolioManager
-from core.risk_controller import RiskController, RiskConfig
+from core.risk_controller import RiskController
 
 _logger = logging.getLogger(__name__)
 
@@ -223,6 +224,8 @@ class PyBrokerExecutorBuilder:
         cta_sigma_provider: Optional[Callable[[str], Optional[float]]] = None,
         # ── 统一因子池注入（2026-06-13） ──
         signal_abstraction: Optional[SignalAbstractionLayer] = None,
+        # ── Per-bar 录制开关（2026-06-16，sweep/分析专用） ──
+        record_per_bar: bool = False,
     ):
         self.scoring_engine = scoring_engine
         self.portfolio_manager = portfolio_manager
@@ -240,6 +243,9 @@ class PyBrokerExecutorBuilder:
         self.signal_abstraction = signal_abstraction
         # ── 预计算信号缓存 {symbol: {bar_idx: {name: value}}} ──
         self._signal_cache: Dict[str, Dict[int, Dict[str, float]]] = {}
+        # ── Per-bar 录制（sweep/分析专用） ──
+        self.record_per_bar = record_per_bar
+        self.per_bar_log: List[Dict[str, Any]] = []
 
     # ────────────────────────────────────────────────────────────
     # 预计算信号（2026-06-14 新增：替代运行时 per-bar 计算）
@@ -268,6 +274,20 @@ class PyBrokerExecutorBuilder:
             "预计算 %d 个品种的全部信号...",
             len(symbols),
         )
+        # ── 方向三：配对交易横截面信号预计算（2026-06-17） ──
+        if self.signal_abstraction.is_pair_trading_source():
+            close_matrix = full_df.pivot_table(
+                index="date",
+                columns="symbol",
+                values="close",
+                aggfunc="last",
+            ).sort_index()
+            # 保持列顺序与 self._signal_cache 一致
+            for s in symbols:
+                if s not in close_matrix.columns:
+                    close_matrix[s] = np.nan
+            close_matrix = close_matrix[symbols].ffill()
+            self.signal_abstraction.precompute_pair_signals(close_matrix)
         for sym in symbols:
             sym_df = full_df[full_df["symbol"] == sym].reset_index(drop=True)
             if len(sym_df) < 30:
@@ -290,17 +310,35 @@ class PyBrokerExecutorBuilder:
             # CTA / HYBRID 模式：预计算 CTA 合成信号
             if self.signal_abstraction.mode in ("cta", "hybrid"):
                 from core.execution.factor_pool import CTA_SIGNAL_NAMES
+                from core.execution.signal_abstraction import DEFAULT_CTA_WEIGHTS
 
                 active_cta = [
                     k for k in strategy_params if k in CTA_SIGNAL_NAMES
                 ] or CTA_SIGNAL_NAMES
-                equal_w = 1.0 / len(active_cta) if active_cta else 0.0
+                # 方向四 P1：优先使用 signal_layer 自定义权重（2026-06-17）
+                custom_w = getattr(self.signal_abstraction, "cta_composite_weights", None)
+                if custom_w is not None:
+                    total_w = sum(custom_w.get(k, 0.0) for k in active_cta)
+                    if total_w > 1e-8:
+                        weights = {k: custom_w.get(k, 0.0) / total_w for k in active_cta}
+                    else:
+                        weights = {k: 1.0 / len(active_cta) for k in active_cta}
+                else:
+                    # 默认 DEFAULT_CTA_WEIGHTS（归一化到 active 子集）
+                    total_w = sum(DEFAULT_CTA_WEIGHTS.get(k, 0.0) for k in active_cta)
+                    if total_w > 1e-8:
+                        weights = {
+                            k: DEFAULT_CTA_WEIGHTS.get(k, 0.0) / total_w
+                            for k in active_cta
+                        }
+                    else:
+                        weights = {k: 1.0 / len(active_cta) for k in active_cta}
                 for bar_idx in list(cache.keys()):
                     signals = cache[bar_idx]
                     cta_val = 0.0
                     for cname in active_cta:
                         if cname in signals:
-                            cta_val += equal_w * signals[cname]
+                            cta_val += weights[cname] * signals[cname]
                     if active_cta:
                         cache[bar_idx]["_cta_composite"] = float(
                             np.clip(cta_val, -1.0, 1.0)
@@ -318,6 +356,15 @@ class PyBrokerExecutorBuilder:
           1. 蓝图模式（默认）：横截面收集 → finalize → PortfolioManager → 下单
           2. CTA 模式（注入 cta_exit_policy）：每 bar 信号 → 四层退出 → 风险预算 → 下单
         """
+        _logger.info(
+            "PyBrokerExecutorBuilder.build() called, record_per_bar=%s",
+            self.record_per_bar,
+        )
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[DEBUG] build() called, record_per_bar={self.record_per_bar}\n"
+        )
         scoring_engine = self.scoring_engine
         portfolio_manager = self.portfolio_manager
         risk_controller = self.risk_controller
@@ -431,8 +478,28 @@ class PyBrokerExecutorBuilder:
 
                     all_syms = sorted(self._signal_cache.keys())
                     signals_all: Dict[str, float] = {}
+
+                    # ── 方向三：配对交易横截面信号覆盖（2026-06-17） ──
+                    # 若 signal_layer.cross_section_source=="pair_trading"，
+                    # 用预计算的配对 z-score 替换默认的 cross-section composite。
+                    use_pair = (
+                        signal_layer is not None
+                        and signal_layer.is_pair_trading_source()
+                    )
                     for sym in all_syms:
-                        signals_all[sym] = scoring_engine.compute_composite_score(sym)
+                        if use_pair:
+                            pair_z = signal_layer.get_pair_cross_section_scores(
+                                sym,
+                                current_bar,
+                            )
+                            if pair_z is None:
+                                pair_z = 0.0
+                            # 配对信号是横截面替代品 → 直接用作 cross_section_z
+                            signals_all[sym] = float(np.clip(pair_z, -1.0, 1.0))
+                        else:
+                            signals_all[sym] = scoring_engine.compute_composite_score(
+                                sym,
+                            )
 
                     # ── HYBRID 模式：横截面得分 × CTA 时序混合 ──
                     if signal_layer.mode == "hybrid":
@@ -448,12 +515,9 @@ class PyBrokerExecutorBuilder:
                                 getattr(signal_layer, "hybrid_blend_method", "linear")
                                 == "dynamic"
                             ):
-                                # 关键：用未裁剪的 z-score 计算 cross_strength，
-                                # 避免 |rank*2-1| 恒等于 1.0 导致 dynamic 退化为纯 CTA
-                                raw_z = scoring_engine.compute_composite_score(
-                                    sym,
-                                    clip_output=False,
-                                )
+                                # 关键：用 signals_all[sym]（已被配对信号覆盖）作为 raw_z，
+                                # 避免配对模式下被 scoring_engine 的 xs 重新覆盖。
+                                raw_z = float(signals_all[sym])
                                 cross_strength = float(np.clip(abs(raw_z), 0.0, 1.0))
                                 pos_scale = (
                                     signal_layer.xs_position_base
@@ -474,6 +538,16 @@ class PyBrokerExecutorBuilder:
                                 pos_scales[sym] = 1.0
                             signals_all[sym] = float(np.clip(hybrid, -1.0, 1.0))
                         state.dynamic_pos_scales = pos_scales
+                        # ── per-bar 录制（sweep 专用） ──
+                        if self.record_per_bar:
+                            self.per_bar_log.append(
+                                {
+                                    "bar_idx": current_bar,
+                                    "date": str(current_date),
+                                    "signals": dict(signals_all),
+                                    "pos_scales": dict(pos_scales),
+                                }
+                            )
 
                     # 风险预算调整
                     risk_estimates: Dict[str, float] = {}

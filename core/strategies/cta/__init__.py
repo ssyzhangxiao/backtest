@@ -27,6 +27,7 @@ from core.strategies.cta.donchian_breakout import DonchianBreakoutStrategy  # no
 from core.strategies.cta.carry_strategy import CarryStrategy  # noqa: F401
 from core.strategies.cta.vol_mean_reversion import VolMeanReversionStrategy  # noqa: F401
 from core.strategies.cta.pair_trading import PairTradingStrategy  # noqa: F401
+from core.strategies.cta.oi_strategy import OISignalStrategy  # noqa: F401  # 方向四 P1
 
 from core.strategies.cta.base import CTABaseStrategy
 from core.strategies.cta.registry import CTA_STRATEGY_REGISTRY, get_cta_strategy
@@ -42,9 +43,10 @@ __all__ = [
     "CarryStrategy",
     "VolMeanReversionStrategy",
     "PairTradingStrategy",
+    "OISignalStrategy",
     # 旧名（别名，兼容）
-    "StateAwareTrendStrategy",      # → TSIGarchStrategy
-    "SimpleTrendStrategy",          # → MomentumMAStrategy
+    "StateAwareTrendStrategy",  # → TSIGarchStrategy
+    "SimpleTrendStrategy",  # → MomentumMAStrategy
 ]
 
 # 旧名导出（型别名，IDE 自动补全用）

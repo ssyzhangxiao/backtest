@@ -32,23 +32,26 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
+import logging
 import numpy as np
 import pandas as pd
 
 from core.execution.factor_pool import (
-    ALL_SIGNAL_NAMES,
     CTA_SIGNAL_NAMES,
     DEFAULT_FACTOR_NAMES,
     UnifiedFactorPool,
 )
+from core.factors.pair_trading import PairSelector, PairSelectorParams
 
 __all__ = [
     "SignalMode",
     "SignalAbstractionLayer",
     "DEFAULT_CTA_WEIGHTS",
 ]
+
+_logger = logging.getLogger(__name__)
 
 # ── CTA 6 策略固定权重（来自 signal_fusion.py 验证过的权重） ──
 DEFAULT_CTA_WEIGHTS: Dict[str, float] = {
@@ -95,6 +98,9 @@ class SignalAbstractionLayer:
         xs_position_base: float = 0.5,
         xs_position_ceiling: float = 1.0,
         xs_opposite_penalty: float = 0.5,
+        # ── 方向三：配对交易横截面（2026-06-17） ──
+        cross_section_source: str = "default",
+        pair_params: Optional[PairSelectorParams] = None,
     ) -> None:
         self._pool = factor_pool
         self.mode = default_mode
@@ -108,6 +114,15 @@ class SignalAbstractionLayer:
         """横截面信号强时 CTA 仓位缩放上限（0~1）。"""
         self.xs_opposite_penalty = xs_opposite_penalty
         """CTA 与横截面异号时的额外仓位惩罚系数（0~1）。"""
+        # 方向三：配对交易横截面信号
+        self.cross_section_source = cross_section_source
+        """横截面信号来源：default（5 子策略）/ pair_trading（配对 z-score）。"""
+        self.pair_params = pair_params or PairSelectorParams()
+        self._pair_selector: Optional[PairSelector] = None
+        self._pair_score_cache: Dict[int, Dict[str, float]] = {}
+        """{bar_idx: {symbol: pair_zscore}} — 在 precompute 时填充。"""
+        # 方向四 P1：CTA 合成权重（默认 None → 使用 DEFAULT_CTA_WEIGHTS）
+        self.cta_composite_weights: Optional[Dict[str, float]] = None
 
     # ────────────────────────────────────────────────────────────
     # 模式 A：横截面信号
@@ -190,7 +205,11 @@ class SignalAbstractionLayer:
             合成信号 [-1, 1]
         """
         signals = self.get_cta_signals(symbol, ohlcv, bar_idx)
-        w = weights or DEFAULT_CTA_WEIGHTS
+        w = (
+            self.cta_composite_weights
+            if self.cta_composite_weights is not None
+            else weights or DEFAULT_CTA_WEIGHTS
+        )
         weighted = sum(signals.get(k, 0.0) * w.get(k, 0.0) for k in w)
         return float(np.clip(weighted, -1.0, 1.0))
 
@@ -279,6 +298,52 @@ class SignalAbstractionLayer:
         # 缩放后的信号：方向由 CTA 决定
         scaled = float(cta_sig) * float(np.clip(position_scale, 0.0, 1.0))
         return float(np.clip(scaled, -1.0, 1.0))
+
+    # ────────────────────────────────────────────────────────────
+    # 方向三：配对交易横截面信号（2026-06-17）
+    # ────────────────────────────────────────────────────────────
+
+    def precompute_pair_signals(self, close_df: pd.DataFrame) -> None:
+        """预计算所有 bar 的配对横截面 z-score，存入缓存。
+
+        Args:
+            close_df: 列=品种，索引=bar 的 close 矩阵
+        """
+        symbols = list(close_df.columns)
+        if self._pair_selector is None or self._pair_selector.symbols != symbols:
+            self._pair_selector = PairSelector(symbols, self.pair_params)
+        self._pair_score_cache.clear()
+        n = len(close_df)
+        for i in range(n):
+            scores = self._pair_selector.compute_symbol_scores(close_df, i)
+            self._pair_score_cache[i] = dict(scores)
+        _logger.info(
+            "PairSelector precomputed: %d bars × %d symbols, valid_pairs=%d",
+            n,
+            len(symbols),
+            len(self._pair_selector._valid_pairs),
+        )
+
+    def get_pair_cross_section_scores(
+        self,
+        symbol: str,
+        bar_idx: int,
+    ) -> Optional[float]:
+        """获取某品种某 bar 的配对横截面 z-score（来自预计算缓存）。
+
+        Returns:
+            pair z-score（float），或 None（未启用/未预计算）
+        """
+        if self._pair_selector is None:
+            return None
+        row = self._pair_score_cache.get(bar_idx)
+        if row is None:
+            return None
+        return float(row.get(symbol, 0.0))
+
+    def is_pair_trading_source(self) -> bool:
+        """当前 cross_section_source 是否为配对交易。"""
+        return self.cross_section_source == "pair_trading"
 
     # ────────────────────────────────────────────────────────────
     # 工具

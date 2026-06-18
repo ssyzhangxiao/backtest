@@ -40,11 +40,12 @@ from core.strategies.cta.registry import CTA_STRATEGY_REGISTRY
 
 __all__ = ["UnifiedFactorPool", "ALL_SIGNAL_NAMES", "CTA_SIGNAL_NAMES"]
 
-# ── 6 个 CTA 策略的规范名（去重后取唯一策略名） ──
+# ── 7 个 CTA 策略的规范名（去重后取唯一策略名） ──
 # CTA_STRATEGY_REGISTRY 中 alias 不重复计算：
 #   carry / carry_zscore → carry (取第一个)
 #   tsi_garch / state_aware_trend → tsi_garch
 #   momentum_ma / simple_trend → momentum_ma
+#   oi_signal → 持仓量衍生信号（需 oi 列）
 _CTA_PRIMARY_NAMES: List[str] = [
     "carry",
     "vol_mean_reversion",
@@ -52,6 +53,7 @@ _CTA_PRIMARY_NAMES: List[str] = [
     "momentum_ma",
     "tsi_garch",
     "pair_trading",
+    "oi_signal",
 ]
 
 # 全部信号列名（11 列）
@@ -113,6 +115,17 @@ class _CTABatchWrapper:
         if "far_close" in df.columns:
             far_arr = df["far_close"].to_numpy(dtype=float)
 
+        # 预提取 oi（供 oi_signal 策略使用，方向四 P1）
+        oi_arr: Optional[np.ndarray] = None
+        if "open_interest" in df.columns:
+            oi_arr = df["open_interest"].to_numpy(dtype=float)
+            # 计算 oi_signal 全量序列
+            from core.factors.oi_signal import compute_oi_signal  # noqa: WPS433
+
+            oi_signal_arr = compute_oi_signal(close, oi_arr, window=20)
+        else:
+            oi_signal_arr = None
+
         results: Dict[str, np.ndarray] = {}
         for name, strat in self._strategies.items():
             arr = np.full(n, np.nan, dtype=float)
@@ -123,6 +136,10 @@ class _CTABatchWrapper:
                     strat.set_state(symbol, "_spread", spread_arr)
                 if far_arr is not None and name == "pair_trading":
                     strat.set_state(symbol, "_far_price", far_arr)
+
+            # oi_signal 策略：注入预计算的 oi_signal 序列
+            if name == "oi_signal" and oi_signal_arr is not None:
+                strat.set_state(symbol, "_oi_signal", oi_signal_arr)
 
             # 逐 bar 计算（warmup 30 bar）
             for i in range(30, n):

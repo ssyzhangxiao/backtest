@@ -35,6 +35,16 @@ backtest:
   xs_position_base: 0.3
   xs_position_ceiling: 1.0
   xs_opposite_penalty: 0.4
+  # ── 方向三（2026-06-17 启动）：配对交易横截面信号 ──
+  # 当 pair_trading_enabled=true 时，配对 z-score 替换/增强现有 XS 多因子信号
+  # 默认关闭，由 scripts/exp_pair_trading.py 实验时开启
+  pair_trading_enabled: false
+  pair_trading_weight: 1.0
+  pair_ols_window: 60
+  pair_adf_window: 60
+  pair_pvalue_threshold: 0.05
+  pair_rebalance_interval: 20
+  pair_zscore_lookback: 60
 symbols:
 - SHFE.AL
 - SHFE.CU

@@ -133,6 +133,28 @@ class BacktestConfig:
     xs_opposite_penalty: float = 0.5
     """动态混合模式下，CTA 与 XS 异号时的额外减仓系数（0~1）。"""
 
+    # ── 方向三：配对交易横截面信号（2026-06-17） ──
+    pair_trading_enabled: bool = False
+    """是否启用配对交易横截面信号（替换/增强 XS 多因子信号）。"""
+
+    pair_trading_weight: float = 1.0
+    """配对信号在 cross-section 中的权重（1.0 = 完全替换，< 1.0 = 增强模式）。"""
+
+    pair_ols_window: int = 60
+    """配对交易：滚动 OLS 估计 hedge ratio 的窗口。"""
+
+    pair_adf_window: int = 60
+    """配对交易：ADF 协整检验窗口。"""
+
+    pair_pvalue_threshold: float = 0.05
+    """配对交易：ADF p-value 阈值（小于则视为协整）。"""
+
+    pair_rebalance_interval: int = 20
+    """配对交易：配对重筛间隔（bar 数，约 1 月按日频）。"""
+
+    pair_zscore_lookback: int = 60
+    """配对交易：价差 z-score 计算窗口。"""
+
     weight_method: str = "risk_parity"
     """权重分配方法：equal_weight / risk_parity / score_weighted / top_n。P0 整改补全。"""
 
@@ -151,6 +173,11 @@ class BacktestConfig:
     # ── 交叉验证 ──
     cross_validate: bool = False
     """是否执行 PyBroker 与自研引擎并行交叉验证（规则26）。"""
+
+    # ── CTA 合成权重（方向四 P1，2026-06-17） ──
+    cta_composite_weights: Optional[Dict[str, float]] = None
+    """CTA 6/7 策略加权权重，None = 使用默认 DEFAULT_CTA_WEIGHTS。
+    设置为 {strategy: weight} 时，仅列出的策略参与合成（其余视为 0）。"""
 
     # ── 品种与策略（从 config.yaml 顶层读取） ──
     symbols: list = field(
@@ -294,6 +321,16 @@ class BacktestConfig:
             validation_config=validation_cfg,
             # P0-1 补全：交叉验证开关（规则26）
             cross_validate=bool(bt.get("cross_validate", False)),
+            # 方向三：配对交易横截面信号（2026-06-17）
+            pair_trading_enabled=bool(bt.get("pair_trading_enabled", False)),
+            pair_trading_weight=float(bt.get("pair_trading_weight", 1.0)),
+            pair_ols_window=int(bt.get("pair_ols_window", 60)),
+            pair_adf_window=int(bt.get("pair_adf_window", 60)),
+            pair_pvalue_threshold=float(bt.get("pair_pvalue_threshold", 0.05)),
+            pair_rebalance_interval=int(bt.get("pair_rebalance_interval", 20)),
+            pair_zscore_lookback=int(bt.get("pair_zscore_lookback", 60)),
+            # 方向四 P1：CTA 合成权重（2026-06-17）
+            cta_composite_weights=bt.get("cta_composite_weights", None),
         )
 
     def to_yaml(self, path: str = "config.yaml"):
@@ -341,6 +378,16 @@ class BacktestConfig:
             "xs_position_base": self.xs_position_base,
             "xs_position_ceiling": self.xs_position_ceiling,
             "xs_opposite_penalty": self.xs_opposite_penalty,
+            # 方向三：配对交易横截面信号（2026-06-17）
+            "pair_trading_enabled": self.pair_trading_enabled,
+            "pair_trading_weight": self.pair_trading_weight,
+            "pair_ols_window": self.pair_ols_window,
+            "pair_adf_window": self.pair_adf_window,
+            "pair_pvalue_threshold": self.pair_pvalue_threshold,
+            "pair_rebalance_interval": self.pair_rebalance_interval,
+            "pair_zscore_lookback": self.pair_zscore_lookback,
+            # 方向四 P1：CTA 合成权重
+            "cta_composite_weights": self.cta_composite_weights,
         }
 
         raw["factor_weights"] = self.factor_weights

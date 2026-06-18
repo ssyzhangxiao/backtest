@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="输出目录后缀（如 'oos' / 'full'），便于分两段跑隔离结果",
     )
+    parser.add_argument(
+        "--record-pos-scales",
+        action="store_true",
+        help="录制每个调仓日的 pos_scales 到 per_bar_<tag>.json（用于 Table 3/4 分析）",
+    )
     return parser.parse_args()
 
 
@@ -157,7 +162,10 @@ def _run_one(
         ds = PyBrokerDataSource(df=df_std)
 
         runner = PyBrokerBacktestRunner(
-            data_source=ds, config=config, target_symbols=config.symbols
+            data_source=ds,
+            config=config,
+            target_symbols=config.symbols,
+            record_per_bar=getattr(args, "record_pos_scales", False),
         )
         strategies = args.strategies or [
             "trend",
@@ -208,6 +216,26 @@ def _run_one(
             f"sharpe={summary.get('sharpe')}  mdd={summary.get('max_drawdown_pct')}  "
             f"elapsed={elapsed:.1f}s ==="
         )
+
+        # ── 录制 pos_scales（sweep/分析专用） ──
+        if getattr(args, "record_pos_scales", False) and summary["status"] == "ok":
+            # blueprint_builder 是闭包内的局部变量；从 runner 取
+            per_bar = getattr(runner, "_last_per_bar", None)
+            if per_bar is None:
+                # 兜底：再取一次
+                bb = getattr(runner, "_blueprint_builder", None)
+                per_bar = getattr(bb, "per_bar_log", []) if bb else []
+            out_dir = Path(args.output_dir)
+            if args.output_suffix:
+                out_dir = out_dir.parent / f"{out_dir.name}_{args.output_suffix}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            per_bar_path = out_dir / f"per_bar_{summary['tag']}.json"
+            per_bar_path.write_text(
+                json.dumps(per_bar, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            logger.info(f"  per-bar 录制: {len(per_bar)} 条 → {per_bar_path.name}")
+
         return summary
 
     except Exception as e:

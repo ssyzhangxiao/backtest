@@ -63,11 +63,14 @@ class PyBrokerBacktestRunner:
         data_source: PyBrokerDataSource,
         config: Optional[BacktestConfig] = None,
         target_symbols: Optional[List[str]] = None,
+        record_per_bar: bool = False,
     ):
         self.data_source = data_source
         self.target_symbols = target_symbols or data_source.symbols
         self.config = config or BacktestConfig()
         self.library = StrategyLibrary()
+        # ── per-bar 录制开关（sweep/分析专用） ──
+        self.record_per_bar = record_per_bar
 
         from core.engine.switch_engine import ScoringConfig
 
@@ -304,17 +307,40 @@ class PyBrokerBacktestRunner:
 
         # ── 统一因子池注入（2026-06-13） ──
         factor_pool = UnifiedFactorPool()
-        signal_layer = SignalAbstractionLayer(
-            factor_pool,
-            default_mode=self.config.signal_mode,
-            cta_weight=self.config.cta_hybrid_weight,
-            xs_position_base=self.config.xs_position_base,
-            xs_position_ceiling=self.config.xs_position_ceiling,
-            xs_opposite_penalty=self.config.xs_opposite_penalty,
-        ) if self.config.use_signal_abstraction else None
+        # 方向三：配对交易横截面参数（2026-06-17）
+        from core.factors.pair_trading import PairSelectorParams
+        pair_params = PairSelectorParams(
+            ols_window=self.config.pair_ols_window,
+            adf_window=self.config.pair_adf_window,
+            pvalue_threshold=self.config.pair_pvalue_threshold,
+            rebalance_interval=self.config.pair_rebalance_interval,
+            zscore_lookback=self.config.pair_zscore_lookback,
+        )
+        cross_section_source = (
+            "pair_trading" if self.config.pair_trading_enabled else "default"
+        )
+        signal_layer = (
+            SignalAbstractionLayer(
+                factor_pool,
+                default_mode=self.config.signal_mode,
+                cta_weight=self.config.cta_hybrid_weight,
+                xs_position_base=self.config.xs_position_base,
+                xs_position_ceiling=self.config.xs_position_ceiling,
+                xs_opposite_penalty=self.config.xs_opposite_penalty,
+                cross_section_source=cross_section_source,
+                pair_params=pair_params,
+            )
+            if self.config.use_signal_abstraction
+            else None
+        )
         # 同步 hybrid_blend_method（方向二 2026-06-15）
         if signal_layer is not None:
             signal_layer.hybrid_blend_method = self.config.hybrid_blend_method
+            # 方向四 P1：CTA 合成权重
+            if self.config.cta_composite_weights is not None:
+                signal_layer.cta_composite_weights = dict(
+                    self.config.cta_composite_weights,
+                )
 
         blueprint_builder = PyBrokerExecutorBuilder(
             scoring_engine=self.switch_engine,
@@ -325,10 +351,13 @@ class PyBrokerBacktestRunner:
             weight_method=getattr(self.config, "weight_method", "risk_parity"),
             risk_estimates_provider=self._estimate_symbol_risk,
             signal_abstraction=signal_layer,
+            record_per_bar=self.record_per_bar,
         )
 
         # ── 预计算信号（2026-06-14：替代运行时 per-bar 计算） ──
         blueprint_builder.precompute_signals(df, sub_params)
+        # 暴露 builder（sweep 录制 pos_scales 用）──
+        self._blueprint_builder = blueprint_builder
 
         blueprint_executor = blueprint_builder.build(strategy_params=sub_params)
         strategy.add_execution(
@@ -450,7 +479,9 @@ class PyBrokerBacktestRunner:
     ) -> WalkforwardResult:
         """向前滚动分析（委托到 _walkforward 模块）。"""
         return _walkforward(
-            self, start_date, end_date,
+            self,
+            start_date,
+            end_date,
             train_ratio=train_ratio,
             step_ratio=step_ratio,
             train_bars=train_bars,
