@@ -18,7 +18,7 @@ P0/P1/P2 整改（2026-06-07）：
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import logging
 
 from .constants import INITIAL_CASH
@@ -63,6 +63,53 @@ class BacktestConfig:
 
     factor_weights: Dict[str, float] = field(default_factory=dict)
     """5子策略权重。P1-1 整改：YAML 未提供时为空字典并打 warning。"""
+
+    # ── 四因子 CTA 融合（2026-06-19）──
+    four_factor_enabled: bool = True
+    """是否启用四因子 CTA 融合（动量+期限+基差+仓单）。"""
+
+    four_factor_weights: Dict[str, float] = field(default_factory=dict)
+    """四因子权重 {donchian_breakout, carry, basis_momentum, receipt_change}。"""
+
+    four_factor_basis_window: int = 20
+    """基差动量计算窗口。"""
+
+    four_factor_receipt_window: int = 20
+    """仓单变化率计算窗口。"""
+
+    four_factor_receipt_cache_dir: str = "data/receipt_cache"
+    """AKShare 仓单数据缓存目录。"""
+
+    four_factor_fallback_3factor: Dict[str, float] = field(default_factory=dict)
+    """仓单缺失时回退权重（3 因子）。"""
+
+    four_factor_fallback_2factor: Dict[str, float] = field(default_factory=dict)
+    """基差+仓单均缺失时回退权重（2 因子）。"""
+
+    # ── 仓单数据源配置（2026-06-19 三层架构） ──
+    receipt_cache_dir: str = "data/receipt_cache"
+    """仓单缓存目录。"""
+
+    receipt_enable_online: bool = False
+    """是否启用在线拉取（沙盒默认 false，生产环境 true）。"""
+
+    receipt_request_interval_min: float = 1.0
+    """反爬虫：最小请求间隔（秒）。"""
+
+    receipt_request_interval_max: float = 4.0
+    """反爬虫：最大请求间隔（秒）。"""
+
+    receipt_retry_times: int = 3
+    """5xx/429 状态码重试次数。"""
+
+    receipt_cache_ttl_days: int = 7
+    """缓存有效期（天）。"""
+
+    cta_strategies: List[str] = field(default_factory=list)
+    """CTA 合成策略列表（2026-06-19 起精简为 4 个核心因子）。"""
+
+    cta_strategies_full: List[str] = field(default_factory=list)
+    """完整 CTA 策略列表（含噪音策略），仅用于单策略实验。"""
 
     entry_threshold: float = 0.05
     """开仓信号阈值。规则9：综合得分超过该阈值才开仓。"""
@@ -251,6 +298,20 @@ class BacktestConfig:
             )
             fw = {}
 
+        # 四因子 CTA 融合配置（2026-06-19）
+        ff_cfg = raw.get("four_factor", {}) or {}
+        ff_weights = ff_cfg.get("weights", {}) or {}
+        ff_fallback_3 = ff_cfg.get("fallback_weights_3factor", {}) or {}
+        ff_fallback_2 = ff_cfg.get("fallback_weights_2factor", {}) or {}
+        cta_strats = raw.get("cta_strategies", []) or []
+        cta_strats_full = raw.get("cta_strategies_full", []) or []
+        # 若未配置 cta_strategies 但启用了四因子 → 注入默认 4 因子
+        if not cta_strats and ff_cfg.get("enabled", False):
+            cta_strats = ["donchian_breakout", "carry", "basis_momentum", "receipt_change"]
+
+        # 仓单数据源配置（2026-06-19 三层架构）
+        rcpt_cfg = raw.get("receipt", {}) or {}
+
         # 各模块配置委托给各自的from_yaml解析
         factors_cfg = FactorModuleConfig.from_yaml(raw)
         stop_cfg = StopOptimizationConfig.from_yaml(raw)
@@ -275,6 +336,23 @@ class BacktestConfig:
             # 因子打分调仓
             rebalance_days=int(bt.get("rebalance_freq", 3)),
             factor_weights=fw,
+            # 四因子 CTA 融合（2026-06-19）
+            four_factor_enabled=bool(ff_cfg.get("enabled", True)),
+            four_factor_weights=dict(ff_weights),
+            four_factor_basis_window=int(ff_cfg.get("basis_window", 20)),
+            four_factor_receipt_window=int(ff_cfg.get("receipt_window", 20)),
+            four_factor_receipt_cache_dir=str(ff_cfg.get("receipt_cache_dir", "data/receipt_cache")),
+            four_factor_fallback_3factor=dict(ff_fallback_3),
+            four_factor_fallback_2factor=dict(ff_fallback_2),
+            # 仓单数据源配置（2026-06-19）
+            receipt_cache_dir=str(rcpt_cfg.get("cache_dir", "data/receipt_cache")),
+            receipt_enable_online=bool(rcpt_cfg.get("enable_online", False)),
+            receipt_request_interval_min=float(rcpt_cfg.get("request_interval_min", 1.0)),
+            receipt_request_interval_max=float(rcpt_cfg.get("request_interval_max", 4.0)),
+            receipt_retry_times=int(rcpt_cfg.get("retry_times", 3)),
+            receipt_cache_ttl_days=int(rcpt_cfg.get("cache_ttl_days", 7)),
+            cta_strategies=list(cta_strats),
+            cta_strategies_full=list(cta_strats_full),
             entry_threshold=float(bt.get("entry_threshold", 0.05)),
             stop_loss_pct=float(bt.get("stop_loss_pct", 0.03)),
             max_position_pct=float(bt.get("max_position_pct", 0.15)),

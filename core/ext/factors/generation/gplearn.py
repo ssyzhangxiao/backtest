@@ -206,6 +206,14 @@ def _make_factor_class(
 ) -> Type[BaseFactor]:
     """从 gplearn 挖掘结果动态构造 BaseFactor 子类。
 
+    ⚠️ 2026-06-20 持久化限制：
+      - 当前实现将 `program`（gplearn._Program）对象直接保存到类属性 `_gp_program`。
+      - `_Program` 内部包含 lambda 闭包，**不可 pickle**——禁止通过 joblib/pickle 持久化
+        整个 FactorEngine 后再 load，否则报 "Can't pickle local object"。
+      - 推荐做法：仅持久化 `formula` 字符串，在 `compute` 时用 `gplearn` 重新编译。
+      - 当前代码接受 program 是为在内存中直接求值（避免重编译开销）。
+      - 若后续需要持久化，请改用 `sympy` 解析 formula 或保存 AST 重建。
+
     Args:
         name: 因子编号（如 GP_001）
         formula: 因子公式描述

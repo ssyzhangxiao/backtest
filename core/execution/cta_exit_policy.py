@@ -71,9 +71,16 @@ class CTAExitPolicy:
     """CTA 退出策略引擎 — 兼容封装，委托 RiskController。
 
     2026-06-13：核心逻辑已迁移到 RiskController，本类维持旧接口。
+    ⚠️ 2026-06-20：已标记为 deprecated。请新代码直接使用 ``RiskController``。
     """
 
     def __init__(self, config: CTAExitConfig):
+        import warnings
+        warnings.warn(
+            "CTAExitPolicy is deprecated since 2026-06-13; use RiskController instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.config = config
         self._risk_controller = RiskController(config.to_risk_config())
 

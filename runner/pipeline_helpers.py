@@ -17,6 +17,34 @@ from core.config import BacktestConfig
 from core.config.strategy_profiles import StrategyLibrary
 
 
+def _extract_metrics_from_df(df: "Any") -> Dict[str, Any]:
+    """从实验返回的 DataFrame 中提取汇总指标（行/列启发式）。
+
+    启发式：若列包含 sharpe/annual_return/max_drawdown，直接取第一行；
+    否则尝试在 index 中查找。
+
+    2026-06-20 迁移（来自 runner/pipeline.py 顶层）。
+    """
+    if df is None or getattr(df, "empty", True):
+        return {"metrics": {"sharpe": 0.0, "annual_return": 0.0, "max_drawdown": 0.0}}
+    metrics = {"sharpe": 0.0, "annual_return": 0.0, "max_drawdown": 0.0}
+    cols_lower = [str(c).lower() for c in df.columns]
+    for key, aliases in {
+        "sharpe": ["sharpe", "sharpe_ratio"],
+        "annual_return": ["annual_return", "annual", "yearly_return"],
+        "max_drawdown": ["max_drawdown", "mdd", "max_dd"],
+    }.items():
+        for alias in aliases:
+            if alias in cols_lower:
+                col = df.columns[cols_lower.index(alias)]
+                try:
+                    metrics[key] = float(df[col].iloc[0])
+                except (ValueError, TypeError, IndexError):
+                    pass
+                break
+    return {"metrics": metrics}
+
+
 def _run_optimization(
     strategy: Optional[str],
     tasks: List[str],

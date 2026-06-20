@@ -81,7 +81,11 @@ class TestUnifiedFactorPoolInit:
         assert "momentum_ma" in CTA_SIGNAL_NAMES
         assert "tsi_garch" in CTA_SIGNAL_NAMES
         assert "pair_trading" in CTA_SIGNAL_NAMES
-        assert len(CTA_SIGNAL_NAMES) == 6
+        # 四因子升级（2026-06-19）新增 2 个独立信号
+        assert "basis_momentum" in CTA_SIGNAL_NAMES
+        assert "receipt_change" in CTA_SIGNAL_NAMES
+        # 7 个 CTA 策略 + 2 个四因子信号 = 9 个
+        assert len(CTA_SIGNAL_NAMES) == 9
 
     def test_compute_all_returns_dataframe(self, mini_ohlcv: pd.DataFrame):
         pool = UnifiedFactorPool()

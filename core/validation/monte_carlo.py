@@ -15,7 +15,7 @@ P2 整改（2026-06-07）：
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import logging
 import time
 
@@ -90,14 +90,21 @@ class MonteCarloSimulator:
         n_simulations: int = DEFAULT_N_SIMULATIONS,
         random_seed: Optional[int] = None,
         trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
+        quantiles: Optional[List[float]] = None,  # 2026-06-20：支持自定义分位数
     ):
         if trading_days_per_year <= 0:
             raise ValueError(
                 f"trading_days_per_year 必须为正数，实际: {trading_days_per_year}"
             )
+        if quantiles is not None:
+            if not quantiles or any(q < 0.0 or q > 1.0 for q in quantiles):
+                raise ValueError(
+                    f"quantiles 必须在 [0, 1] 范围内，实际: {quantiles}"
+                )
         self.n_simulations = n_simulations
         self.random_seed = random_seed
         self.trading_days_per_year = int(trading_days_per_year)
+        self.quantiles = quantiles if quantiles is not None else QUANTILES
 
     @staticmethod
     def _vectorized_sharpe(
@@ -221,10 +228,10 @@ class MonteCarloSimulator:
 
         elapsed = time.perf_counter() - t0
 
-        # 计算分位数
-        sharpe_q = {q: float(np.quantile(sharpes, q)) for q in QUANTILES}
-        dd_q = {q: float(np.quantile(max_dds, q)) for q in QUANTILES}
-        ret_q = {q: float(np.quantile(annual_rets, q)) for q in QUANTILES}
+        # 计算分位数（2026-06-20：使用 self.quantiles 支持自定义）
+        sharpe_q = {q: float(np.quantile(sharpes, q)) for q in self.quantiles}
+        dd_q = {q: float(np.quantile(max_dds, q)) for q in self.quantiles}
+        ret_q = {q: float(np.quantile(annual_rets, q)) for q in self.quantiles}
 
         # 稳健性判定：Sharpe的5%分位数>0
         is_robust = sharpe_q.get(0.05, 0.0) > 0
@@ -291,9 +298,9 @@ class MonteCarloSimulator:
 
         elapsed = time.perf_counter() - t0
 
-        sharpe_q = {q: float(np.quantile(sharpes, q)) for q in QUANTILES}
-        dd_q = {q: float(np.quantile(max_dds, q)) for q in QUANTILES}
-        ret_q = {q: float(np.quantile(annual_rets, q)) for q in QUANTILES}
+        sharpe_q = {q: float(np.quantile(sharpes, q)) for q in self.quantiles}
+        dd_q = {q: float(np.quantile(max_dds, q)) for q in self.quantiles}
+        ret_q = {q: float(np.quantile(annual_rets, q)) for q in self.quantiles}
 
         return MonteCarloResult(
             n_simulations=self.n_simulations,

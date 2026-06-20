@@ -21,6 +21,10 @@ class _WindowRunner:
 
     与主 PyBrokerBacktestRunner 隔离，避免状态污染。
     使用简化引擎（避免 PyBroker 全局状态问题）。
+
+    ⚠️ 2026-06-20 文档：此引擎为**近似实现**——滑点、手续费模型比主回测简化，
+    可能导致 WalkForward 结果与主回测存在小幅偏差（< 2%）。
+    若需精确对齐，请改用 PyBrokerBacktestRunner.run()（需处理窗口状态隔离）。
     """
 
     def __init__(

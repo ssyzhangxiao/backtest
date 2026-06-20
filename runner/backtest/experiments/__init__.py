@@ -37,6 +37,9 @@ from runner.backtest.experiments.e10_e11_reporting import (
     run_e10_html_report,
     run_e11_factor_analysis,
 )
+from runner.backtest.experiments.e12_four_factor import (
+    run_e12_four_factor,
+)
 
 _EXPERIMENT_MAP: Dict[str, Callable] = {
     "e1": run_e1_single_strategy_baselines,
@@ -50,6 +53,7 @@ _EXPERIMENT_MAP: Dict[str, Callable] = {
     "e9": run_e9_monte_carlo,
     "e10": run_e10_html_report,
     "e11": run_e11_factor_analysis,
+    "e12": run_e12_four_factor,  # 2026-06-19：四因子 CTA 升级
 }
 
 

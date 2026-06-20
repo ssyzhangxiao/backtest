@@ -65,6 +65,7 @@ def get_pybroker_runner(
     config: Dict[str, Any],
     strategies: Optional[List[str]] = None,
     target_symbols: Optional[List[str]] = None,
+    custom_params: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> PyBrokerBacktestRunner:
     """
     创建 PyBroker 回测运行器。
@@ -75,6 +76,9 @@ def get_pybroker_runner(
         strategies: 策略名称列表
         target_symbols: 目标品种子集；None 时使用 config["symbols"]。
             外层 per-symbol 循环必须传入 [sym] 以避免跑全品种组合。
+        custom_params: 显式覆盖参数 {strategy_name: {param_key: value}}。
+            若提供则优先于 config["strategies"][*].params 反射注入。
+            用于 E12 等模块的 best_params 透传（无需修改 config）。
 
     Returns:
         PyBrokerBacktestRunner 实例
@@ -89,17 +93,22 @@ def get_pybroker_runner(
     runner = PyBrokerBacktestRunner(data_source, bt_config, target_symbols=symbols)
     if strategies:
         runner.register_strategies(strategies)
-        # 修复 best_params 失效 bug：把 config["strategies"][*].params 注入到
-        # custom_params，让 PyBroker run() 的 sub_params.update(custom_params) 生效。
-        custom = {}
+        # 参数注入优先级（2026-06-20 重构）：
+        #   1. 显式 custom_params 参数（最高优先级，E12 透传最佳）
+        #   2. config["strategies"][*].params 反射注入（兜底，兼容老调用）
+        custom: Dict[str, Dict[str, Any]] = {}
+        if custom_params:
+            custom.update(custom_params)
         for sname in strategies:
+            if sname in custom:
+                continue  # 已被显式参数覆盖
             for s_cfg in config.get("strategies", []) or []:
                 if s_cfg.get("name") == sname and s_cfg.get("params"):
                     custom[sname] = dict(s_cfg["params"])
                     break
         if custom:
             runner.set_custom_params(custom)  # type: ignore[attr-defined]
-            logger.debug("已注入最优参数到 PyBroker: %s", list(custom.keys()))
+            logger.debug("已注入参数到 PyBroker: %s", list(custom.keys()))
     return runner
 
 

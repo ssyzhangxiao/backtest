@@ -26,6 +26,7 @@ CTA 策略状态管理（_CTABatchWrapper）：
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -37,6 +38,8 @@ from core.ext.factors.alpha_futures.sub_strategy_aggregator import (
     compute_sub_strategy_scores_from_ohlcv,
 )
 from core.strategies.cta.registry import CTA_STRATEGY_REGISTRY
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["UnifiedFactorPool", "ALL_SIGNAL_NAMES", "CTA_SIGNAL_NAMES"]
 
@@ -56,8 +59,16 @@ _CTA_PRIMARY_NAMES: List[str] = [
     "oi_signal",
 ]
 
-# 全部信号列名（11 列）
-CTA_SIGNAL_NAMES: List[str] = list(_CTA_PRIMARY_NAMES)
+# ── 四因子 CTA 升级（2026-06-19）新增的独立信号 ──
+# - basis_momentum：基差动量（依赖 far_close 列，无数据返回 0）
+# - receipt_change：仓单变化率（依赖外部 receipt_data 输入）
+_FACTOR_PRIMARY_NAMES: List[str] = [
+    "basis_momentum",
+    "receipt_change",
+]
+
+# 全部信号列名（11 个 CTA 策略 + 2 个四因子信号 = 13 列）
+CTA_SIGNAL_NAMES: List[str] = list(_CTA_PRIMARY_NAMES) + list(_FACTOR_PRIMARY_NAMES)
 ALL_SIGNAL_NAMES: List[str] = DEFAULT_FACTOR_NAMES + CTA_SIGNAL_NAMES
 
 # ── spread 依赖的策略 ──
@@ -87,11 +98,18 @@ class _CTABatchWrapper:
         self,
         df: pd.DataFrame,
         symbol: str,
+        receipt_data: Optional[pd.Series] = None,
+        receipt_window: Optional[int] = None,
+        basis_window: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """计算所有 CTA 策略在全部 bar 上的信号序列。
 
         输入 DataFrame 必须含 close / high / low / volume 列。
         对于 spread 依赖策略，需含 spread 或 far_close 列（可选）。
+
+        四因子新增（2026-06-19）：
+          - basis_momentum：依赖 far_close 列（无则全 0）
+          - receipt_change：依赖外部传入的 receipt_data（pd.Series，按日期索引）
 
         Returns:
             {策略名: np.ndarray(signal)}，长度 = len(df)，
@@ -156,6 +174,60 @@ class _CTABatchWrapper:
 
             results[name] = arr
 
+        # ── 四因子新增：基差动量 + 仓单变化率（独立计算，无需策略实例） ──
+        from core.factors.basis_momentum import compute_basis_momentum
+        from core.factors.receipt_factor import compute_receipt_factor_signal
+
+        # basis_momentum：依赖 far_close 列
+        if "far_close" in df.columns:
+            basis_arr = compute_basis_momentum(
+                close,
+                far_close=far_arr if far_arr is not None else df["far_close"].to_numpy(dtype=float),
+                basis_window=basis_window,
+            )
+        else:
+            basis_arr = np.zeros(n, dtype=float)
+        results["basis_momentum"] = basis_arr
+
+        # receipt_change：依赖外部 receipt_data
+        if receipt_data is not None and not receipt_data.empty:
+            try:
+                # 将 receipt_data 对齐到 df 的索引
+                # 2026-06-19：去除 time 成分（OHLCV 16:00 vs receipt 00:00 不匹配）
+                if "date" in df.columns:
+                    df_index = pd.to_datetime(df["date"]).dt.normalize()
+                else:
+                    df_index = pd.to_datetime(df.index).normalize()
+                # 同步去除 receipt index 的 time
+                receipt_norm_index = (
+                    pd.to_datetime(receipt_data.index).normalize()
+                )
+                receipt_data_aligned = pd.Series(
+                    receipt_data.values, index=receipt_norm_index,
+                )
+                # 去重（同一日期多条取最后）
+                # ⚠️ 2026-06-20 文档：若同一日有多个仓单快照（如盘前/盘后两次更新），
+                # `keep="last"` 取最后值，在回测当日可能引入轻微未来数据偏倚。
+                # 实际影响低：① 仓单日级数据 1 天 1 值为常态；
+                # ② df_index 已 normalize 到日级，reindex 不会跨日错配。
+                # 上游若需严格无偏，请保证 `receipt_data` 已是 T-1 收盘后快照。
+                receipt_data_aligned = receipt_data_aligned[
+                    ~receipt_data_aligned.index.duplicated(keep="last")
+                ]
+                receipt_aligned = receipt_data_aligned.reindex(df_index)
+                receipt_signal_series = compute_receipt_factor_signal(
+                    receipt_aligned, window=receipt_window,
+                )
+                receipt_arr = receipt_signal_series.to_numpy(dtype=float)
+                # 缺失日期（NaN）填 0
+                receipt_arr = np.where(np.isfinite(receipt_arr), receipt_arr, 0.0)
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("receipt_change 计算失败（%s），使用 0 信号", e)
+                receipt_arr = np.zeros(n, dtype=float)
+        else:
+            receipt_arr = np.zeros(n, dtype=float)
+        results["receipt_change"] = receipt_arr
+
         return results
 
 
@@ -184,14 +256,50 @@ class UnifiedFactorPool:
         self._cta_wrapper: Optional[_CTABatchWrapper] = None
         # 缓存：{symbol: DataFrame}
         self._cache: Dict[str, pd.DataFrame] = {}
+        # 仓单数据缓存：{symbol: pd.Series}（2026-06-19 四因子新增）
+        self._receipt_cache: Dict[str, pd.Series] = {}
+        # 默认窗口（可通过 setter 调整）
+        self._default_receipt_window: int = 20
+        self._default_basis_window: int = 20
 
     # ── 公共接口 ──
+
+    def preload_receipt_data(
+        self,
+        receipt_data: Dict[str, pd.Series],
+        receipt_window: int = 20,
+        basis_window: int = 20,
+    ) -> None:
+        """预加载所有品种的仓单数据。
+
+        调用后 compute_all() / compute_signals_for_bar() 内部自动应用。
+        Args:
+            receipt_data: {symbol: pd.Series(date-indexed)}
+            receipt_window: 仓单因子窗口
+            basis_window: 基差动量窗口
+        """
+        self._receipt_cache = dict(receipt_data or {})
+        self._default_receipt_window = int(receipt_window)
+        self._default_basis_window = int(basis_window)
+        # 清空信号缓存以触发重算
+        self._cache.clear()
+        _logger.info(
+            "[FactorPool] preload receipt_data: %d symbols, window=%d/%d",
+            len(self._receipt_cache), self._default_receipt_window, self._default_basis_window,
+        )
+
+    def get_receipt_data(self, symbol: str) -> Optional[pd.Series]:
+        """获取指定品种的仓单数据（外部读取）。"""
+        return self._receipt_cache.get(symbol)
 
     def compute_all(
         self,
         ohlcv: pd.DataFrame,
         symbol: str,
         strategy_params: Optional[Dict[str, Dict[str, Any]]] = None,
+        receipt_data: Optional[pd.Series] = None,
+        receipt_window: Optional[int] = None,
+        basis_window: Optional[int] = None,
     ) -> pd.DataFrame:
         """计算所有信号，返回含 11 列 + forward_return 的 DataFrame。
 
@@ -199,6 +307,9 @@ class UnifiedFactorPool:
             ohlcv: 含 date, open, high, low, close, volume(可选) 的 DataFrame
             symbol: 品种代码（用于 CTA 策略状态管理）
             strategy_params: 子策略参数（透传给 sub_strategy_aggregator）
+            receipt_data: 仓单日度序列（pd.Series，按日期索引），用于仓单因子
+            receipt_window: 仓单因子窗口（默认 20）
+            basis_window: 基差动量窗口（默认 20）
 
         Returns:
             DataFrame，列 = ALL_SIGNAL_NAMES + ["forward_return"]
@@ -213,10 +324,37 @@ class UnifiedFactorPool:
             strategy_params=strategy_params,
         )
 
-        # 2) 6 个 CTA 信号
+        # 2) 7 个 CTA 策略 + 2 个四因子信号
         if self._cta_wrapper is None:
             self._cta_wrapper = _CTABatchWrapper()
-        cta_results = self._cta_wrapper.compute_all(ohlcv, symbol)
+        # 优先使用显式传入的 receipt_data，否则从预加载缓存中取
+        if receipt_data is None and self._receipt_cache:
+            receipt_data = self._receipt_cache.get(symbol)
+            # 2026-06-19：兼容 PyBroker 大写短码（如 "rb"）与 cache 中完整代码（如 "SHFE.RB"）
+            if receipt_data is None:
+                short = symbol.split(".")[-1].lower() if "." in symbol else symbol.lower()
+                for cache_key, cache_val in self._receipt_cache.items():
+                    if cache_key.split(".")[-1].lower() == short:
+                        receipt_data = cache_val
+                        break
+        # 调试日志：2026-06-20 从 sys.stderr.write 改 logger.debug（避免污染 stderr）
+        if "rb" in symbol.lower() or "FG" in symbol:
+            _logger.debug(
+                f"[FP_COMPUTE] {symbol}: receipt_data={'YES' if receipt_data is not None else 'NO'}, "
+                f"cache_keys={list(self._receipt_cache.keys())}"
+            )
+        # 优先使用显式窗口，否则用预加载默认窗口
+        if receipt_window is None:
+            receipt_window = self._default_receipt_window
+        if basis_window is None:
+            basis_window = self._default_basis_window
+        cta_results = self._cta_wrapper.compute_all(
+            ohlcv,
+            symbol,
+            receipt_data=receipt_data,
+            receipt_window=receipt_window,
+            basis_window=basis_window,
+        )
 
         # 3) 合并
         result = alpha_df.copy()

@@ -7,7 +7,10 @@
     因子:   core.ext.factors.alpha_futures.factors.{t,r,v,m,h,cf,ts}_*
 
 本文件仅作为向后兼容 shim，AlphaFutures24.compute_all 接口保持不变。
+
+⚠️ 2026-06-20 标记为 deprecated：新代码请直接使用 `core.ext.factors.alpha_futures.*`。
 """
+import warnings
 from typing import Dict, Optional
 import logging
 
@@ -35,9 +38,18 @@ class AlphaFutures24:
 
     内部委托给新的 FactorEngine，所有24个因子已迁移完毕。
     旧代码无需修改即可使用。
+
+    ⚠️ 2026-06-20：此类已标记为 deprecated。构造时发出 DeprecationWarning。
+    新代码请直接使用 `core.ext.factors.alpha_futures.factor_engine.FactorEngine`。
     """
 
     def __init__(self, config: Optional[AlphaFuturesConfig] = None):
+        warnings.warn(
+            "AlphaFutures24 is deprecated since 2026-06-20; "
+            "use core.ext.factors.alpha_futures.factor_engine.FactorEngine instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.config = config or AlphaFuturesConfig()
         # 延迟导入，避免循环依赖（新位置：core.ext.factors.alpha_futures）
         from core.ext.factors.alpha_futures.factor_engine import FactorEngine

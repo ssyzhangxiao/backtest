@@ -6,6 +6,11 @@
 - _csv_mixin.py       CSV 数据源方法（格式检测/加载/后处理）
 - _series_mixin.py    主力合约识别/连续序列/价差对
 - data_loader.py      DataLoader 主类（Mixin 组合 + 输出接口）
+
+仓单 fetcher 三层架构（2026-06-19）：
+- _receipt_adapters.py  接口层（4 交易所适配器 + 反爬虫）
+- _receipt_cache.py     缓存层（parquet + meta + TTL）
+- receipt_fetcher.py    逻辑层（编排器 + 信号计算）
 """
 
 from core.data.data_loader import DataLoader
@@ -16,6 +21,12 @@ from core.data._constants import (
     MAX_CONTRACTS_PER_PRODUCT,
     PRODUCT_EXCHANGE_MAP,
 )
+from core.data.receipt_fetcher import (
+    ReceiptFetcher,
+    SYMBOL_TO_AK_NAME,
+    get_receipt_change_signal,
+    load_receipt_cache,
+)
 
 __all__ = [
     "DataLoader",
@@ -24,4 +35,8 @@ __all__ = [
     "DEFAULT_SYMBOLS",
     "MAX_CONTRACTS_PER_PRODUCT",
     "PRODUCT_EXCHANGE_MAP",
+    "ReceiptFetcher",
+    "SYMBOL_TO_AK_NAME",
+    "get_receipt_change_signal",
+    "load_receipt_cache",
 ]

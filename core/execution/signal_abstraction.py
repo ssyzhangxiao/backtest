@@ -346,6 +346,158 @@ class SignalAbstractionLayer:
         return self.cross_section_source == "pair_trading"
 
     # ────────────────────────────────────────────────────────────
+    # 方向四 P2：四因子 CTA 融合（2026-06-19）
+    # ────────────────────────────────────────────────────────────
+
+    # 四因子默认权重（动量 / 期限结构 / 基差动量 / 仓单）
+    # 等权近似：动量 0.30、期限 0.25、基差 0.25、仓单 0.20
+    DEFAULT_FOUR_FACTOR_WEIGHTS: Dict[str, float] = {
+        "donchian_breakout": 0.30,  # 动量
+        "carry": 0.25,              # 期限结构
+        "basis_momentum": 0.25,     # 基差动量
+        "receipt_change": 0.20,     # 仓单变化率
+    }
+
+    def get_four_factor_signal(
+        self,
+        symbol: str,
+        ohlcv: pd.DataFrame,
+        bar_idx: int,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """四因子融合信号（动量 + 期限 + 基差动量 + 仓单）。
+
+        信号组成：
+          - donchian_breakout：来自 CTA 策略（趋势动量）
+          - carry：来自 CTA 策略（期限结构）
+          - basis_momentum：来自 factor_pool 独立计算
+          - receipt_change：来自 factor_pool 独立计算（无仓单数据时为 0）
+
+        缺失数据回退：
+          - 调用方应在调用前通过 has_basis / has_receipt 决定权重
+          - 工具方法 `compute_four_factor_weights()` 自动按可用因子分配权重
+
+        Args:
+            symbol: 品种代码
+            ohlcv: OHLCV DataFrame（含 date, open, high, low, close, volume）
+            bar_idx: 当前 bar 索引
+            weights: 自定义权重 {因子名: 权重}，默认使用 DEFAULT_FOUR_FACTOR_WEIGHTS
+
+        Returns:
+            融合信号 [-1, 1]
+        """
+        signals = self._pool.compute_signals_for_bar(ohlcv, symbol, bar_idx)
+        donchian = float(np.clip(signals.get("donchian_breakout", 0.0), -1.0, 1.0))
+        carry = float(np.clip(signals.get("carry", 0.0), -1.0, 1.0))
+        basis_mom = float(np.clip(signals.get("basis_momentum", 0.0), -1.0, 1.0))
+        receipt = float(np.clip(signals.get("receipt_change", 0.0), -1.0, 1.0))
+
+        factor_values = {
+            "donchian_breakout": donchian,
+            "carry": carry,
+            "basis_momentum": basis_mom,
+            "receipt_change": receipt,
+        }
+        w = dict(weights or self.DEFAULT_FOUR_FACTOR_WEIGHTS)
+        # 加权融合
+        raw_signal = sum(
+            factor_values.get(name, 0.0) * weight for name, weight in w.items()
+        )
+        return float(np.clip(raw_signal, -1.0, 1.0))
+
+    @staticmethod
+    def compute_four_factor_weights(
+        has_basis: bool,
+        has_receipt: bool,
+        base_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        """根据数据可用性调整四因子权重。
+
+        Args:
+            has_basis: 品种是否可计算 basis_momentum（有 far_close 数据）
+            has_receipt: 品种是否有仓单数据
+            base_weights: 基础权重，默认使用 DEFAULT_FOUR_FACTOR_WEIGHTS
+
+        Returns:
+            调整后的权重字典 {因子名: 权重}，总和 = 1.0
+        """
+        base = dict(base_weights or SignalAbstractionLayer.DEFAULT_FOUR_FACTOR_WEIGHTS)
+        if has_basis and has_receipt:
+            return base
+
+        available = ["donchian_breakout", "carry"]
+        if has_basis:
+            available.append("basis_momentum")
+        if has_receipt:
+            available.append("receipt_change")
+
+        # 重新归一化：仅使用可用因子的权重
+        avail_weight_sum = sum(base.get(k, 0.0) for k in available)
+        if avail_weight_sum <= 0:
+            # 全部缺失 → 等权
+            n = len(available)
+            return {k: 1.0 / n for k in available}
+        # 等比放大保持原比例
+        scale = 1.0 / avail_weight_sum
+        return {k: base.get(k, 0.0) * scale for k in available}
+
+    def get_four_factor_signal_dynamic(
+        self,
+        symbol: str,
+        ohlcv: pd.DataFrame,
+        bar_idx: int,
+        cross_section_z: float,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """四因子融合 + 方向二（横截面作为仓位缩放因子）。
+
+        设计思想（2026-06-19）：
+          - 方向由四因子融合信号决定（保留多因子互补能力）
+          - 横截面信号只影响仓位大小：信号强→满仓，信号弱→半仓
+          - 四因子与横截面异号时 → 额外减仓（方向二核心逻辑）
+
+        公式：
+          four_factor = get_four_factor_signal(...)
+          position_scale = base + (ceiling-base)*|cross_section_z|
+          if four_factor * cross_section_z < 0:  # 异号
+              position_scale *= opposite_penalty
+          final = four_factor * position_scale
+
+        默认参数（b=0.25, p=0.4）：
+          - 横截面无信息时，四因子仓位 = 0.25（半仓的半仓）
+          - 横截面强且与四因子同向时，四因子仓位 = 1.0（满仓）
+          - 异号时，四因子仓位 = 0.1（25% × 40%）
+
+        Args:
+            symbol: 品种代码
+            ohlcv: OHLCV DataFrame
+            bar_idx: 当前 bar 索引
+            cross_section_z: 来自 FactorScoringEngine 的品种横截面 z-score
+            weights: 四因子权重
+
+        Returns:
+            仓位缩放后的信号，符号同 four_factor，幅度 ≤ |four_factor|
+        """
+        four_factor = self.get_four_factor_signal(symbol, ohlcv, bar_idx, weights)
+        # 横截面强度
+        cross_strength = float(np.clip(abs(cross_section_z), 0.0, 1.0))
+        # 基础仓位缩放
+        position_scale = (
+            self.xs_position_base
+            + (self.xs_position_ceiling - self.xs_position_base) * cross_strength
+        )
+        # 异号 → 额外减仓
+        if float(four_factor) * float(cross_section_z) < 0.0:
+            position_scale *= self.xs_opposite_penalty
+        # 缩放后的信号
+        scaled = float(four_factor) * float(np.clip(position_scale, 0.0, 1.0))
+        return float(np.clip(scaled, -1.0, 1.0))
+
+    def set_four_factor_weights(self, weights: Dict[str, float]) -> None:
+        """设置四因子融合权重（运行时覆盖）。"""
+        self.DEFAULT_FOUR_FACTOR_WEIGHTS = dict(weights)
+
+    # ────────────────────────────────────────────────────────────
     # 工具
     # ────────────────────────────────────────────────────────────
 

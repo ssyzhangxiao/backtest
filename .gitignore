@@ -37,6 +37,8 @@ backtest_results_*/
 new_strategy_results_*/
 unified_backtest_results_*/
 output_*/
+# 2026-06-20：新增通用 output 目录忽略
+output/
 term_structure_backtest_results/
 results/
 

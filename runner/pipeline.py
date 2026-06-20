@@ -26,6 +26,12 @@ from runner.pipeline_helpers import (
 )
 
 
+def _extract_metrics_from_df(df: "pd.DataFrame") -> Dict[str, Any]:
+    """已迁移至 runner/pipeline_helpers.py（2026-06-20）"""
+    from runner.pipeline_helpers import _extract_metrics_from_df as _impl
+    return _impl(df)
+
+
 class Pipeline:
     """
     回测流水线编排器。
@@ -121,7 +127,7 @@ class Pipeline:
     def run_backtest(
         self,
         experiment: str = "all",
-        cross_sectional: bool = True,
+        cross_sectional: bool = False,
         strategy: Optional[str] = None,
     ) -> "Pipeline":
         """
@@ -180,6 +186,82 @@ class Pipeline:
                 cross_sectional=cross_sectional,
             )
             logger.info("[%s] 实验完成", name)
+        return self
+
+    def run_four_factor_backtest(
+        self,
+        use_receipt: bool = True,
+    ) -> "Pipeline":
+        """
+        执行四因子 CTA 回测（动量 + 期限结构 + 基差动量 + 仓单变化率）。
+
+        委托 runner.backtest.four_factor 模块，自动加载 AKShare 仓单数据，
+        构造 SignalAbstractionLayer 四因子融合。
+
+        Args:
+            use_receipt: 是否启用仓单因子（False 时回退到 3 因子 / 2 因子）
+
+        Returns:
+            self（支持链式调用）
+        """
+        if self._data is None:
+            raise PipelineError("请先调用 load_data() 加载数据")
+        from runner.backtest.four_factor import run_four_factor_backtest
+        from runner.backtest.four_factor import _convert_to_symbol_dict
+
+        # 转换 PyBrokerDataSource → {symbol: DataFrame} 字典
+        data_dict = _convert_to_symbol_dict(self._data)
+        logger.info(
+            "[四因子] 数据准备：%d 品种，data源类型=%s",
+            len(data_dict), type(self._data).__name__,
+        )
+
+        result = run_four_factor_backtest(
+            config=self._config,
+            data=data_dict,
+            raw_config=self._raw_config,
+            use_receipt=use_receipt,
+        )
+        self._results["four_factor"] = result
+        # 同时跑一次无仓单版本用于对比
+        if use_receipt:
+            self._results["four_factor_no_receipt"] = run_four_factor_backtest(
+                config=self._config,
+                data=data_dict,
+                raw_config=self._raw_config,
+                use_receipt=False,
+            )
+        return self
+
+    def build_four_factor_comparison(
+        self,
+        baseline_experiment: str = "e2",
+    ) -> "Pipeline":
+        """构建 6 策略基线 vs 四因子 对比报告。
+
+        Args:
+            baseline_experiment: 作为基线的实验名（默认 e2 等权融合）
+
+        Returns:
+            self（将对比 DataFrame 存入 _results["four_factor_comparison"]）
+        """
+        if "four_factor" not in self._results:
+            raise PipelineError("请先调用 run_four_factor_backtest()")
+        from runner.backtest.four_factor import build_comparison_report
+        import pandas as pd
+
+        baseline = self._results.get(baseline_experiment, {})
+        # 兼容 e2 实验返回 DataFrame
+        if isinstance(baseline, pd.DataFrame):
+            baseline_metrics = _extract_metrics_from_df(baseline)
+        else:
+            baseline_metrics = baseline
+
+        self._results["four_factor_comparison"] = build_comparison_report(
+            baseline_result=baseline_metrics,
+            four_factor_result=self._results["four_factor"],
+            four_factor_no_receipt=self._results.get("four_factor_no_receipt"),
+        )
         return self
 
     def run_cta(
@@ -496,6 +578,77 @@ class Pipeline:
             symbols=symbols,
         )
         self._results["factor_review"] = results
+        return self
+
+    def daily_sim(
+        self,
+        start_date: str,
+        end_date: str,
+        symbols: Optional[List[str]] = None,
+        initial_cash: float = 1_000_000.0,
+        skip_dashboard: bool = False,
+        skip_check: bool = False,
+    ) -> "Pipeline":
+        """
+        L3 模拟交易：逐日 OOS 回测 + 日历对齐 + 数据检查 + 看板。
+
+        规则 20.4：Pipeline 方法命名规范，使用动名词短语。
+
+        Args:
+            start_date: 回测开始日期
+            end_date: 回测结束日期（含）
+            symbols: 品种列表，默认 DEFAULT_SYMBOLS
+            initial_cash: 初始资金
+            skip_dashboard: 跳过看板生成
+            skip_check: 跳过数据完整性检查
+
+        Returns:
+            self（支持链式调用）
+        """
+        from runner.live.calendar import TradingCalendar
+        from runner.live.data_checker import check_data_completeness_summary
+        from runner.live.dashboard import generate_dashboard
+        from runner.live.daily_replay import DEFAULT_SYMBOLS
+
+        if symbols is None:
+            symbols = DEFAULT_SYMBOLS
+
+        # 交易日历
+        cal = TradingCalendar.from_data_source(self._data)
+        logger.info(f"交易日历: {cal}")
+
+        # 数据完整性检查
+        if not skip_check:
+            summary = check_data_completeness_summary(self._data, symbols)
+            errors = summary[summary["status"] == "error"]
+            if len(errors) > 0:
+                logger.warning(f"数据完整性: {len(errors)} 个品种异常")
+            self._results["daily_sim_data_check"] = summary
+
+        # 逐日 OOS 回测
+        from scripts.run_daily_sim import run_daily_oos_backtest
+
+        daily_log, positions_log = run_daily_oos_backtest(
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbols,
+            initial_cash=initial_cash,
+        )
+        self._results["daily_sim_log"] = daily_log
+        self._results["daily_sim_positions"] = positions_log
+
+        # 看板
+        if not skip_dashboard and not daily_log.empty:
+            from pathlib import Path
+            log_path = Path("output_backtest_pybroker/l3_daily_sim/daily_log.csv")
+            pos_path = Path("output_backtest_pybroker/l3_daily_sim/positions_log.csv")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            daily_log.to_csv(log_path, index=False)
+            positions_log.to_csv(pos_path, index=False)
+            dash_path = Path("output_backtest_pybroker/l3_daily_sim/dashboard.html")
+            generate_dashboard(str(log_path), str(dash_path), positions_path=str(pos_path))
+            self._results["daily_sim_dashboard"] = str(dash_path)
+
         return self
 
     def with_config(self, **overrides: Any) -> "Pipeline":

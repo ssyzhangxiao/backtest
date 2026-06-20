@@ -274,8 +274,10 @@ class PyBrokerBacktestRunner:
 
         from core.engine.strategy_indicators import StrategyIndicatorRegistry
         from core.engine.sub_strategy_indicators import register_default_indicators
+        from core.execution.four_factor_indicators import register_four_factor_indicators
 
         register_default_indicators()
+        register_four_factor_indicators()  # 2026-06-19：四因子 CTA 升级
 
         _DEFAULT_SUBS = [
             "trend",
@@ -285,6 +287,18 @@ class PyBrokerBacktestRunner:
             "composite_resonance",
         ]
         all_strategy_names = self._registered_strategies or _DEFAULT_SUBS
+        # 如果显式传入了 four_factor 或 four_factor_enabled=True，加入
+        if (
+            getattr(self.config, "four_factor_enabled", False)
+            and "four_factor" not in all_strategy_names
+            and (
+                # 显式传入了 four_factor（如 e12 实验）
+                "four_factor" in self._registered_strategies
+                # 或 four_factor_enabled=True 且想自动加入（向后兼容）
+                or getattr(self.config, "four_factor_auto_register", False)
+            )
+        ):
+            all_strategy_names = list(all_strategy_names) + ["four_factor"]
         if hasattr(self, "switch_engine") and self.switch_engine is not None:
             self.switch_engine.set_active_strategies(all_strategy_names)
         sub_params = {}
@@ -307,6 +321,60 @@ class PyBrokerBacktestRunner:
 
         # ── 统一因子池注入（2026-06-13） ──
         factor_pool = UnifiedFactorPool()
+
+        # ── 四因子 CTA 仓单数据预加载（2026-06-19）──
+        # 当 four_factor_enabled=True 且存在 four_factor_receipt_cache_dir 时，
+        # 从本地 parquet 缓存加载各品种仓单数据，并预加载到 factor_pool。
+        # 若缓存不存在则不预加载（receipt_change 信号保持 0，回退到 3 因子）。
+        # 2026-06-19 扩展：若 self._custom_params["four_factor"]["receipt_data"] 存在，
+        # 优先使用其内联数据（e12 等实验手动注入），跳过磁盘缓存读取。
+        custom_params = getattr(self, "_custom_params", None) or {}
+        ff_params = custom_params.get("four_factor", {}) if isinstance(custom_params, dict) else {}
+        inline_receipt = ff_params.get("receipt_data") if isinstance(ff_params, dict) else None
+        if isinstance(inline_receipt, dict) and inline_receipt:
+            try:
+                factor_pool.preload_receipt_data(
+                    receipt_data=inline_receipt,
+                    receipt_window=int(ff_params.get("receipt_window", 20)),
+                    basis_window=int(ff_params.get("basis_window", 20)),
+                )
+                logger.info(
+                    "[四因子] 自定义参数预加载仓单数据：%d 品种",
+                    len(inline_receipt),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[四因子] 自定义参数预加载仓单数据失败：%s", e)
+        elif getattr(self.config, "four_factor_enabled", False):
+            try:
+                from core.data.receipt_fetcher import load_receipt_cache
+                from pathlib import Path
+
+                cache_dir = Path(
+                    getattr(
+                        self.config, "four_factor_receipt_cache_dir",
+                        "data/receipt_cache",
+                    )
+                )
+                if cache_dir.exists():
+                    receipt_map = load_receipt_cache(
+                        cache_dir, symbols=symbols,
+                    )
+                    if receipt_map:
+                        factor_pool.preload_receipt_data(
+                            receipt_data=receipt_map,
+                            receipt_window=int(
+                                getattr(self.config, "four_factor_receipt_window", 20),
+                            ),
+                            basis_window=int(
+                                getattr(self.config, "four_factor_basis_window", 20),
+                            ),
+                        )
+                        logger.info(
+                            "[四因子] 预加载仓单数据：%d 品种（cache_dir=%s）",
+                            len(receipt_map), cache_dir,
+                        )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[四因子] 预加载仓单数据失败：%s", e)
         # 方向三：配对交易横截面参数（2026-06-17）
         from core.factors.pair_trading import PairSelectorParams
         pair_params = PairSelectorParams(

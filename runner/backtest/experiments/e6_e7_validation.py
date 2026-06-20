@@ -173,59 +173,66 @@ def run_e7_out_of_sample(
 
     for sym in symbols:
         logger.info(f"  品种: {sym}")
-        try:
-            # 样本内回测（修复 per-symbol 隔离 bug：仅对当前品种做回测）
-            runner_in = get_pybroker_runner(
-                data_source, config, strategies=strategy_names, target_symbols=[sym]
-            )
-            result_in = safe_run_backtest(
-                runner_in,
-                str(full_start.date()),
-                str(in_sample_end.date()),
-                f"E7_in_{sym}",
-            )
-            if result_in is not None:
-                m_in = format_metrics(result_in.metrics)
-                m_in["symbol"] = sym
-                m_in["split"] = "in_sample"
-                all_results.append(m_in)
-                if sym == primary_symbol:
-                    eq_in = result_in.equity_curve
-                    if eq_in is not None and not eq_in.empty:
-                        save_equity_curve(eq_in, output_dir, "e7_equity_in_sample")
+        # 修复 E7 单策略隔离 bug：原实现把 strategy_names(5 个) 作为 strategies 传入，
+        # 得到的 result_in.metrics["sharpe"] 是组合 Sharpe，无法评估单策略的 OOS 衰减。
+        # 正确做法：按 (symbol, strategy) 二维循环，每个组合单独跑 in/out。
+        for sname in strategy_names:
+            try:
+                # 样本内回测（per-symbol + per-strategy 隔离）
+                runner_in = get_pybroker_runner(
+                    data_source, config, strategies=[sname], target_symbols=[sym],
+                )
+                result_in = safe_run_backtest(
+                    runner_in,
+                    str(full_start.date()),
+                    str(in_sample_end.date()),
+                    f"E7_in_{sym}_{sname}",
+                )
+                if result_in is not None:
+                    m_in = format_metrics(result_in.metrics)
+                    m_in["symbol"] = sym
+                    m_in["strategy"] = sname
+                    m_in["split"] = "in_sample"
+                    all_results.append(m_in)
+                    if sym == primary_symbol and sname == strategy_names[0]:
+                        eq_in = result_in.equity_curve
+                        if eq_in is not None and not eq_in.empty:
+                            save_equity_curve(eq_in, output_dir, "e7_equity_in_sample")
 
-            # 样本外回测（修复 per-symbol 隔离 bug：仅对当前品种做回测）
-            runner_out = get_pybroker_runner(
-                data_source, config, strategies=strategy_names, target_symbols=[sym]
-            )
-            result_out = safe_run_backtest(
-                runner_out,
-                str(out_sample_start.date()),
-                str(full_end.date()),
-                f"E7_out_{sym}",
-            )
-            if result_out is not None:
-                m_out = format_metrics(result_out.metrics)
-                m_out["symbol"] = sym
-                m_out["split"] = "out_sample"
-                all_results.append(m_out)
-                if sym == primary_symbol:
-                    eq_out = result_out.equity_curve
-                    if eq_out is not None and not eq_out.empty:
-                        save_equity_curve(eq_out, output_dir, "e7_equity_out_sample")
+                # 样本外回测（per-symbol + per-strategy 隔离）
+                runner_out = get_pybroker_runner(
+                    data_source, config, strategies=[sname], target_symbols=[sym],
+                )
+                result_out = safe_run_backtest(
+                    runner_out,
+                    str(out_sample_start.date()),
+                    str(full_end.date()),
+                    f"E7_out_{sym}_{sname}",
+                )
+                if result_out is not None:
+                    m_out = format_metrics(result_out.metrics)
+                    m_out["symbol"] = sym
+                    m_out["strategy"] = sname
+                    m_out["split"] = "out_sample"
+                    all_results.append(m_out)
+                    if sym == primary_symbol and sname == strategy_names[0]:
+                        eq_out = result_out.equity_curve
+                        if eq_out is not None and not eq_out.empty:
+                            save_equity_curve(eq_out, output_dir, "e7_equity_out_sample")
 
-            # Sharpe 衰减率
-            if result_in is not None and result_out is not None:
-                sharpe_in = safe_float(result_in.metrics.get("sharpe", 0))
-                sharpe_out = safe_float(result_out.metrics.get("sharpe", 0))
-                if abs(sharpe_in) > _EPSILON:
-                    decay = (sharpe_in - sharpe_out) / abs(sharpe_in)
-                    is_qualified = decay < _SAFE_DECAY_THRESHOLD
-                    logger.info(
-                        f"  Sharpe衰减率: {decay:.1%} {'合格' if is_qualified else '不合格'}"
-                    )
-        except Exception as e:
-            logger.error(f"  {sym}: 失败 - {e}")
+                # Sharpe 衰减率（按单策略计算）
+                if result_in is not None and result_out is not None:
+                    sharpe_in = safe_float(result_in.metrics.get("sharpe", 0))
+                    sharpe_out = safe_float(result_out.metrics.get("sharpe", 0))
+                    if abs(sharpe_in) > _EPSILON:
+                        decay = (sharpe_in - sharpe_out) / abs(sharpe_in)
+                        is_qualified = decay < _SAFE_DECAY_THRESHOLD
+                        logger.info(
+                            f"  [{sym}/{sname}] Sharpe衰减率: {decay:.1%} "
+                            f"{'合格' if is_qualified else '不合格'}"
+                        )
+            except Exception as e:
+                logger.error(f"  {sym}/{sname}: 失败 - {e}")
 
     df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
     save_csv(df, output_dir / "e7_out_of_sample_metrics.csv")

@@ -317,7 +317,34 @@ class PyBrokerExecutorBuilder:
                 ] or CTA_SIGNAL_NAMES
                 # 方向四 P1：优先使用 signal_layer 自定义权重（2026-06-17）
                 custom_w = getattr(self.signal_abstraction, "cta_composite_weights", None)
-                if custom_w is not None:
+                # 2026-06-19：四因子 CTA 融合——若 strategy_params 中含 "four_factor"，
+                # 强制使用四因子权重（覆盖 custom_w），确保 receipt_change / basis_momentum
+                # 真正参与合成。
+                if "four_factor" in strategy_params:
+                    four_factor_w = (
+                        self.signal_abstraction.DEFAULT_FOUR_FACTOR_WEIGHTS
+                        if hasattr(self.signal_abstraction, "DEFAULT_FOUR_FACTOR_WEIGHTS")
+                        else {
+                            "donchian_breakout": 0.30,
+                            "carry": 0.25,
+                            "basis_momentum": 0.25,
+                            "receipt_change": 0.20,
+                        }
+                    )
+                    # 允许从 strategy_params["four_factor"]["weights"] 覆盖
+                    ff_param_weights = strategy_params["four_factor"].get("weights", {})
+                    four_factor_w = {**four_factor_w, **ff_param_weights}
+                    # 限制 active_cta 为四因子相关信号
+                    four_factor_keys = [
+                        "donchian_breakout", "carry", "basis_momentum", "receipt_change",
+                    ]
+                    active_cta = [k for k in four_factor_keys if k in CTA_SIGNAL_NAMES]
+                    total_w = sum(four_factor_w.get(k, 0.0) for k in active_cta)
+                    if total_w > 1e-8:
+                        weights = {k: four_factor_w.get(k, 0.0) / total_w for k in active_cta}
+                    else:
+                        weights = {k: 1.0 / len(active_cta) for k in active_cta}
+                elif custom_w is not None:
                     total_w = sum(custom_w.get(k, 0.0) for k in active_cta)
                     if total_w > 1e-8:
                         weights = {k: custom_w.get(k, 0.0) / total_w for k in active_cta}
@@ -360,11 +387,7 @@ class PyBrokerExecutorBuilder:
             "PyBrokerExecutorBuilder.build() called, record_per_bar=%s",
             self.record_per_bar,
         )
-        import sys as _sys
-
-        _sys.stderr.write(
-            f"[DEBUG] build() called, record_per_bar={self.record_per_bar}\n"
-        )
+        # 2026-06-20：移除冗余的 sys.stderr.write（与上面 _logger.info 重复）
         scoring_engine = self.scoring_engine
         portfolio_manager = self.portfolio_manager
         risk_controller = self.risk_controller
@@ -785,8 +808,20 @@ class PyBrokerExecutorBuilder:
                 scoring_engine.mark_rebalanced(current_date)
 
                 signals: Dict[str, float] = {}
+                # ── 方向三：pair signal 覆盖（2026-06-20 修复） ──
+                # 当 signal_abstraction 在 pair 模式下，使用配对 z-score 而非多因子 composite
+                use_pair = (
+                    signal_layer is not None
+                    and signal_layer.is_pair_trading_source()
+                )
                 for sym in state.collected_symbols_set:
-                    signals[sym] = scoring_engine.compute_composite_score(sym)
+                    if use_pair:
+                        pair_z = signal_layer.get_pair_cross_section_scores(
+                            sym, scoring_engine._pair_ctx
+                        )
+                        signals[sym] = float(np.clip(pair_z, -1.0, 1.0))
+                    else:
+                        signals[sym] = scoring_engine.compute_composite_score(sym)
                 _logger.debug("调仓日 %s 综合得分: %s", current_date, signals)
 
                 risk_estimates: Dict[str, float] = {}
@@ -812,7 +847,18 @@ class PyBrokerExecutorBuilder:
                 return
 
             target_w = state.target_weights.get(symbol, 0.0)
-            score = scoring_engine.compute_composite_score(symbol)
+            # ── 方向三：pair signal 阈值判断（2026-06-20 修复） ──
+            # 当 signal_abstraction 在 pair 模式下，target_weights 已由 pair z-score 推导
+            # （line 818 portfolio_manager.allocate_weights），使用 target_w 自身的归一化幅度
+            # 作为 entry threshold 判断，避免再次调用多因子 composite_score 覆盖 pair 信号。
+            use_pair_threshold = (
+                signal_layer is not None
+                and signal_layer.is_pair_trading_source()
+            )
+            if use_pair_threshold:
+                score = abs(target_w)
+            else:
+                score = scoring_engine.compute_composite_score(symbol)
             if abs(score) < entry_threshold:
                 target_w = 0.0
 

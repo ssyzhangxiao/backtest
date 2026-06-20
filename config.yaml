@@ -48,8 +48,11 @@ backtest:
 symbols:
 - SHFE.AL
 - SHFE.CU
-- CZCE.FG
 - SHFE.RU
+- SHFE.RB
+- SHFE.HC
+- DCE.M
+- CZCE.FG
 - DCE.PP
 - CZCE.CF
 factor_weights:
@@ -58,6 +61,35 @@ factor_weights:
   mean_reversion: 0.2
   vol_breakout: 0.2
   composite_resonance: 0.2
+# ── 四因子 CTA 升级（2026-06-19）──
+# 启用后：仅保留动量(donchian_breakout) + 期限结构(carry) 两个核心 CTA 策略
+# 配合 basis_momentum / receipt_change 组成四因子融合
+four_factor:
+  enabled: true
+  weights:
+    donchian_breakout: 0.35    # 动量
+    carry: 0.30                # 期限结构
+    basis_momentum: 0.35       # 基差动量
+    receipt_change: 0.0        # 2026-06-19 归零（akshare 2024+ 不可用）
+  basis_window: 20             # 基差动量窗口
+  receipt_window: 20           # 仓单变化率窗口
+  receipt_cache_dir: data/receipt_cache
+  fallback_weights_3factor:    # 仓单缺失时回退权重
+    donchian_breakout: 0.35
+    carry: 0.30
+    basis_momentum: 0.35
+  fallback_weights_2factor:    # 基差+仓单均缺失
+    donchian_breakout: 0.55
+    carry: 0.45
+
+# 仓单数据源配置（2026-06-19 三层架构）
+receipt:
+  cache_dir: data/receipt_cache
+  enable_online: false           # 沙盒默认 false，生产环境 true
+  request_interval_min: 1.0      # 反爬虫：最小请求间隔（秒）
+  request_interval_max: 4.0      # 反爬虫：最大请求间隔（秒）
+  retry_times: 3                 # 5xx/429 重试次数
+  cache_ttl_days: 7              # 缓存有效期（天）
 strategies:
 - name: trend
   params:
@@ -81,6 +113,25 @@ strategies:
     entry_threshold: 0.02
     top_n: 3
     rebalance_days: 1
+# ── CTA 合成策略（2026-06-19 起，仅保留动量+期限结构）──
+# TSI / Pair / Momentum_MA 已验证为噪音，从合成中移除
+# vol_mean_reversion 不参与四因子融合（保留代码，逻辑由"基差动量"部分覆盖）
+cta_strategies:
+- donchian_breakout
+- carry
+- basis_momentum
+- receipt_change
+# 完整 CTA 策略列表（仅用于单独实验，不参与四因子融合）
+cta_strategies_full:
+- donchian_breakout
+- carry
+- vol_mean_reversion
+- momentum_ma
+- tsi_garch
+- pair_trading
+- oi_signal
+- basis_momentum
+- receipt_change
 risk_management:
   stop_loss_pct: 0.025
   max_drawdown_pct: 0.2

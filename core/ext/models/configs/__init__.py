@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+import os
 import yaml
 from loguru import logger
 
@@ -51,7 +52,7 @@ MLP_DEFAULT_CONFIG: Dict[str, Any] = {
 
 def load_model_config(
     model_type: str,
-    yaml_path: str = "config.yaml",
+    yaml_path: Optional[str] = None,
     overrides: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """加载模型配置（分层合并）。
@@ -60,12 +61,15 @@ def load_model_config(
 
     Args:
         model_type: "lgbm" 或 "mlp"
-        yaml_path: 配置文件路径
+        yaml_path: 配置文件路径。优先级：参数 > 环境变量 MODEL_CONFIG_PATH > "config.yaml"
         overrides: 运行时覆盖
 
     Returns:
         合并后的配置字典
     """
+    # 2026-06-20：支持 MODEL_CONFIG_PATH 环境变量覆盖默认配置路径
+    if yaml_path is None:
+        yaml_path = os.environ.get("MODEL_CONFIG_PATH", "config.yaml")
     # Layer 1: 默认
     defaults_map = {
         "lgbm": LGBM_DEFAULT_CONFIG,

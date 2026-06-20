@@ -1,6 +1,6 @@
 """本地 CSV 数据源适配器（规则21）。
 
-内部委托 core.data_loader.DataLoader(data_source="csv")，不重写数据加载逻辑（规则21.4）。
+内部委托 core.data.data_loader.DataLoader(data_source="csv")，不重写数据加载逻辑（规则21.4）。
 
 依赖：无（核心 requirements.txt 即可）
 按需安装：核心包已包含
@@ -13,7 +13,9 @@ from typing import List, Optional
 
 import pandas as pd
 
-from core.data_loader import DataLoader
+# 2026-06-20：使用完整模块路径 core.data.data_loader（替代 core.data_loader 顶层 re-export），
+# 避免依赖 core/__init__.py 的间接导出，更明确模块归属。
+from core.data.data_loader import DataLoader
 from core.ext.adapters.base import DataSourceAdapter
 from core.ext.adapters.factory import register_adapter
 
