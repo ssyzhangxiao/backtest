@@ -1,6 +1,6 @@
-"""统一 CLI 入口（规则21）。
+"""统一 CLI 入口（规则17.2）。
 
-提供 `quant-system` 命令聚合 3 个官方入口的功能（不删除原 run_*.py，规则20）：
+提供 `quant-system` 命令聚合 3 个官方入口的功能（不删除原 run_*.py，规则17.2.2）：
 
     quant-system backtest  --experiment e1
     quant-system optimize  --strategy trend

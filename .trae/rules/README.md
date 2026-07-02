@@ -58,11 +58,10 @@
 | 7 | 文件行数限制 | [01-basics/07-file-limit.md](./01-basics/07-file-limit.md) |
 | 8 | 命名必须与功能一致 | [01-basics/08-naming.md](./01-basics/08-naming.md) |
 | 16 | 模块目录结构 — 职责单一，接口清晰 | [01-basics/16-directory.md](./01-basics/16-directory.md) |
-| 17 | 不重复造轮子 — 优先调用公共系统 | [01-basics/17-common-systems.md](./01-basics/17-common-systems.md) |
+| 17 | 不重复造轮子 — 优先调用公共系统 + 根目录脚本收敛 | [01-basics/17-common-systems.md](./01-basics/17-common-systems.md) |
 | 18 | Pipeline 编排器 — 声明式调用 | [01-basics/18-pipeline.md](./01-basics/18-pipeline.md) |
 | 19 | 依赖方向检查 — 禁止反向依赖 | [01-basics/19-dependencies.md](./01-basics/19-dependencies.md) |
-| 20 | 根目录脚本迁移 — run_*.py 必须收敛到 Pipeline | [01-basics/20-root-scripts-migration.md](./01-basics/20-root-scripts-migration.md) |
-| 21 | 扩展目录 ext/ — 借鉴 QuantML-Qlib 按需加载 + 工厂注册 | [01-basics/21-ext-directory.md](./01-basics/21-ext-directory.md) |
+| 21 | 扩展目录 ext/ — 按需加载 + 工厂注册 + 目录迁移 | [01-basics/21-ext-directory.md](./01-basics/21-ext-directory.md) |
 | 32 | 统一因子池架构 — 所有信号单入口，抽象层按模式提取 | [01-basics/32-factor-pool.md](./01-basics/32-factor-pool.md) |
 
 ### 回测引擎

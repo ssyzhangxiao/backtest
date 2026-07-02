@@ -255,11 +255,11 @@ class BacktestConfig:
         从 YAML 文件加载配置（支持分层覆盖）。
 
         规则2：config.yaml 是单一数据源，BacktestConfig 必须与 yaml 完全同步。
-        规则23：分层配置 — 优先级 YAML < env vars < overrides。
+        规则2.2：分层配置 — 优先级 YAML < env vars < overrides。
 
         P0 整改：补充 top_n_symbols / weight_method / min_position_pct 字段读取。
         P1-1 整改：factor_weights 缺省时记 warning，使用空字典（不再用 DEFAULT_FACTOR_WEIGHTS）。
-        规则23: 集成 LayeredConfigLoader，支持 env vars + runtime overrides。
+        规则2.2: 集成 LayeredConfigLoader，支持 env vars + runtime overrides。
 
         Args:
             path: YAML 文件路径
@@ -307,7 +307,12 @@ class BacktestConfig:
         cta_strats_full = raw.get("cta_strategies_full", []) or []
         # 若未配置 cta_strategies 但启用了四因子 → 注入默认 4 因子
         if not cta_strats and ff_cfg.get("enabled", False):
-            cta_strats = ["donchian_breakout", "carry", "basis_momentum", "receipt_change"]
+            cta_strats = [
+                "donchian_breakout",
+                "carry",
+                "basis_momentum",
+                "receipt_change",
+            ]
 
         # 仓单数据源配置（2026-06-19 三层架构）
         rcpt_cfg = raw.get("receipt", {}) or {}
@@ -341,14 +346,20 @@ class BacktestConfig:
             four_factor_weights=dict(ff_weights),
             four_factor_basis_window=int(ff_cfg.get("basis_window", 20)),
             four_factor_receipt_window=int(ff_cfg.get("receipt_window", 20)),
-            four_factor_receipt_cache_dir=str(ff_cfg.get("receipt_cache_dir", "data/receipt_cache")),
+            four_factor_receipt_cache_dir=str(
+                ff_cfg.get("receipt_cache_dir", "data/receipt_cache")
+            ),
             four_factor_fallback_3factor=dict(ff_fallback_3),
             four_factor_fallback_2factor=dict(ff_fallback_2),
             # 仓单数据源配置（2026-06-19）
             receipt_cache_dir=str(rcpt_cfg.get("cache_dir", "data/receipt_cache")),
             receipt_enable_online=bool(rcpt_cfg.get("enable_online", False)),
-            receipt_request_interval_min=float(rcpt_cfg.get("request_interval_min", 1.0)),
-            receipt_request_interval_max=float(rcpt_cfg.get("request_interval_max", 4.0)),
+            receipt_request_interval_min=float(
+                rcpt_cfg.get("request_interval_min", 1.0)
+            ),
+            receipt_request_interval_max=float(
+                rcpt_cfg.get("request_interval_max", 4.0)
+            ),
             receipt_retry_times=int(rcpt_cfg.get("retry_times", 3)),
             receipt_cache_ttl_days=int(rcpt_cfg.get("cache_ttl_days", 7)),
             cta_strategies=list(cta_strats),
