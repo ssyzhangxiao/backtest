@@ -164,7 +164,7 @@ OOS (2021-2025) 同样验证：b=0.3 p=0.4 仍进 top-5（sharpe 0.0460, mdd -2.
 | `core/config/backtest_config.py` | 新增 `hybrid_blend_method` / `xs_*` 字段 |
 | `config.yaml` | 默认值更新为推荐配置（base=0.3, p=0.4） |
 | `tests/unit/test_factor_pool.py` | 8 个 HYBRID_DYNAMIC 单元测试 |
-| `scripts/sweep_cta_hybrid_dynamic.py` | 2D 参数 sweep（35 dynamic + 3 linear） |
-| `scripts/analyze_dynamic_sweep.py` | 按 sharpe/mdd 排序的对比分析 |
+| `scripts/experiments/sweep_cta_hybrid_dynamic.py` | 2D 参数 sweep（35 dynamic + 3 linear） |
+| `scripts/analysis/analyze_dynamic_sweep.py` | 按 sharpe/mdd 排序的对比分析 |
 
 **回归**: `pytest tests/unit/test_factor_pool.py` → 36 passed
